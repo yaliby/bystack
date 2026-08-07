@@ -1,0 +1,68 @@
+"""Agent session port.
+
+The seam between "a connection exists" and "a host is being managed".
+
+Everything above this port -- the provider, ingest, command dispatch -- works
+against an :class:`AgentSession` and never against a WebSocket. That is what
+lets the entire agent path be tested against a synthetic agent with no socket,
+no TLS and no Go binary anywhere, which matters because the interesting
+failures (an agent that disconnects mid-command, a delta naming an id we never
+saw, a reconnect that races a dispatch) are the ones no live daemon will
+produce on demand.
+
+It is also the seam ADR-0009's reversal condition needs. If the transport ever
+moves to gRPC, an implementation of this protocol changes and nothing above it
+does -- which is the concrete form of "the schema is the contract and the
+transport is a footnote".
+
+Nothing in this module may import anything outside the kernel.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+
+class AgentDisconnected(ConnectionError):
+    """The agent went away. Routine, not exceptional.
+
+    A managed host closing its laptop lid, rebooting, or losing its uplink is
+    the normal operating state of the fleets this targets. Callers turn this
+    into DEGRADED and wait; nothing treats it as an error worth alarming on.
+    """
+
+
+@runtime_checkable
+class AgentSession(Protocol):
+    """One live connection to one agent."""
+
+    @property
+    def engine_id(self) -> str:
+        """The host's Docker Engine ID, as advertised in ``Hello``.
+
+        Under ADR-0011 this is also the agent's identity, bound into its
+        client certificate -- "which host is this" and "which agent is this"
+        are the same question with the same answer.
+        """
+        ...
+
+    @property
+    def read_only(self) -> bool:
+        """Whether the agent refuses mutations regardless of what we send.
+
+        Advertised rather than inferred, so the UI can disable actions instead
+        of offering them and failing. The Controller enforces its own
+        read-only setting separately; both must permit an operation for it to
+        happen, and neither is a substitute for the other.
+        """
+        ...
+
+    async def send(self, envelope: object) -> None:
+        """Push one frame to the agent.
+
+        Raises :class:`AgentDisconnected` if the connection is gone. Must not
+        block indefinitely on a peer that has stopped reading -- the same
+        bounded-queue rule the browser stream follows applies here in the
+        other direction.
+        """
+        ...

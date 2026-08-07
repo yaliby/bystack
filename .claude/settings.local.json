@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk '{print $1}')",
+      "Bash(ip route *)",
+      "Bash(pkill -f \"vite\")",
+      "Bash(npm run *)",
+      "Bash(curl -s -o /dev/null -w \"Status: %{http_code}\\\\n\" http://192.168.1.62:5173/)",
+      "Bash(sleep 2; ss -ltn | grep 5173; cat /tmp/vite-server.log | tail -20)",
+      "Bash(pkill -f \"npm run dev\")",
+      "Bash(curl -s -m 3 http://192.168.1.62:5173/)",
+      "Bash(systemctl is-active *)",
+      "Bash(sudo -n firewall-cmd --list-ports)",
+      "Bash(firewall-cmd --list-ports)",
+      "Bash(curl -s -m 5 -o /dev/null -w \"%{http_code}\\\\n\" http://192.168.1.62:5173/)",
+      "Bash(curl -s -m 5 http://192.168.1.62:5173/api/v1/healthz)"
+    ]
+  }
+}

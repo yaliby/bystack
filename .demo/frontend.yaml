@@ -1,0 +1,22 @@
+# Demo stack: edge → web → app. Safe to delete.
+services:
+  edge:
+    image: nginx:alpine
+    ports:
+      - "8443:443"
+    depends_on:
+      - web
+  web:
+    image: nginx:alpine
+    ports:
+      - "18080:80"
+    depends_on:
+      - app
+  app:
+    image: traefik/whoami
+    ports:
+      - "13000:80"
+  app-2:
+    image: traefik/whoami
+    depends_on:
+      - app

@@ -1,0 +1,49 @@
+[package]
+name = "bystack-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "ByStack agent: observes one Docker engine and reports to the Controller"
+
+[dependencies]
+# Current-thread runtime only. The whole workload is one connection, one
+# socket stream and a timer; a work-stealing multi-thread scheduler would add
+# a thread per core and the synchronisation to go with it, to run a program
+# that is blocked in epoll almost all of the time.
+tokio = { version = "1", default-features = false, features = [
+    "rt", "macros", "net", "io-util", "time", "sync", "signal",
+] }
+
+# HTTP to the Docker socket. Hand-rolling this would save perhaps 700 KB, and
+# would put a hand-rolled chunked-transfer decoder on the path that carries
+# every event -- the one part of the agent whose correctness the entire
+# real-time story depends on. Not the place to save space.
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+
+# Docker's JSON. Only the fields we actually read are declared, so a daemon
+# adding fields costs nothing.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+prost = { version = "0.13", default-features = false, features = ["std", "derive"] }
+
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[build-dependencies]
+# Reads the checked-in descriptor set rather than shelling out to protoc, so
+# building the agent needs nothing but a Rust toolchain. That matters most for
+# cross-compilation: otherwise protoc would have to exist in every one of the
+# target toolchains.
+prost-build = { version = "0.13", default-features = false }
+
+[profile.release]
+# The agent runs on hardware the user bought for something else, multiplied by
+# the fleet. Every one of these is worth its compile time.
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,162 @@
+# ADR-0012 — Operations: lifecycle only, logical targets, no optimistic updates
+
+**Status:** Accepted
+**Relates to:** [ADR-0001](../../ARCHITECTURE.md) (durable categories),
+[ADR-0003](../../ARCHITECTURE.md) (provider partitions),
+[ADR-0008](0008-controller-agent-topology.md) (Controller/Agent split)
+
+---
+
+## Context
+
+Everything built until now discovers, correlates and displays. None of it
+*acts*. That is the difference between a control plane and a very good
+diagram, and the gap was closing on its own in the worst possible way: a
+restart button is six lines against the Engine API, and six lines is exactly
+short enough to be written in the route handler by whoever needs it first.
+
+The decisions below are the ones that are expensive to reverse afterwards.
+
+## Decision
+
+### 1. One choke point, above the routes
+
+Every operation passes through `CommandService`. The REST route parses and
+delegates; it decides nothing. Read-only enforcement, target resolution,
+fan-out, the target limit and audit all live in the service.
+
+This costs one indirection today, when there is exactly one caller. It buys
+the property that the *second* caller — a scheduler, a webhook, an
+alert-driven remediation, the agent command path from
+[ADR-0009](0009-agent-wire-protocol.md) — cannot be written in a way that
+forgets a check. A guarantee implemented in one route is not a guarantee, it
+is a habit.
+
+Read-only is checked **first**, before the target is even resolved. A
+read-only control plane must not be usable as an oracle for which URNs exist,
+and putting the cheapest check first is also what makes it obvious when
+someone reorders the block for readability.
+
+### 2. Commands never mutate the graph
+
+A `restart` returns without a single node having changed. The graph moves
+when the provider's watch observes the transition and publishes a delta.
+
+The cost is real and visible: for a second or two after a successful command
+the UI still shows the old state. The alternative — optimistically writing
+`restarting` into the store — buys that second back and hands over a control
+plane that displays states the infrastructure never reported. Every optimistic
+write is a claim we cannot verify, and the cases where it is wrong (the
+command succeeded but the container immediately died, the daemon accepted and
+then failed) are precisely the incidents the tool exists for.
+
+So the gap is made explicit instead of hidden. The UI captures the target's
+content revision at the moment the engine answers and shows
+*"Applied · waiting for discovery to confirm"* until that revision changes.
+If it never changes, it says so — which is a genuine diagnostic, because it
+means the host's event stream is gone.
+
+### 3. Targets are URNs, including logical ones
+
+An operator restarts *the `web` service*, not `container 3f2a…`. The
+Controller expands a service to the containers realizing it, and a stack
+through its services, by walking the same `contains` / `realized_by` edges the
+mapper declared.
+
+This is the payoff for the two-layer identity in ADR-0002 and it belongs in
+the Controller for the same reason mapping does: only the Controller holds the
+graph. A provider is never handed a URN it cannot act on directly.
+
+Expansion is **not** filtered by state. If a stack contains a stopped
+container, `stop` is dispatched to it too and the engine answers `304`, which
+we record as `noop`. Filtering in the service would create a second policy
+that can disagree with the engine, and skipping targets silently is how a
+"successful" stack restart leaves half a stack down.
+
+### 4. Reversible lifecycle transitions only
+
+`start`, `stop`, `restart`, `pause`, `unpause`, `kill`. No `remove`, no
+`prune`, no volume or image deletion.
+
+Not because they are hard — each is one more HTTP call — but because of what
+they require. A destructive operation is only defensible if the platform can
+answer *who deleted the database volume, and when*. Today the audit log is an
+in-memory ring buffer that a restart erases, and there is no authentication,
+so every entry is attributed to `anonymous`.
+
+Destructive operations, durable audit and authentication ship together or not
+at all. Shipping the fun third of that is how a platform acquires a
+capability it cannot account for.
+
+### 5. Audit is written before dispatch, and includes refusals
+
+The entry is recorded when the command is authorized and finalized when it
+returns. A command that hangs, or a process that dies mid-operation, still
+leaves evidence that it was attempted — and "what was tried" is the only
+question an audit log is ever asked during an incident.
+
+Refusals are recorded too. *"The restart did not happen because the platform
+is read-only"* is the single most useful line the log can contain during the
+post-mortem of an outage a restart would have ended.
+
+The client cannot supply the actor. An attacker-chosen name sitting next to a
+real operation is worse than no attribution, because it looks like evidence.
+The field appears when authentication does, populated from the session.
+
+### 6. Provider capability is a protocol, not a flag
+
+A provider that implements `supported_commands` and `execute` is writable; one
+that does not is read-only. There is no registration step and no
+`can_execute = False` to remember.
+
+Prometheus, Grafana and every other observational provider are therefore
+read-only by construction — which is the correct default, obtained by writing
+nothing. The partition rule from ADR-0003 extends unchanged: a node is only
+ever operated on by the provider that discovered it, because `node.source` is
+what selects the executor.
+
+### 7. Which commands apply is decided server-side
+
+`unpause` applies to paused containers, `start` to stopped ones. That policy
+lives in the Docker provider, which owns the state vocabulary, and the UI
+fetches it from `GET /commands/actions`.
+
+A copy of it in TypeScript would be correct the day it was written and wrong
+by the release that adds a state — and wrong in the direction of offering
+buttons that cannot work. The same endpoint reports *why* there are no
+actions, so read-only mode and a disconnected host are explained rather than
+rendering as an inexplicably empty panel.
+
+A disconnected provider reports no available commands at all. During an
+outage "restart it" is exactly what an operator will try, so the answer needs
+to be honest before the click rather than after a slow timeout.
+
+## Consequences
+
+- The UI has a visible lag between a command succeeding and the topology
+  reflecting it. This is deliberate, labelled, and the price of never
+  displaying an unverified state.
+- The audit trail does not survive a restart. This is why nothing destructive
+  exists yet, and it is the constraint that unblocks the rest of §4.
+- One in-flight limit (`MAX_TARGETS = 64`) refuses rather than truncates. A
+  partially-applied stack operation is the worst outcome available here.
+- `timeout=0` is a real request — `docker stop -t 0` — and is read with
+  `is None`, not truthiness. Read with `or`, the one operator who explicitly
+  asked for no grace period silently gets ten seconds.
+
+## Alternatives considered
+
+**Accept-then-poll (`202` plus a job id).** Rejected. These operations take
+seconds and the operator is watching. It would add a job store, a status
+endpoint and a class of orphaned-job bugs to buy nothing. The operation that
+genuinely needs asynchrony — a scheduled or fleet-wide rollout — is a
+different feature with a different shape, and it can have its own.
+
+**Optimistic graph updates with reconciliation.** Rejected; see §2. The
+failure mode is silent and appears only during incidents.
+
+**Executing commands over a fresh connection per request.** Rejected. It
+would open a second SSH tunnel per host at the moment an operator is already
+waiting, to reach a daemon the informer is demonstrably already connected to.
+Commands borrow the informer's client; when there is none, the command is
+cleanly refused rather than dialling out mid-incident.

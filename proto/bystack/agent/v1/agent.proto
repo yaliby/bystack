@@ -1,0 +1,307 @@
+// The contract between the Controller and the Agent.
+//
+// This file is the interface. The transport underneath it (WebSocket today)
+// is an implementation detail either side may change without the other
+// noticing -- see ADR-0009, which also records the conditions under which we
+// would move to gRPC. The `.proto` would not change if we did.
+//
+// Two rules govern edits here:
+//
+//   1. **Explicit typed fields, never an opaque blob.** Adding a field to
+//      `mapper.py` requires adding it here, so the failure where the Agent
+//      trims away a field the Controller quietly needed cannot happen. It
+//      costs a three-file change per field and converts a silent runtime
+//      failure -- an attribute that is simply always null in the UI -- into
+//      one that surfaces at the seam.
+//
+//   2. **Never renumber, never reuse.** ADR-0008 makes mixed-version fleets a
+//      normal operating state, not a migration window: a Controller will be
+//      talking to last quarter's agents indefinitely. Retire a field with
+//      `reserved`, never by recycling its tag.
+
+syntax = "proto3";
+
+package bystack.agent.v1;
+
+option go_package = "github.com/bystack/bystack/agent/internal/wire/v1;wirev1";
+
+// ---------------------------------------------------------------------------
+// Framing
+// ---------------------------------------------------------------------------
+
+// Every frame on the wire, in both directions.
+//
+// One envelope type rather than a message per endpoint, because the transport
+// is a single bidirectional stream and the receiver needs one decode before it
+// can dispatch.
+message Envelope {
+  // Monotonic per connection and per direction. Its job is diagnostics, not
+  // delivery: WebSocket over TCP does not reorder or drop within a
+  // connection, and a gap means the peer has a bug worth finding rather than
+  // a retransmission worth requesting.
+  uint64 seq = 1;
+
+  oneof payload {
+    Hello hello = 10;
+    HelloAck hello_ack = 11;
+    Sync sync = 12;
+    Delta delta = 13;
+
+    Command command = 20;
+    CommandResult command_result = 21;
+    ResyncRequest resync_request = 22;
+  }
+}
+
+// Which part of the host a frame describes.
+//
+// Maps directly onto the store's `reconcile(kinds=...)` parameter, so a
+// container frame can claim the whole container slice without saying anything
+// about networks. Same scoping rule the informer already used, now on the
+// wire.
+enum Slice {
+  SLICE_UNSPECIFIED = 0;
+  SLICE_CONTAINER = 1;
+  SLICE_NETWORK = 2;
+  SLICE_VOLUME = 3;
+  SLICE_IMAGE = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Connection lifecycle
+// ---------------------------------------------------------------------------
+
+// First frame the Agent sends on every connection.
+message Hello {
+  string agent_version = 1;
+
+  // `GET /info` -> `.ID`. Also the agent's identity, bound into its client
+  // certificate at enrollment -- "which host is this" and "which agent is
+  // this" are the same question with the same answer (ADR-0011).
+  string engine_id = 2;
+
+  EngineInfo engine = 3;
+
+  // The Agent's own read-only setting, advertised rather than inferred. The
+  // Agent refuses mutations regardless of what arrives on the wire; telling
+  // the Controller lets the UI disable the actions instead of offering them
+  // and failing (ARCHITECTURE section 9).
+  bool read_only = 4;
+
+  // What this agent build can do. Present so a Controller can talk to an
+  // older agent without a version table: absence of a capability is the
+  // answer, and it is the same answer for "too old" and "compiled out".
+  repeated string capabilities = 5;
+}
+
+// The Controller's answer. Sent before any command is dispatched.
+message HelloAck {
+  // Changes when the Controller loses its in-memory state. An agent that sees
+  // a new epoch knows its partition was dropped and re-sends a full Sync
+  // without waiting to be asked.
+  string controller_epoch = 1;
+
+  // Seconds between agent-side resyncs. Controller-set so the fleet can be
+  // retuned without redeploying agents.
+  uint32 resync_interval = 2;
+
+  bool accepted = 3;
+
+  // Populated only when `accepted` is false. The agent logs it and stops
+  // retrying in a hot loop -- "certificate revoked" is not a condition that
+  // improves by reconnecting.
+  string reason = 4;
+
+  repeated string feature_flags = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Observations
+// ---------------------------------------------------------------------------
+
+// Complete contents of a slice, payloads included.
+//
+// Sent for every slice at the start of every connection and after a resync
+// request. Controller: `reconcile(kinds=slice)`.
+message Sync {
+  Slice slice = 1;
+  repeated Entity entities = 2;
+}
+
+// Complete *membership* of a slice; payloads only where the content hash
+// moved.
+//
+// This is the frame that makes the design work. A delta carrying only changed
+// entities cannot be reconciled -- "absent" would mean "unchanged", and one
+// reconcile would delete every stable container on the host. So `ids` always
+// carries every entity currently in the slice, and `changed` carries payloads
+// for the subset whose hash moved.
+//
+// Ids are ~64 bytes and payloads ~1.8 KB, so the Controller can run a full
+// authoritative reconcile on every frame at delta cost. Deletions need no
+// separate signal: an id that stops appearing is gone.
+message Delta {
+  Slice slice = 1;
+  repeated string ids = 2;
+  repeated Entity changed = 3;
+}
+
+message Entity {
+  string id = 1;
+  oneof body {
+    Container container = 2;
+    Network network = 3;
+    Volume volume = 4;
+    Image image = 5;
+  }
+}
+
+// -> mapper.map_host
+message EngineInfo {
+  string id = 1;
+  string name = 2;
+  string server_version = 3;
+  string operating_system = 4;
+  string kernel_version = 5;
+  string architecture = 6;
+  int32 ncpu = 7;
+  int64 mem_total = 8;
+  int32 containers_running = 9;
+  int32 containers_total = 10;
+}
+
+// -> mapper.map_container
+message Container {
+  string id = 1;
+  repeated string names = 2;
+  string image = 3;
+  string image_id = 4;
+  string command = 5;
+  int64 created = 6;
+
+  // The closed state vocabulary -- `running`, `paused`, `exited`. Hashed.
+  string state = 7;
+
+  // Docker's rendered status line: "Up 3 hours", "Exited (137) 3 seconds ago".
+  //
+  // **Excluded from the agent's content hash.** It changes on a wall clock
+  // rather than on a state change, so hashing it would make every container
+  // look different on every List and put the full payload set on the network
+  // every resync, per host, forever. The failure mode is not an error: it is
+  // a system that works perfectly and costs 100x more than it should.
+  //
+  // Carried as a field anyway, because the Controller extracts the exit code
+  // from it -- and that is only meaningful at the moment `state` changes,
+  // which *is* hashed. A container that exits is re-sent and brings the
+  // string with it.
+  string status_text = 8;
+
+  map<string, string> labels = 9;
+  repeated Port ports = 10;
+  repeated NetworkAttachment networks = 11;
+  repeated Mount mounts = 12;
+}
+
+message Port {
+  uint32 private_port = 1;
+  // Zero means unpublished. A port reachable only from inside the engine is
+  // not a relationship that crosses out of it, and the mapper drops it.
+  uint32 public_port = 2;
+  string protocol = 3;
+  string host_ip = 4;
+}
+
+message NetworkAttachment {
+  string network_id = 1;
+  string name = 2;
+  string ipv4 = 3;
+  repeated string aliases = 4;
+}
+
+message Mount {
+  // `volume` or `bind`. Bind mounts are real dependencies but not entities the
+  // engine owns, so the Controller keeps them as container attributes rather
+  // than inventing a node for them.
+  string type = 1;
+  string name = 2;
+  string destination = 3;
+  string mode = 4;
+  bool rw = 5;
+}
+
+// -> mapper.map_network
+message Network {
+  string id = 1;
+  string name = 2;
+  string driver = 3;
+  string scope = 4;
+  bool internal = 5;
+  bool attachable = 6;
+  bool ingress = 7;
+  repeated string subnets = 8;
+  map<string, string> labels = 9;
+}
+
+// -> mapper.map_volume
+message Volume {
+  string name = 1;
+  string driver = 2;
+  string mountpoint = 3;
+  string scope = 4;
+  string created_at = 5;
+  map<string, string> labels = 6;
+}
+
+// -> mapper.map_image
+message Image {
+  string id = 1;
+  repeated string repo_tags = 2;
+  repeated string repo_digests = 3;
+  int64 size = 4;
+  int64 created = 5;
+  map<string, string> labels = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+message Command {
+  // Correlates the CommandResult. This field and the pending-command map on
+  // each side are the price of not using gRPC, which would have generated the
+  // correlation for us -- about 60 lines per side, against 8 MB of agent
+  // binary. See ADR-0009.
+  string command_id = 1;
+
+  // `start` | `stop` | `restart` | `pause` | `unpause` | `kill`. A string, not
+  // an enum, so a Controller can dispatch a verb an older agent will reject
+  // cleanly rather than one that decodes as UNSPECIFIED and is silently
+  // treated as something else.
+  string verb = 2;
+
+  // Docker's own id for the target. The Agent does not know the URN scheme.
+  string target_id = 3;
+
+  map<string, string> args = 4;
+}
+
+message CommandResult {
+  string command_id = 1;
+  bool ok = 2;
+  string detail = 3;
+
+  // True when the target was already in the requested state -- Docker's 304.
+  // Distinct from `ok` because a restart that changed nothing is not a
+  // restart that worked.
+  bool unchanged = 4;
+}
+
+// Controller -> Agent: re-List and re-hash these slices.
+//
+// Repairs the *Agent's* hash map, which after ADR-0009 is the only thing that
+// can be wrong; the Controller's graph is reconciled by every frame. If the
+// hashes agree the resulting Delta is identical to a steady-state one and
+// costs the same zero bytes.
+message ResyncRequest {
+  repeated Slice slices = 1;
+}

@@ -1,0 +1,20 @@
+# Demo stack: api + cache, with a stopped worker and a one-shot migrate. Safe to delete.
+services:
+  api:
+    image: traefik/whoami
+    ports:
+      - "18081:80"
+    depends_on:
+      - cache
+  cache:
+    image: redis:7-alpine
+    ports:
+      - "16379:6379"
+  worker:
+    image: nginx:alpine
+    restart: "no"
+    command: ["sh", "-c", "sleep 2; exit 1"]
+  migrate:
+    image: nginx:alpine
+    restart: "no"
+    command: ["sh", "-c", "sleep 1"]
