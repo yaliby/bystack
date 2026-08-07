@@ -4,35 +4,6 @@
 # discovered, always. Manual configuration exists as optional metadata, never as
 # a source of structure.
 
-hosts:
-  # The local engine.
-  - id: laptop
-    transport:
-      type: local_socket
-      path: /var/run/docker.sock
-
-  # A remote engine over SSH. The default for remote hosts: no PKI to manage,
-  # and no Docker daemon exposed on the network. The Docker socket is
-  # root-equivalent, so not publishing it is worth a great deal.
-  - id: lab-01
-    transport:
-      type: ssh_tunnel
-      host: 10.0.0.5
-      port: 22
-      username: ops
-      # client_key: ~/.ssh/id_ed25519   # omit to use the SSH agent
-      # known_hosts: ~/.ssh/known_hosts # omit to use the default files
-      # insecure_skip_host_key_check: false   # development only; accepts MITM
-      remote_socket: /var/run/docker.sock
-
-    # Seconds between full reconciles. This is the safety net for events the
-    # daemon dropped -- not a polling interval. Real-time updates come from the
-    # event stream; this only repairs what that stream missed.
-    resync_interval: 300
-
-  - id: retired-node
-    enabled: false
-
 # Refuse every mutating operation. Secure default: opt out deliberately.
 #
 # Set to false to enable start / stop / restart / pause / unpause / kill on
@@ -46,13 +17,12 @@ hosts:
 # would suggest a control that is not there. See docs/adr/0012.
 read_only: true
 
-# Where agents dial in. Says far less than `hosts:` above, because agents
-# arrive rather than being reached -- there is nothing here about addresses,
-# credentials or transports. That whole category of configuration is what
-# ADR-0008 deleted.
+# Where agents dial in. This is the entire discovery configuration, because
+# agents arrive rather than being reached -- there is nothing here about
+# addresses, credentials or transports. That whole category of configuration
+# is what ADR-0008 deleted, and `hosts:` is now a hard error if present.
 #
-# Both discovery paths run during the migration. A host managed by an agent
-# does not appear under `hosts:` at all; it registers itself on first
+# A managed host is not listed anywhere: it registers itself on first
 # connection and is keyed by its Docker Engine ID.
 agents:
   # Off by default. mTLS enrollment (ADR-0011) is not built yet, so this
@@ -64,11 +34,11 @@ agents:
   # acceptable on a trusted network, never as a shipped default.
   auto_approve: false
 
-  # Seconds between agent-side resyncs, sent to the agent in HelloAck. Three
-  # times the agentless interval: the agent reads a unix socket on the same
-  # kernel, so there is no network to lose. This now defends only against
-  # agent-side hash map bugs, and at steady state it puts zero bytes on the
-  # wire, because nothing changed and therefore nothing is sent.
+  # Seconds between agent-side resyncs, sent to the agent in HelloAck. Long,
+  # because the agent reads a unix socket on the same kernel and there is no
+  # network to lose. This defends only against agent-side hash map bugs, and
+  # at steady state it puts zero bytes on the wire, because nothing changed
+  # and therefore nothing is sent.
   resync_interval: 900
 
 api:

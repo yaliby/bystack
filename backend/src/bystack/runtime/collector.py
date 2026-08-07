@@ -11,14 +11,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from bystack.config import HostConfig, Settings
+from bystack.config import Settings
 from bystack.core.graph.store import GraphStore
 from bystack.core.identity import engine_scope
 from bystack.core.ports.eventbus import EventBus
 from bystack.core.ports.provider import Provider, ProviderHealth
-from bystack.infra.transports.registry import build_transport
 from bystack.providers.agent.provider import AgentProvider
-from bystack.providers.docker.provider import DockerProvider
 from bystack.runtime.writer import PartitionWriter
 
 log = logging.getLogger(__name__)
@@ -36,11 +34,15 @@ class Collector:
 
     @classmethod
     def from_settings(cls, settings: Settings, store: GraphStore, bus: EventBus) -> Collector:
-        collector = cls(store, bus)
-        for host in settings.hosts:
-            if host.enabled:
-                collector.add_docker_host(host)
-        return collector
+        """A Collector with no providers at all.
+
+        There is nothing left to build from configuration: hosts are not
+        configured any more, they arrive. Every provider in this registry is
+        created by an agent connecting (`agent_provider`), which is why this
+        no longer reads `settings` for anything.
+        """
+        del settings
+        return cls(store, bus)
 
     def agent_provider(self, engine_id: str, *, create: bool) -> AgentProvider | None:
         """The provider for an enrolled host, optionally adopting a new one.
@@ -95,10 +97,9 @@ class Collector:
     def register(self, provider: Provider) -> Provider:
         """Adopt a provider built elsewhere.
 
-        The generic path, of which :meth:`add_docker_host` is one caller. It
-        exists because the provider set stops being config-derived under the
-        agent model: agents dial in at runtime and their providers are
-        created when they enroll, not when the file is read.
+        The provider set is not config-derived under the agent model: agents
+        dial in at runtime and their providers are created when they enroll,
+        not when the file is read.
         """
         if provider.id in self._providers:
             raise ValueError(f"duplicate provider id {provider.id!r}")
@@ -108,17 +109,6 @@ class Collector:
     def writer_for(self, source: str) -> PartitionWriter:
         """A writer bound to one partition, and structurally to no other."""
         return PartitionWriter(self._store, self._bus, source)
-
-    def add_docker_host(self, host: HostConfig) -> Provider:
-        return self.register(
-            DockerProvider(
-                provider_id=host.id,
-                transport=build_transport(host.id, host.transport),
-                # Bound to this provider's partition, and to nothing else.
-                writer=self.writer_for(host.id),
-                resync_interval=host.resync_interval,
-            )
-        )
 
     async def start(self) -> None:
         """Start every provider concurrently.

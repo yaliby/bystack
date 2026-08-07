@@ -314,7 +314,6 @@ async def run(agent_binary: Path, port: int, keep_going: bool) -> int:
 
     app = create_app(
         Settings(
-            hosts=[],
             read_only=False,
             agents=AgentsConfig(enabled=True, auto_approve=True, resync_interval=60),
         )

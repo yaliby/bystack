@@ -12,22 +12,25 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from bystack.infra.transports.registry import TransportConfig
+#: What a `hosts:` block used to mean, and why it is now refused.
+#:
+#: `docs/MIGRATION.md` §6 asked for a hard error rather than a silent
+#: migration, and the reason is the whole point: a config that quietly
+#: degraded to "manage nothing" looks exactly like an empty cluster. An
+#: operator upgrading with a `hosts:` block would see a Controller that
+#: started cleanly, reported healthy, and discovered nothing at all.
+_HOSTS_REMOVED = """\
+`hosts:` is no longer supported. The Controller does not reach out to Docker
+sockets any more -- agents dial in (ARCHITECTURE.md section 1).
 
+Install an agent on each host listed there and enable the endpoint:
 
-class HostConfig(BaseModel):
-    """One managed Docker engine."""
+    agents:
+      enabled: true
 
-    id: str = Field(description="Stable local name; also the graph partition key")
-    transport: TransportConfig
-    resync_interval: float = Field(
-        default=300.0,
-        ge=10.0,
-        description="Seconds between full reconciles -- the safety net for dropped events",
-    )
-    enabled: bool = True
+See docs/MIGRATION.md for what moved and why."""
 
 
 class AgentsConfig(BaseModel):
@@ -83,18 +86,6 @@ class ApiConfig(BaseModel):
 
 
 class Settings(BaseModel):
-    hosts: list[HostConfig] = Field(default_factory=list)
-    """The agentless path. Being replaced, not yet removed.
-
-    `docs/MIGRATION.md` §6 is explicit that this survives until the Go agent
-    has been shown to produce an identical graph on the same host -- the old
-    implementation is the oracle the new one is checked against, and deleting
-    it first would leave nothing to check against. When it goes, a `hosts:`
-    block becomes a hard error naming that document, rather than a silent
-    migration: a config that quietly degraded to "manage nothing" looks
-    exactly like an empty cluster.
-    """
-
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     read_only: bool = Field(
@@ -103,13 +94,23 @@ class Settings(BaseModel):
     )
     log_level: str = "INFO"
 
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_removed_keys(cls, data: Any) -> Any:
+        # Before-mode, so this fires on the raw mapping. Pydantic ignores
+        # unknown keys by default, which is exactly the silent degradation
+        # MIGRATION section 6 asked us not to ship.
+        if isinstance(data, dict) and "hosts" in data:
+            raise ValueError(_HOSTS_REMOVED)
+        return data
+
     @classmethod
     def load(cls, path: str | Path) -> Settings:
         """Load from YAML, failing loudly on a malformed file.
 
-        No silent fallback to defaults: a typo in a transport block that
-        quietly degraded to "manage nothing" would look identical to an empty
-        cluster, and the user would have no way to tell.
+        No silent fallback to defaults: a typo in a config block that quietly
+        degraded to "manage nothing" would look identical to an empty cluster,
+        and the user would have no way to tell.
         """
         path = Path(path)
         if not path.exists():
@@ -123,7 +124,13 @@ class Settings(BaseModel):
 
     @classmethod
     def default(cls) -> Settings:
-        """Zero-config startup against the local engine."""
-        return cls.model_validate(
-            {"hosts": [{"id": "local", "transport": {"type": "local_socket"}}]}
-        )
+        """Zero-config startup: a Controller with nothing to manage yet.
+
+        It used to mean "discover the local engine", which the Controller can
+        no longer do -- it reaches no socket, local or remote. Hosts arrive by
+        installing an agent, and the endpoint they dial stays off until an
+        operator turns it on, because until mTLS lands (ADR-0011) it trusts
+        whoever reaches it. Defaulting it to on would be a Controller that
+        adopts the first thing to find the port.
+        """
+        return cls()

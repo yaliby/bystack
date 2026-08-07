@@ -24,11 +24,12 @@ Docker Engine ──► Agent (Rust) ─► mTLS stream ──► Controller ─
 ```
 
 The first slice was built agentless — the Controller opened an SSH tunnel per
-host and drove the remote socket itself. That model is being replaced; see
-[ADR-0008](docs/adr/0008-controller-agent-topology.md) for what it cost and
-[`docs/MIGRATION.md`](docs/MIGRATION.md) for what moves. **The domain kernel
-does not move**: identity, graph, store, delta and the Docker mapper are
-untouched.
+host and drove the remote socket itself. That model has been **replaced and
+deleted**; see [ADR-0008](docs/adr/0008-controller-agent-topology.md) for what
+it cost and [`docs/MIGRATION.md`](docs/MIGRATION.md) for what moved. **The
+domain kernel did not move**: identity, graph, store, delta and the Docker
+mapper are untouched, which is the claim the migration was designed to make
+true and the reason the pivot cost a fortnight rather than a rewrite.
 
 | Working now | Being built | Not built yet |
 |---|---|---|
@@ -47,20 +48,18 @@ Prometheus already collects is a **non-goal**, not a missing feature
 already running next to this on the same hosts. ByStack correlates with what
 they know; it does not re-collect it.
 
-**Both discovery paths run.** The Controller accepts agent connections *and*
-still drives remote sockets over SSH. That is deliberate: the agentless path
-is the oracle the agent is verified against, and
-[`docs/MIGRATION.md`](docs/MIGRATION.md) §6 holds it until the two produce
-identical graphs on the same host. **They now do** — 41 entities and 75 edges,
-identical by content hash, on a real daemon. So the SSH path is deletable, and
-the two gaps between this tree and the topology diagrammed in
-[ARCHITECTURE §1](ARCHITECTURE.md#1-topology) are exactly:
+**One discovery path.** The Controller reaches no Docker socket, local or
+remote: agents dial in and nothing else fills the graph. The SSH transport,
+the Engine HTTP client and the informer are gone
+([`docs/MIGRATION.md`](docs/MIGRATION.md) §6), and they were deleted only
+after the two implementations were shown to produce the same graph on the same
+real daemon — 41 entities and 75 edges, identical by content hash.
 
-1. **mTLS and enrollment** ([ADR-0011](docs/adr/0011-agent-trust-and-enrollment.md))
-   — the diagram's `mTLS, one long-lived stream per agent`. The endpoint is
-   unauthenticated today; see the warning below.
-2. **The Controller still touches remote Docker sockets** — §1 says it never
-   does. True only once the transports, the client and the informer are gone.
+That leaves exactly one gap between this tree and the topology diagrammed in
+[ARCHITECTURE §1](ARCHITECTURE.md#1-topology): **mTLS and enrollment**
+([ADR-0011](docs/adr/0011-agent-trust-and-enrollment.md)), the diagram's
+`mTLS, one long-lived stream per agent`. The endpoint is unauthenticated
+today — see the warning below.
 
 ---
 
@@ -72,12 +71,16 @@ the two gaps between this tree and the topology diagrammed in
 cd backend
 python3 -m venv .venv
 .venv/bin/pip install -e .
-.venv/bin/python -m bystack                       # local engine, zero config
-.venv/bin/python -m bystack --config bystack.yaml # multi-host
+.venv/bin/python -m bystack                       # empty; waits for agents
+.venv/bin/python -m bystack --config bystack.yaml
 ```
 
 Serves on `http://127.0.0.1:8000` — loopback by default, because this service
 holds root-equivalent access to every engine it manages.
+
+Zero-config now means *a Controller with nothing to manage*: it reaches no
+Docker socket, so hosts appear by installing an agent and enabling
+`agents.enabled`. An empty graph on first run is correct, not a failure.
 
 - `GET  /api/v1/healthz` — service and per-provider health
 - `GET  /api/v1/graph` — full snapshot
@@ -90,8 +93,9 @@ holds root-equivalent access to every engine it manages.
 - `GET  /api/v1/commands/audit` — recent operations, including refusals
 - `GET  /docs` — OpenAPI
 
-**Docker socket permission.** The socket is owned by `root:docker`. If you are
-not in that group, every provider reports `degraded` with an explicit message:
+**Docker socket permission** is now the *agent's* problem, not the
+Controller's — the Controller never opens one. The socket is owned by
+`root:docker`, so on each managed host:
 
 ```bash
 sudo usermod -aG docker "$USER"   # then log out and back in
@@ -242,36 +246,26 @@ one way are unavoidable rather than optional.
 
 This is the run that found the shared-image partition bug below.
 
-### Parity — the correctness gate
+### Parity — the correctness gate, now retired
 
-```bash
-.venv/bin/python -m bystack.conformance.parity ../agent/target/release/bystack-agent
-```
-
-The two runs above script the engine, so both are blind to the same thing:
-what a **real** daemon puts on the wire. This one points the agent *and* the
-agentless implementation at one live socket, on two Controllers with two
-stores, and compares the graphs entity by entity and edge by edge.
-
-The agentless path is the oracle — it has read real daemons since before the
-pivot — so the question is not "does the agent look right" but "do the two
-implementations agree". Content is compared by the mapper's own hash, which
-is what catches the defect this exists for: the agent deserializes only the
-Docker fields it declares, and one it does not reaches the mapper as *absent*
-rather than as an error. The result is a node that is well-formed, plausible,
-and quietly missing an attribute — invisible at runtime, and invisible to a
-scripted engine that was written against the same assumptions.
-
-It mutates nothing and is safe against a daemon carrying real workloads. It
-also refuses to pass on an idle socket: two empty graphs agree perfectly, and
-a gate that can be closed by an empty comparison is not a gate.
+The two runs above script the engine, so both were blind to the same thing:
+what a **real** daemon puts on the wire. `bystack.conformance.parity` pointed
+the agent *and* the agentless implementation at one live socket, on two
+Controllers with two stores, and compared the graphs entity by entity and edge
+by edge — the agentless path being the oracle, since it had read real daemons
+since before the pivot.
 
 **It failed on its first run**, against a laptop daemon running 9 containers
-in 3 compose stacks — the agent could not read a real Docker socket at all,
-and no scripted run could have said so. See the `serde` entry below. With that
-fixed: **41 entities and 75 edges, identical by content hash.** That closes the
-gate in [`docs/MIGRATION.md`](docs/MIGRATION.md) §3 and unblocks step 6 —
-deleting the transports, the client and the informer.
+in 3 compose stacks: the agent could not read a real Docker socket at all, and
+no scripted run could have said so. See the `serde` entry below. With that
+fixed: **41 entities and 75 edges, identical by content hash** — which closed
+the gate in [`docs/MIGRATION.md`](docs/MIGRATION.md) §3 and licensed step 6.
+
+It was deleted with the oracle it compared against; a parity harness with one
+implementation left has nothing to say. The lesson it found outlived it, in
+the fixtures: `conformance/engine.py` now returns `null` where a real daemon
+returns `null`, so the class of defect it caught is held with no daemon
+required.
 
 > **Not yet authenticated.** ADR-0011's mTLS enrollment is the next step. Until
 > it lands the endpoint trusts whoever reaches it, which is why it is off by
@@ -327,10 +321,11 @@ api:
   port: 8000
 ```
 
-The current `hosts:` block, with its per-host `transport:`, is the agentless
-form and is documented in `bystack.example.yaml`. It becomes a hard error
-rather than a silent migration — a config that quietly degraded to "manage
-nothing" looks exactly like an empty cluster.
+A `hosts:` block is the agentless form and is now a **hard error** naming
+`docs/MIGRATION.md`, rather than a silent migration. Pydantic ignores unknown
+keys by default, which would have meant a Controller that started cleanly,
+reported healthy and discovered nothing — indistinguishable from a cluster
+that is simply empty.
 
 ---
 
@@ -340,7 +335,7 @@ nothing" looks exactly like an empty cluster.
 backend/src/bystack/          the Controller
   core/          domain kernel — identity, graph, ports. Imports nothing outward.
   providers/     one per external system, mutually independent
-    docker/        the agentless path — SSH/local socket, informer, mapper
+    docker/        Docker's vocabulary — the mapper, and the state->commands policy
     agent/         the agent path — ingest, provider, command correlation
   agent/v1/      generated wire bindings (do not edit; see scripts/generate_proto.py)
   infra/         event bus, audit log
@@ -396,8 +391,6 @@ Each of these cost real debugging time and is defended by a test:
   changes landing during the List are lost with no detectable gap.
 - **`asyncio.TaskGroup` wraps errors in an `ExceptionGroup`**, so
   `except SomeError` in a supervisor silently never matches.
-- **asyncssh's `known_hosts=None` disables host key verification**; `()` selects
-  the default files. They are easy to swap and the failure is silent.
 - **Engine IDs come in two formats** — a colon-delimited fingerprint before
   Docker 25.0, a UUID after. Both appear in a mixed fleet.
 - **Docker answers a redundant start/stop with `304`, not `204`.** It is

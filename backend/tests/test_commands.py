@@ -560,7 +560,7 @@ def test_finalizing_an_evicted_entry_is_a_no_op() -> None:
 @pytest.fixture
 def operable():
     """An app with mutation enabled and one scripted provider registered."""
-    app = create_app(Settings(hosts=[], read_only=False))
+    app = create_app(Settings(read_only=False))
     provider = FakeProvider()
     with TestClient(app) as client:
         context = app.state.context
@@ -576,7 +576,7 @@ def _seed_payload():
 
 
 def test_post_command_is_forbidden_in_read_only_mode() -> None:
-    app = create_app(Settings(hosts=[]))  # read_only defaults to True
+    app = create_app(Settings())  # read_only defaults to True
     with TestClient(app) as client:
         response = client.post(
             f"{API_PREFIX}/commands", json={"kind": "restart", "target": str(WEB_1)}

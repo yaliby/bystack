@@ -137,10 +137,20 @@ requires client certificates.
 
 ---
 
-## 4. Zero-config startup is preserved
+## 4. Zero-config startup — ⚠️ **regressed at step 6, not yet restored**
 
-`python -m bystack` currently manages the local engine with no configuration,
-and that property is worth keeping — it is the whole first-run experience.
+`python -m bystack` used to manage the local engine with no configuration, and
+that property is worth keeping — it is the whole first-run experience.
+
+**It does not currently hold.** Deleting `local_socket.py` with the rest of the
+agentless path (§6) is exactly what removed it: the Controller reaches no
+socket, so `Settings.default()` is now an empty Controller waiting for an agent
+to dial in, and `agents.enabled` is off until an operator sets it. First run
+shows an empty graph.
+
+That is honest rather than correct, and it is the one thing step 6 took away
+that has not been given back. The plan below is unchanged and is what closes
+it; it is listed in §6 as the remaining work.
 
 The Controller **bundles the agent binary and spawns it locally** on first
 run, connecting over a unix socket instead of TLS. Same protocol, same ingest
@@ -164,8 +174,9 @@ one process.
 | `test_mapper.py` (227) | Unchanged inputs; add a check that every field the mapper reads exists in the `.proto`, so the two cannot drift ([ADR-0009](adr/0009-agent-wire-protocol.md) §3). |
 | `test_eventbus.py` (77) | Unchanged. |
 | `test_api.py` (171) | Unchanged. |
-| `test_informer.py` (290) | **Ported.** Its scripted-engine fixtures became `bystack/conformance/engine.py`, and its cases became conformance scenarios — translated, not re-derived. |
-| `test_config_and_transports.py` (118) | Transport half deleted; config half rewritten for `agents:`, plus a case asserting a legacy `hosts:` block fails loudly. |
+| `test_informer.py` (290) | ✅ **Ported and deleted.** Its scripted-engine fixtures became `bystack/conformance/engine.py`, and its cases became conformance scenarios — translated, not re-derived. |
+| `test_config_and_transports.py` (118) | ✅ **Done**, as `test_config.py`. Transport half deleted; config half rewritten for `agents:`, plus two cases asserting a legacy `hosts:` block fails loudly and says what to do instead. |
+| `test_docker_commands.py` (…) | ✅ **Split**, as `test_docker_capability.py`. The engine-status half went with the executor; the state-policy half is a pure function of a node and stayed. |
 
 New, and non-optional:
 
@@ -240,10 +251,28 @@ Each step leaves the tree working.
    done — `providers/agent/commands.py` holds the `command_id` correlation
    map, and `AgentProvider` refuses dispatch to an agent that advertised
    `read_only` at `Hello`. The agent half lands with step 3.
-6. **Delete the transports, the client, and the informer.** Not before step 3
-   has passed — the old implementation is the oracle the new one is checked
-   against. `Settings.hosts` stays until then, and only then becomes the hard
-   error described in §3.
+6. ✅ **Deleted the transports, the client, and the informer.** Gone:
+   `infra/transports/` (SSH tunnel, local socket, registry), `core/ports/
+   transport.py`, `providers/docker/{client,informer,provider}.py`, and
+   `conformance/parity.py` with the oracle it compared against. `asyncssh` and
+   the runtime `httpx` dependency went with them.
+
+   What deliberately stayed: `providers/docker/mapper.py`, because ingest
+   feeds Docker payloads to the *same* mapper (§5 is the reason the kernel did
+   not move), and `providers/docker/capability.py` — the state→commands table,
+   which never touched a socket and is the expensive thing to re-derive
+   correctly later. Nothing consults it at present; `AgentProvider` declines
+   to, so `GET /commands/actions` is state-blind for every host. That is a
+   decision to revisit, recorded rather than deleted.
+
+   `Settings.hosts` is now the hard error described in §3 — including for an
+   empty `hosts: []`, because that is still a config written against the old
+   model.
+
+   **Outstanding from this step:** zero-config startup (§4). The Controller
+   should bundle the agent and spawn it locally on first run; until it does,
+   `python -m bystack` with no config is an empty graph. That is the one
+   capability step 6 removed without replacing.
 7. **Packaging**: static binaries, container image, systemd unit, and
    Controller-driven upgrade.
 

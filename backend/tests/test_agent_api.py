@@ -28,7 +28,7 @@ C1 = "c" * 64
 
 
 def app_with(**agents: object):
-    return create_app(Settings(hosts=[], agents=AgentsConfig(**agents)))
+    return create_app(Settings(agents=AgentsConfig(**agents)))
 
 
 def hello_frame(engine_id: str = ENGINE_ID, *, read_only: bool = False) -> bytes:
@@ -218,7 +218,6 @@ def test_an_agent_that_declares_itself_read_only_disables_its_actions() -> None:
     them and watch the agent bounce every one."""
     app = create_app(
         Settings(
-            hosts=[],
             read_only=False,
             agents=AgentsConfig(enabled=True, auto_approve=True),
         )

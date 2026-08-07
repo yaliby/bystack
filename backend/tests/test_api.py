@@ -21,9 +21,9 @@ C1 = container_urn("e1", "c1")
 
 @pytest.fixture
 def app():
-    # No hosts configured: the collector starts with zero providers, so the
+    # No agents connected: the collector starts with zero providers, so the
     # API is under test in isolation.
-    return create_app(Settings(hosts=[]))
+    return create_app(Settings())
 
 
 @pytest.fixture
