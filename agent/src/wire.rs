@@ -58,6 +58,9 @@ impl From<&model::Container> for Container {
                 })
                 .collect(),
             mounts: source.mounts.iter().map(Mount::from).collect(),
+            // Normalized by `health()`, so the Controller sees one vocabulary
+            // whatever the daemon on this host is old enough to send.
+            health: source.health().to_string(),
         }
     }
 }

@@ -310,6 +310,21 @@ message Container {
   repeated Port ports = 10;
   repeated NetworkAttachment networks = 11;
   repeated Mount mounts = 12;
+
+  // The healthcheck's verdict: `healthy`, `unhealthy`, `starting`, or empty
+  // where the image declares no healthcheck. **Hashed**, unlike the status
+  // line it can be read out of.
+  //
+  // Hashing it is the whole point. `state` stays `running` when a container
+  // starts failing its probe, so without this field in the hash the agent
+  // would never resend it and the Controller would never learn -- a card
+  // reading `running`, in green, for a container the engine has already
+  // given up on. That is the one failure this graph must not have, because
+  // an operator reads the absence of a warning as the absence of a problem.
+  //
+  // Unlike `status_text` this costs nothing to hash: it changes when the
+  // healthcheck's verdict changes and at no other time.
+  string health = 13;
 }
 
 message Port {

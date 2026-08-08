@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { GraphEdge, GraphNode } from '../../../api/types';
-import { cardIdentityColor, cardPorts, edgePortLabel, stackIdentityColor } from './theme';
+import {
+  cardIdentityColor,
+  cardPorts,
+  edgePortLabel,
+  stackIdentityColor,
+  statusOf,
+} from './theme';
 
 function container(ports: unknown): GraphNode {
   return {
@@ -104,5 +110,43 @@ describe('stackIdentityColor', () => {
   it('keeps unknown names stable', () => {
     expect(stackIdentityColor('payments')).toBe(stackIdentityColor('payments'));
     expect(stackIdentityColor('payments')).not.toBe(stackIdentityColor('billing'));
+  });
+});
+
+describe('statusOf', () => {
+  function node(status: string, attrs: Record<string, unknown> = {}): GraphNode {
+    return {
+      urn: 'ctr:web',
+      kind: 'container',
+      name: 'web',
+      source: 'local',
+      status,
+      labels: {},
+      attrs,
+      observed_at: 0,
+      revision: 'r',
+    };
+  }
+
+  it('draws a running container as good', () => {
+    expect(statusOf(node('running'))).toBe('good');
+  });
+
+  it('refuses to draw a container failing its healthcheck as good', () => {
+    // The state is still `running` and that is not wrong -- the engine has
+    // not stopped it. Green is what would be wrong, because an operator
+    // reads the absence of a warning as the absence of a problem.
+    expect(statusOf(node('running', { health: 'unhealthy' }))).toBe('warning');
+  });
+
+  it('leaves a starting healthcheck alone', () => {
+    // Every healthchecked container passes through this on the way up, so
+    // warning on it would make the first seconds of every deploy look broken.
+    expect(statusOf(node('running', { health: 'starting' }))).toBe('good');
+    expect(statusOf(node('running', { health: 'healthy' }))).toBe('good');
+  });
+
+  it('still reports a stopped container as critical, healthy or not', () => {
+    expect(statusOf(node('exited', { health: 'healthy' }))).toBe('critical');
   });
 });

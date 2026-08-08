@@ -62,6 +62,13 @@ pub fn hash_container(container: &Container) -> Fingerprint {
     container.created.hash(&mut hasher);
     container.state.hash(&mut hasher);
     // container.status is deliberately absent. Do not add it.
+    //
+    // The healthcheck's verdict, however, must be here. `state` stays
+    // `running` while a container fails its probe, so a container that goes
+    // unhealthy is otherwise byte-identical to the one we last sent and is
+    // never resent -- and the map keeps drawing it green. Only the verdict is
+    // hashed, not `failing_streak`, which advances on every failed probe.
+    container.health().hash(&mut hasher);
     container.labels.hash(&mut hasher);
     container.ports.hash(&mut hasher);
     container.mounts.hash(&mut hasher);
@@ -207,6 +214,52 @@ mod tests {
         let after = hash_container(&container("running", "Up 4 hours"));
 
         assert_eq!(before, after);
+    }
+
+    fn healthy(verdict: &str) -> Container {
+        let mut c = container("running", "Up 3 hours");
+        c.health = crate::model::Health { status: verdict.into(), failing_streak: 0 };
+        c
+    }
+
+    #[test]
+    fn a_container_that_goes_unhealthy_is_resent() {
+        // The state does not move when a healthcheck starts failing, so
+        // without the verdict in the hash this container is byte-identical to
+        // the one already on the Controller and is never sent again -- and
+        // the map keeps drawing it green. There is no error to notice.
+        assert_ne!(hash_container(&healthy("healthy")), hash_container(&healthy("unhealthy")));
+    }
+
+    #[test]
+    fn no_healthcheck_and_a_passing_one_are_not_the_same_container() {
+        assert_ne!(hash_container(&healthy("none")), hash_container(&healthy("healthy")));
+    }
+
+    #[test]
+    fn a_failing_streak_is_a_clock_and_is_not_hashed() {
+        // It advances on every failed probe. Hashing it would resend the
+        // container every probe interval for as long as it stays broken --
+        // which is exactly when the network matters most.
+        let mut first = healthy("unhealthy");
+        first.health.failing_streak = 3;
+        let mut second = healthy("unhealthy");
+        second.health.failing_streak = 41;
+
+        assert_eq!(hash_container(&first), hash_container(&second));
+    }
+
+    #[test]
+    fn an_older_daemon_reports_the_same_verdict_through_the_status_line() {
+        // `Health` as a structure is a recent addition to the list endpoint.
+        // Falling back to silence would read as "no healthcheck", which is
+        // the one wrong answer available here.
+        assert_eq!(container("running", "Up 2 hours (unhealthy)").health(), "unhealthy");
+        assert_eq!(container("running", "Up 2 hours (healthy)").health(), "healthy");
+        assert_eq!(container("running", "Up 1 second (health: starting)").health(), "starting");
+        assert_eq!(container("running", "Up 3 hours").health(), "");
+        // And the structure wins where both are present.
+        assert_eq!(healthy("healthy").health(), "healthy");
     }
 
     #[test]

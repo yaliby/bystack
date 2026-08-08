@@ -309,6 +309,11 @@ def _container(message: wire.Container) -> dict[str, Any]:
         # out of it and discards the prose -- see the `.proto` comment and
         # README's "things that will bite you".
         "Status": message.status_text,
+        # Already normalized by the agent to one vocabulary, so this is the
+        # verdict itself rather than Docker's nested `Health` object -- the
+        # mapper reads a string here and the wire is the only place the two
+        # spellings a daemon might use are reconciled.
+        "Health": message.health,
         "Labels": dict(message.labels),
         "Ports": [
             {

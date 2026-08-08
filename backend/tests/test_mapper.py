@@ -287,3 +287,26 @@ def test_running_containers_have_no_exit_code() -> None:
     nodes, _ = map_container(SOURCE, ENGINE_ID_SAFE, payload)
 
     assert nodes[0].attrs["exit_code"] is None
+
+
+def test_an_unhealthy_container_is_still_running_and_says_it_is_unhealthy() -> None:
+    # Both halves matter. The state must stay `running` because that is what
+    # decides which operations are offered, and a failing container's are a
+    # running container's. The verdict rides beside it so the map can draw
+    # the difference the state cannot express.
+    payload = make_container("m" * 64, "web")
+    payload["Health"] = "unhealthy"
+
+    nodes, _ = map_container(SOURCE, ENGINE_ID_SAFE, payload)
+
+    assert nodes[0].status == "running"
+    assert nodes[0].attrs["health"] == "unhealthy"
+
+
+def test_a_container_with_no_healthcheck_carries_no_verdict() -> None:
+    # Absent rather than a word meaning "none": "this image declares no
+    # healthcheck" is a fact about the image, not a health state, and the UI
+    # must not have to know a third spelling to ignore it.
+    nodes, _ = map_container(SOURCE, ENGINE_ID_SAFE, make_container("n" * 64, "web"))
+
+    assert nodes[0].attrs["health"] is None

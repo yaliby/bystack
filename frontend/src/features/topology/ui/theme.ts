@@ -269,6 +269,14 @@ export function cardIdentityColor(node: Pick<GraphNode, 'urn' | 'name' | 'kind'>
 }
 
 export function statusOf(node: GraphNode): StatusRole {
+  // A healthcheck's verdict outranks the state for one case only. `running`
+  // is still true of a container failing its probe -- the engine has not
+  // stopped it and the operations it offers are a running container's -- but
+  // drawing it in the same green as a working one is the map claiming
+  // something it has been told is false. `starting` is not a warning: every
+  // healthchecked container passes through it on the way up.
+  if (node.status === 'running' && node.attrs.health === 'unhealthy') return 'warning';
+
   switch (node.status) {
     case 'running':
     case 'up':

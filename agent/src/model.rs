@@ -96,6 +96,60 @@ pub struct Container {
     pub mounts: Vec<Mount>,
     #[serde(rename = "NetworkSettings", default, deserialize_with = "null_to_default")]
     pub network_settings: NetworkSettings,
+
+    /// The healthcheck's verdict, as a structure — recent daemons only.
+    ///
+    /// Read through [`Container::health`], never directly: engines older than
+    /// this field still report the verdict, in the status line.
+    #[serde(rename = "Health", default, deserialize_with = "null_to_default")]
+    pub health: Health,
+}
+
+impl Container {
+    /// `healthy`, `unhealthy`, `starting`, or empty for no healthcheck.
+    ///
+    /// Two sources for one fact, because the structured `Health` object is a
+    /// recent addition to `GET /containers/json` and the daemon on a managed
+    /// host is whatever that host happens to run. The status line has carried
+    /// the same verdict in parentheses for far longer — `"Up 3 hours
+    /// (healthy)"` — so an older engine degrades to the same answer instead
+    /// of to silence, which here would read as "no healthcheck" and is the
+    /// one wrong answer available.
+    ///
+    /// `none` is Docker's word for "this image declares no healthcheck" and
+    /// becomes the empty string: a fact about the image, not a verdict.
+    pub fn health(&self) -> &str {
+        match self.health.status.as_str() {
+            "none" | "" => health_from_status(&self.status),
+            verdict => verdict,
+        }
+    }
+}
+
+/// The verdict Docker renders into the status line, e.g. `"Up 2 hours
+/// (unhealthy)"` or `"Up 1 second (health: starting)"`.
+fn health_from_status(status: &str) -> &'static str {
+    if status.ends_with("(healthy)") {
+        "healthy"
+    } else if status.ends_with("(unhealthy)") {
+        "unhealthy"
+    } else if status.ends_with("(health: starting)") {
+        "starting"
+    } else {
+        ""
+    }
+}
+
+/// Docker's healthcheck summary on a listed container.
+#[derive(Debug, Deserialize, Default, Hash)]
+pub struct Health {
+    /// `none`, `starting`, `healthy` or `unhealthy`.
+    #[serde(rename = "Status", default, deserialize_with = "null_to_default")]
+    pub status: String,
+    /// Consecutive failed probes. Carried for completeness and deliberately
+    /// not hashed: it advances on every failed probe, which is a clock.
+    #[serde(rename = "FailingStreak", default, deserialize_with = "null_to_default")]
+    pub failing_streak: i64,
 }
 
 #[derive(Debug, Deserialize, Default, Hash)]

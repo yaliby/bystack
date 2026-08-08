@@ -128,6 +128,13 @@ def map_container(
                 # derives uptime from `created` instead, and the one durable
                 # fact buried in that string is extracted below.
                 "exit_code": _exit_code(payload.get("Status")),
+                # `healthy`, `unhealthy`, `starting`, or absent where the
+                # image declares no healthcheck. Separate from `status`
+                # rather than folded into it: an unhealthy container is still
+                # `running`, and `capability.py` is right to keep offering
+                # the operations a running container has. What changes is
+                # what the map is allowed to claim about it.
+                "health": payload.get("Health") or None,
                 "ports": ports,
             },
             observed_at=at,
