@@ -80,13 +80,44 @@ that can disagree with the engine, and skipping targets silently is how a
 
 Not because they are hard — each is one more HTTP call — but because of what
 they require. A destructive operation is only defensible if the platform can
-answer *who deleted the database volume, and when*. Today the audit log is an
-in-memory ring buffer that a restart erases, and there is no authentication,
-so every entry is attributed to `anonymous`.
+answer *who deleted the database volume, and when*.
 
 Destructive operations, durable audit and authentication ship together or not
 at all. Shipping the fun third of that is how a platform acquires a
 capability it cannot account for.
+
+**Amended: the audit is now durable** (`infra/audit/durable.py`, §4a below).
+That answers *what* and *when*, across restarts. It does not answer *who* —
+nothing authenticates a browser to this API, so every entry is still
+attributed to `anonymous` — and the clause above is unchanged in effect: two
+of the three are done, so nothing destructive appears yet.
+
+### 4a. The audit log is a JSON Lines file, appended, bounded by count
+
+The enrollment registry (ADR-0011) is the precedent: a table's shape, in a
+file, because Postgres is not in this tree and moving it is then a change to
+one module. One thing differs and it changes the format.
+
+The registry is a few hundred bytes rewritten wholesale when a human approves
+a host. An audit log is append-heavy — two writes per operation, §5 — so it is
+**appended, never rewritten in place**, and `finalize` writes a second record
+for the same id with the later one winning on read. That is what lets a
+process killed mid-operation leave a complete attempt on disk rather than a
+truncated file.
+
+Retention is **by count**, not by age. "Ninety days" is what an auditor asks
+for and the wrong thing to implement first: it makes the file's size a
+function of how busy the installation is, which is the unbounded growth
+ADR-0006 clause 4 exists to prevent. A count is a bound; a duration is a hope.
+The file is compacted, write-and-rename, when it grows past twice the
+retention — so compaction is amortised and a Controller killed during one
+comes back to the previous complete file.
+
+Durable is the **default**, and the in-memory ring survives as the fallback
+for a Controller with nowhere to write. "Cannot persist" and "will not start"
+are different answers and only one of them is acceptable here: a full disk
+must not stop an operator restarting the service that filled it. Both the
+per-record write and the fallback are logged at ERROR, so the gap is findable.
 
 ### 5. Audit is written before dispatch, and includes refusals
 
@@ -136,8 +167,12 @@ to be honest before the click rather than after a slow timeout.
 - The UI has a visible lag between a command succeeding and the topology
   reflecting it. This is deliberate, labelled, and the price of never
   displaying an unverified state.
-- The audit trail does not survive a restart. This is why nothing destructive
-  exists yet, and it is the constraint that unblocks the rest of §4.
+- ~~The audit trail does not survive a restart.~~ It does, as of §4a. What
+  remains missing is attribution: every entry reads `anonymous`, and that —
+  not durability — is now the constraint holding §4.
+- The audit log is a file on the Controller's disk, so it is one more thing
+  in `agents.state_dir` worth backing up, and one more thing that grows.
+  Bounded at 20,000 operations (~8 MB) by default.
 - One in-flight limit (`MAX_TARGETS = 64`) refuses rather than truncates. A
   partially-applied stack operation is the worst outcome available here.
 - `timeout=0` is a real request — `docker stop -t 0` — and is read with

@@ -104,8 +104,12 @@ async def get_audit(
     dead service is the single most useful line this log can hold, and a log
     that recorded only what succeeded would omit it.
 
-    In-memory and therefore lost on restart -- see ADR-0012. That limitation
-    is why no destructive operation exists yet.
+    Durable by default since the audit log moved to disk
+    (`infra/audit/durable.py`), so this answers about previous runs of the
+    Controller and not only this one. What it still cannot answer is *who*:
+    nothing authenticates a browser to this API, so every entry reads
+    `anonymous` -- which is why no destructive operation exists yet. See
+    ADR-0012.
     """
     return [AuditEntryOut.of(entry) for entry in service.audit.recent(limit)]
 

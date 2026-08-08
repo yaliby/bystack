@@ -45,8 +45,11 @@ class CommandKind(StrEnum):
     image cleanup. That is not an oversight and not a difficulty -- they are
     each one HTTP call away. It is a sequencing decision: destructive
     operations need durable audit and RBAC to answer "who deleted the
-    database volume", and both are still in-memory here. They arrive together
-    or not at all. See ADR-0012.
+    database volume". **The audit is durable now** (`infra/audit/durable.py`);
+    the "who" is not, because nothing authenticates a browser to this API and
+    every entry is attributed to `anonymous`. A durable record of "anonymous
+    deleted the database volume" is a better artifact than none and is still
+    not an answer. They arrive together or not at all. See ADR-0012.
     """
 
     START = "start"
@@ -278,10 +281,12 @@ class AuditLog(Protocol):
     """Append-only record of every operation the platform attempted.
 
     ADR-0001 permits durable storage for exactly four categories and audit is
-    one of them, with a mandatory retention policy. The in-memory
-    implementation honours the retention half now and the durability half
-    when Postgres lands; this port is the seam that makes that a
-    one-line change in the composition root.
+    one of them, with a mandatory retention policy. Two implementations honour
+    both halves: `infra/audit/memory.py` is a bounded ring for a Controller
+    with nowhere to write, and `infra/audit/durable.py` is the same bound on
+    disk. This port is the seam that made adding the second a change to the
+    composition root and nothing else -- and that will make a table a change
+    to one module when Postgres lands.
     """
 
     def record(self, entry: AuditEntry) -> None:

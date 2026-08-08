@@ -4,8 +4,9 @@
  * Pure: no React, no network. The panel renders these answers and decides
  * nothing itself.
  *
- * The log this reads is the Controller's audit ring (`infra/audit/memory.py`),
- * and two of its properties drive most of what is here.
+ * The log this reads is the Controller's audit log (`infra/audit/durable.py`,
+ * or the bounded ring beside it on a Controller with nowhere to write), and
+ * two of its properties drive most of what is here.
  *
  * **It records refusals.** A read-only control plane that declined to restart
  * a dead service is the single most useful line the log holds, and a timeline
@@ -13,11 +14,11 @@
  * looking for. So `rejected` is a first-class outcome with its own words, not
  * an error state.
  *
- * **It is in memory and every actor is `anonymous`** (ADR-0012). Both are
- * stated in the panel rather than papered over: a timeline that looked durable
- * would be trusted as an audit log, and it is not one until authentication and
- * durable storage arrive — which is the same reason no destructive operation
- * exists yet.
+ * **Every actor is `anonymous`** (ADR-0012). Stated in the panel rather than
+ * papered over. The log is durable now, which makes this the *only* thing
+ * between it and being an audit log — and a timeline that omitted it would be
+ * trusted for the one question it cannot answer. It is the same reason no
+ * destructive operation exists yet.
  */
 
 import type { AuditEntry, CommandStatus, Urn } from '../../../api/types';

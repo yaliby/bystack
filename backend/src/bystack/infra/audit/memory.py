@@ -5,12 +5,16 @@ policy* -- applies to the in-memory form too, and more urgently: an unbounded
 list of operations is a memory leak that only manifests on the busiest
 installation, which is the one that can least afford it.
 
-A ring buffer with a hard capacity is the honest v0. It is explicitly **not**
-durable, and that limitation is why :class:`~bystack.core.ports.command.CommandKind`
-contains no destructive operation yet -- an audit trail that a restart erases
-cannot answer "who deleted this", so the platform does not offer to delete
-anything. Persistence and destructive operations arrive together. See
-ADR-0012.
+**No longer the default.** `durable.py` is, and this is now the fallback for a
+Controller that has nowhere to write -- a read-only root, a container with no
+volume, or an operator who set `audit.durable: false`. It stays because
+"cannot persist" and "will not start" are different answers and only one of
+them is acceptable for a control plane.
+
+Kept deliberately simple for that reason: it is the implementation that has to
+work when the interesting one cannot. The retention semantics are identical,
+so a Controller that falls back here answers `GET /commands/audit` in the same
+shape and the same order, and differs only in how far back it can see.
 """
 
 from __future__ import annotations

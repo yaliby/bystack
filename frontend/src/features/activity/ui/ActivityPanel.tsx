@@ -76,13 +76,13 @@ export function ActivityPanel({ activity, nodes, onSelect, onClose }: Props) {
         ) : null}
       </div>
 
-      {/* Said once, at the bottom, because a timeline that looked durable would
-          be trusted as an audit log — and it is not one until authentication
-          and durable storage arrive together (ADR-0012). That is the same
-          reason nothing here can delete anything. */}
+      {/* Said once, at the bottom, and now shorter by half: the log survives a
+          restart (ADR-0012 §4a). What it still cannot say is *who*, and a
+          timeline read as an audit log would be trusted for exactly that.
+          Same reason nothing here can delete anything. */}
       <p className="activity__caveat">
-        In memory, and lost when the Controller restarts. Every operation is attributed
-        to <code>anonymous</code> until authentication exists.
+        Every operation is attributed to <code>anonymous</code> until authentication
+        exists.
       </p>
     </aside>
   );

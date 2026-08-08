@@ -20,6 +20,8 @@ from bystack.api.routes import commands as commands_routes
 from bystack.api.routes import enrollment, graph, health, stream
 from bystack.config import Settings
 from bystack.core.graph.store import InMemoryGraphStore
+from bystack.core.ports.command import AuditLog
+from bystack.infra.audit.durable import DurableAuditLog
 from bystack.infra.audit.memory import InMemoryAuditLog
 from bystack.infra.eventbus.memory import InMemoryEventBus
 from bystack.runtime.collector import Collector
@@ -44,7 +46,7 @@ def build_context(settings: Settings) -> AppContext:
     collector = Collector.from_settings(settings, store, bus)
     commands = CommandService(
         store,
-        InMemoryAuditLog(),
+        _audit(settings),
         # A lookup closure rather than the collector itself: the command
         # service needs to resolve one provider by partition key and nothing
         # else, and handing it the supervisor would let it grow a dependency
@@ -66,6 +68,33 @@ def build_context(settings: Settings) -> AppContext:
         # could not spawn one can say why rather than showing an empty fleet.
         local_agent=LocalAgent(settings),
     )
+
+
+def _audit(settings: Settings) -> AuditLog:
+    """The audit log, durable unless an operator turned that off.
+
+    Falls back to the in-memory ring when the directory cannot be opened
+    rather than refusing to start. That is the opposite of the enrollment
+    registry's rule and the difference is what the failure costs: an
+    unreadable allow-list means we do not know who is approved and every way
+    to proceed is an outage, whereas an unwritable audit directory means we
+    keep a shorter memory of what we were asked to do. Refusing to boot a
+    control plane over the second would be a worse answer than saying so
+    loudly and running.
+    """
+    if not settings.audit.durable:
+        return InMemoryAuditLog()
+
+    directory = settings.audit.path or settings.agents.state_dir
+    try:
+        return DurableAuditLog.open(directory, settings.audit.retain)
+    except OSError as exc:
+        log.error(
+            "could not open the audit log in %s (%s); "
+            "falling back to the in-memory ring, which a restart erases",
+            directory, exc,
+        )
+        return InMemoryAuditLog()
 
 
 def create_app(settings: Settings | None = None, context: AppContext | None = None) -> FastAPI:

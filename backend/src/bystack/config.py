@@ -32,6 +32,18 @@ Install an agent on each host listed there and enable the endpoint:
 
 See docs/MIGRATION.md for what moved and why."""
 
+#: Where a Controller keeps the things it must not lose: the CA private key,
+#: the enrollment registry, the audit log.
+#:
+#: A module constant rather than a literal in the field, so that a test suite
+#: can redirect every default at once. That is not cosmetic — several tests
+#: build an app from bare `Settings()`, and without one place to move, they
+#: create a CA and append to an audit log in the home directory of whoever is
+#: running them. The rule in this repo is that no test touches anything
+#: outside its own temporary directory, and a default spelled inline is a
+#: quiet exception to it.
+DEFAULT_STATE_DIR = "~/.local/state/bystack"
+
 
 class AgentsConfig(BaseModel):
     """Where agents dial in, and on what terms.
@@ -120,7 +132,7 @@ class AgentsConfig(BaseModel):
     with the actual diagnosis while its certificate is still valid."""
 
     state_dir: str = Field(
-        default="~/.local/state/bystack",
+        default_factory=lambda: DEFAULT_STATE_DIR,
         description="Where the CA key and the enrollment registry live.",
     )
     """The one directory in this project worth backing up.
@@ -218,6 +230,53 @@ class LocalAgentConfig(BaseModel):
     would be protecting."""
 
 
+class AuditConfig(BaseModel):
+    """Where the record of every attempted operation goes, and how much of it is kept.
+
+    Durable by default, and that is a change of posture rather than a
+    convenience. A log a restart erases cannot answer "who did this", and
+    ADR-0012 puts that question in front of every destructive verb. A control
+    plane
+    holding root-equivalent access to a fleet should not have to be configured
+    into remembering what it was asked to do.
+
+    It is still not the whole gate. `actor` is the string "anonymous" until
+    something authenticates a browser to this API, so this answers "what was
+    attempted, and when" and not yet "by whom" -- see `docs/OPEN-WORK.md` §4.
+    """
+
+    durable: bool = Field(
+        default=True,
+        description="Write the audit log to disk. Off keeps the bounded in-memory ring.",
+    )
+
+    path: str = Field(
+        default="",
+        description="Directory for the audit log. Empty means inside agents.state_dir.",
+    )
+    """Defaulted into the state directory rather than beside it.
+
+    That directory is already the one documented as worth backing up, is
+    already created 0700, and is already the answer to "where does this
+    Controller keep the things it must not lose". A second location would be
+    a second thing to find, back up and get the permissions right on.
+    """
+
+    retain: int = Field(
+        default=20_000,
+        ge=1,
+        description="Operations kept. The oldest are dropped when the log is compacted.",
+    )
+    """ADR-0006 clause 4: every table has a retention policy, and this is it.
+
+    By count rather than by age, deliberately. "Ninety days" is what an
+    auditor asks for and the wrong thing to implement first: it makes the
+    file's size a function of how busy the installation is, which is the
+    unbounded growth the in-memory version was careful to avoid. A count is a
+    bound; a duration is a hope.
+    """
+
+
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     """Loopback by default. This service holds root-equivalent access to every
@@ -232,6 +291,7 @@ class Settings(BaseModel):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     local_agent: LocalAgentConfig = Field(default_factory=LocalAgentConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    audit: AuditConfig = Field(default_factory=AuditConfig)
     read_only: bool = Field(
         default=True,
         description="Refuse all mutating operations. Secure default; opt out deliberately.",

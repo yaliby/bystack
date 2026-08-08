@@ -3,11 +3,14 @@
 Nothing here touches Docker or the network. If a test in this suite ever
 needs a daemon, an abstraction has leaked.
 
-The one thing that touches disk is the CA: ADR-0011 gave the Controller a
-private key and an enrollment registry, and both are files. They are files in
-`tmp_path`, created and thrown away per test, and the certificates are real --
-generated, signed and parsed by the same code the Controller runs. A fake CA
-would test the fake.
+What touches disk is the Controller's durable state: the CA key and the
+enrollment registry (ADR-0011), and the audit log (ADR-0012). All three are
+files in `tmp_path`, created and thrown away per test, and the certificates
+are real -- generated, signed and parsed by the same code the Controller
+runs. A fake CA would test the fake.
+
+`_state_dir_is_disposable` is what makes that true for tests that never
+mention a path. It is autouse; read its docstring before removing it.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from bystack import config
 from bystack.api.app import (
     build_context,
     create_agent_app,
@@ -132,6 +136,23 @@ class Controller:
         )
         assert outcome.accepted, outcome.reason
         return outcome.certificate_pem
+
+
+@pytest.fixture(autouse=True)
+def _state_dir_is_disposable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test writes outside its own temporary directory. Ever.
+
+    Autouse and unconditional, because the tests this catches are the ones
+    that never mention a path: several build an app from a bare ``Settings()``
+    to exercise a route, and every one of those would otherwise mint a CA and
+    append to an audit log in the home directory of whoever ran the suite —
+    silently, and cumulatively, so a run's results depend on every run before
+    it.
+
+    `make_controller` passes `tmp_path` explicitly and does not need this. It
+    is here for everything that does not.
+    """
+    monkeypatch.setattr(config, "DEFAULT_STATE_DIR", str(tmp_path / "state"))
 
 
 @pytest.fixture
