@@ -44,6 +44,15 @@ no port, publish no Docker socket, and need no inbound firewall rule or public
 address — which is what makes the model work behind NAT, where most of the
 target deployments live.
 
+**The Controller's own machine is not an exception to any of this.** It runs
+the same agent, spawned as a child process and dialling a unix socket instead
+of a TLS port, and everything above the transport — the informer, the frames,
+ingest, the partition writer — is the code that serves the fleet. It is what
+makes `python -m bystack` with no configuration show a graph, and it exists in
+that shape rather than as a shortcut into the store because the alternative was
+maintaining two complete implementations of discovery forever, so that the
+easiest deployment could skip a subprocess (`docs/MIGRATION.md` §4).
+
 ---
 
 ## 2. Division of responsibility
@@ -240,12 +249,25 @@ the wire, because nothing changed and therefore nothing is sent.
 
 ## 8. Communication (ADR-0009)
 
-*Controller side built. The `.proto` is at `proto/bystack/agent/v1/`, ingest
-at `providers/agent/`, the endpoint at `api/routes/agents.py`. The Go agent
-and mTLS are the two remaining pieces — see `docs/MIGRATION.md` §6.*
+*Built, both sides. The `.proto` is at `proto/bystack/agent/v1/`, ingest at
+`providers/agent/`, the two endpoints at `api/routes/agents.py`, the agent at
+`agent/src/session.rs`. Trust is `infra/agentca/` and `runtime/trust.py` —
+see §1 and ADR-0011.*
 
 One long-lived, bidirectional, mutually-authenticated stream per agent.
 Telemetry flows up and commands flow down over the same connection.
+
+The listener is a **separate port from the browser's**, with its own app and
+no middleware. One side is browser-facing and may sit behind an ordinary
+reverse proxy; this one requires a client certificate and must not be
+terminated by anything that would strip it. A single port cannot honestly be
+both.
+
+There is a third listener for the local agent, on a unix socket, with its own
+app again and the same reasoning inverted: the reason the fleet's listener
+demands a certificate is that anyone can reach it, and the reason this one does
+not is that only this user can. Neither can serve the other's admission rule by
+accident, because neither one carries the other's route.
 
 **Transport: WebSocket over TLS, carrying Protobuf frames.** Not gRPC — the
 reasoning, and the conditions under which we would switch, are in
@@ -262,7 +284,17 @@ Three frame families:
 | ↑         | `CommandResult`  | After executing a command                  |
 | ↓         | `Command`        | User or scheduler action                   |
 | ↓         | `ResyncRequest`  | Controller detected an inconsistency       |
+| ↓         | `RenewalOffer`   | The certificate is 2/3 through its life    |
+| ↑         | `CertificateRequest` | A CSR, in answer to that offer         |
+| ↓         | `CertificateIssued`  | The renewed certificate                |
 | ↕         | `ping` / `pong`  | Every 30s, agent-initiated                 |
+
+Enrollment (`EnrollRequest` / `EnrollResponse`) uses the same framing on a
+separate path that requires no client certificate, because an agent enrolling
+does not have one yet. It could have been an HTTPS POST; making it a
+WebSocket means the agent carries one protocol and one client rather than
+adding a TLS-capable HTTP stack for a single request (ADR-0013's budget is
+what makes that a real trade rather than a preference).
 
 ### The authoritative delta
 
@@ -407,16 +439,35 @@ runs on hardware the user bought for something else.
 ([ADR-0013](docs/adr/0013-agent-in-rust.md)), managing 100 containers:
 
 Sizes are **MiB**. The same figures in decimal MB — what most size reporters
-print — are 0.86 and 3.06; the budgets are quoted from ADR-0010 as written,
+print — are 1.85 and 4.09; the budgets are quoted from ADR-0010 as written,
 and the headroom is large enough that the distinction never decides anything.
 
-| | Budget | Measured (MiB) |
-|---|---|---|
-| Binary, static, stripped | < 12 | **0.82** |
-| RSS after a full sync | < 20 | **2.92** |
-| RSS during a 200-event burst | — | **3.07** |
-| CPU, idle | < 0.1 % | **0.00 %** |
-| Connect + full sync, 100 containers | — | **25 ms** |
+| | Budget | Measured (MiB) | Before mTLS |
+|---|---|---|---|
+| Binary, static, stripped | < 12 | **1.81** | 0.82 |
+| RSS after a full sync | < 20 | **3.92** | 2.92 |
+| CPU, idle | < 0.1 % | **0.00 %** | 0.00 % |
+| Connect + enrol + full sync, 100 containers | — | **29 ms** | 25 ms |
+
+The third column is what ADR-0011 cost: rustls, `ring` and `rcgen`, for
+mutual TLS and a CSR the agent generates itself. It roughly doubled the
+binary and added a megabyte of RSS, which is worth recording precisely
+because the headroom made it a non-decision — the honest version of "under
+budget" is the one that shows the movement.
+
+The unix-socket endpoint (`docs/MIGRATION.md` §4) added **0.05 MiB** on top of
+that: one boxed stream and one extra dial path. It is boxed rather than
+generic for exactly this reason — a session parameterised over its transport
+would have been monomorphised into two complete copies of the informer, the
+command path and the renewal path, and one virtual call per frame is not on
+any path that matters when a busy host produces a handful of frames a minute.
+
+`ring` rather than the default `aws-lc-rs`, for the same reason the protobuf
+descriptor set is checked in: the agent is cross-compiled for every
+architecture in a fleet, and `aws-lc-rs` wants cmake and a C toolchain in each
+of those. And no root certificate store is linked at all — the agent trusts
+exactly one CA, the Controller's, so a public CA that mis-issues for the
+Controller's hostname is not a way in.
 
 Its working set is the Docker payloads it is currently hashing plus a
 `HashMap<id, u64>` — roughly 12 KB for 100 containers. When nothing is

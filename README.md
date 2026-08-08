@@ -33,14 +33,17 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 
 | Working now | Being built | Not built yet |
 |---|---|---|
-| Docker discovery (List / Watch / Resync) | mTLS + enrollment | Authentication and RBAC |
+| Docker discovery (List / Watch / Resync) | Packaging: static builds, image, systemd | User authentication and RBAC |
 | Canonical graph, two-layer identity | | Durable persistence & event timeline |
 | Compose stacks, services, `depends_on` | | Destructive operations (needs both of the above) |
 | Incremental deltas over WebSocket | | Plugin system |
 | Interactive topology canvas | | |
 | Container / service / stack operations | | |
 | Agent wire protocol + Controller ingest | | |
-| **The agent — Rust, 0.82 MiB, 2.9 MiB RSS** | | |
+| mTLS, join-token enrollment, auto-renewal | | |
+| The agent — Rust, 1.81 MiB, 3.9 MiB RSS | | |
+| **Zero-config startup — a bundled local agent** | | |
+| **Hosts and the operations timeline, on the map** | | |
 
 Metrics providers are not on that list and never will be: collecting anything
 Prometheus already collects is a **non-goal**, not a missing feature
@@ -55,11 +58,25 @@ the Engine HTTP client and the informer are gone
 after the two implementations were shown to produce the same graph on the same
 real daemon — 41 entities and 75 edges, identical by content hash.
 
-That leaves exactly one gap between this tree and the topology diagrammed in
-[ARCHITECTURE §1](ARCHITECTURE.md#1-topology): **mTLS and enrollment**
-([ADR-0011](docs/adr/0011-agent-trust-and-enrollment.md)), the diagram's
-`mTLS, one long-lived stream per agent`. The endpoint is unauthenticated
-today — see the warning below.
+**Including this machine.** `python -m bystack` with no configuration manages
+the engine it is running on, by spawning the same agent binary a managed host
+runs and connecting it over a unix socket instead of TLS — no CA, no token, no
+approval, and no port bound anywhere
+([`docs/MIGRATION.md`](docs/MIGRATION.md) §4). Same frames, same ingest, same
+graph; the local case is a transport, not a second implementation.
+
+**The tree now matches the topology diagrammed in
+[ARCHITECTURE §1](ARCHITECTURE.md#1-topology)**, including the diagram's
+`mTLS, one long-lived stream per agent`
+([ADR-0011](docs/adr/0011-agent-trust-and-enrollment.md)). Every agent
+connection is mutually authenticated against an internal CA, agents enrol with
+a single-use join token, and certificates renew themselves over the stream
+that is already open.
+
+One thing named in the docs is still open: **packaging** — static builds, a
+container image, a systemd unit, Controller-driven upgrade
+([`docs/MIGRATION.md`](docs/MIGRATION.md) §7). Everything the platform *does*
+is reachable from the map; what is missing is how it gets onto a machine.
 
 ---
 
@@ -68,19 +85,26 @@ today — see the warning below.
 ### Backend
 
 ```bash
+cd agent   && cargo build --release      # the Controller spawns this for itself
 cd backend
 python3 -m venv .venv
 .venv/bin/pip install -e .
-.venv/bin/python -m bystack                       # empty; waits for agents
+.venv/bin/python -m bystack                       # manages this machine
 .venv/bin/python -m bystack --config bystack.yaml
 ```
 
 Serves on `http://127.0.0.1:8000` — loopback by default, because this service
 holds root-equivalent access to every engine it manages.
 
-Zero-config now means *a Controller with nothing to manage*: it reaches no
-Docker socket, so hosts appear by installing an agent and enabling
-`agents.enabled`. An empty graph on first run is correct, not a failure.
+Zero-config means *this machine, and nothing else yet*. The Controller spawns
+a local agent over a unix socket and the graph fills from it; other hosts join
+by installing an agent and enabling `agents.enabled`. The Controller itself
+still reaches no Docker socket — its child does, exactly as on every other
+host.
+
+If it cannot spawn one — no engine here, no binary, or `local_agent.enabled:
+false` — the Hosts panel says which, because those are four different
+situations that otherwise look like the same empty canvas.
 
 - `GET  /api/v1/healthz` — service and per-provider health
 - `GET  /api/v1/graph` — full snapshot
@@ -95,7 +119,7 @@ Docker socket, so hosts appear by installing an agent and enabling
 
 **Docker socket permission** is now the *agent's* problem, not the
 Controller's — the Controller never opens one. The socket is owned by
-`root:docker`, so on each managed host:
+`root:docker`, so on each managed host, this one included:
 
 ```bash
 sudo usermod -aG docker "$USER"   # then log out and back in
@@ -122,6 +146,10 @@ cd backend && .venv/bin/python -m bystack.conformance \
 
 # And with three agents, three engines and one Controller.
 cd backend && .venv/bin/python -m bystack.conformance.fleet \
+                 ../agent/target/release/bystack-agent
+
+# And zero-config: the Controller spawning an agent for its own machine.
+cd backend && .venv/bin/python -m bystack.conformance.local \
                  ../agent/target/release/bystack-agent
 ```
 
@@ -161,8 +189,19 @@ Three things about that are worth knowing before you rely on it:
   exist. `remove` and `prune` wait on durable audit and authentication, which
   are the things that could answer "who deleted this".
 
-`GET /api/v1/commands/audit` returns what was attempted, including what was
-refused and why. It is in-memory and does not survive a restart.
+**Activity** in the topbar is the timeline of everything that has been run,
+including what was refused and why — a read-only Controller declining to
+restart a dead service is the most useful line the log holds, and one that
+showed only successes would omit exactly the entry someone came looking for.
+Each row is a way back to the node: clicking it selects the target on the
+canvas, and a target that has since been recreated under a new id says so
+rather than offering a click that does nothing.
+
+It is in-memory, lost on restart, and every entry is attributed to
+`anonymous` — the panel says all three, because a timeline that looked durable
+would be trusted as an audit log, and it is not one until authentication and
+durable storage arrive. That is the same reason nothing here deletes anything.
+The same data is at `GET /api/v1/commands/audit`.
 
 ---
 
@@ -174,10 +213,79 @@ and publish no Docker socket.
 
 ```yaml
 agents:
-  enabled: true          # off by default — see the warning below
-  auto_approve: false    # adopt an unknown engine id on first sight
+  enabled: true                 # binds the listener; off until asked
+  listen: "0.0.0.0:8443"        # separate from the UI port, deliberately
+  server_names: [controller.example]   # what the certificate covers
+  auto_approve: false           # a valid token still needs operator approval
+  cert_ttl_days: 90
+  state_dir: "~/.local/state/bystack"  # the CA key. Back this up.
   resync_interval: 900
 ```
+
+`server_names` is the field a real deployment must set: it is what agents will
+have typed after `wss://`, and a certificate without that name in it fails
+verification correctly and confusingly.
+
+### Enrolling a host
+
+From the topology map, which is where it belongs: adding a host is a change to
+the picture, not a trip to a settings page.
+
+1. **Hosts** in the topbar opens the fleet panel. **Add host** mints a join
+   token and shows the command to run on the machine, ready to copy. The token
+   is single-use, expires in fifteen minutes — the panel counts it down — and
+   is **shown exactly once**: the Controller keeps only a digest of it, so
+   closing the dialog loses it and you mint another.
+2. Paste the command on the host. It assumes `bystack-agent` is already there;
+   there is no installer yet (see [the agent](#the-agent)).
+3. The host appears in the panel as **awaiting approval**, at the top of the
+   list, and contributes nothing to the topology until you approve it there.
+   That is deliberate and it is half of ADR-0011's argument: a stolen token
+   produces a visible pending host rather than a silent managed one. There is
+   no "approve all", and the UI never approves anything on its own.
+
+Each row carries two badges rather than one, because *approved* and
+*connected* are different questions. A host that is approved and asleep is
+ordinary; so is one that is revoked and still streaming until its connection
+drops. A host whose agent has gone away keeps its topology on the canvas and
+is drawn as stale — the last thing it told us, which is not the same as
+nothing.
+
+Revoking asks first, by name.
+
+The same four routes drive everything above, and are the scriptable path:
+
+```bash
+# 1. Mint a token on the Controller. Single-use, 15 minutes by default, and it
+#    carries the CA's fingerprint so the agent can authenticate the Controller
+#    before sending the secret.
+curl -sX POST localhost:8000/api/v1/agents/tokens -d '{"ttl_minutes": 15}' \
+     -H 'content-type: application/json'
+# -> {"token": "bst1.<sha256>.<secret>", "install": "bystack-agent --controller ..."}
+
+# 2. On the managed host. The agent generates its own key, never sends it, and
+#    stores the certificate it gets back.
+bystack-agent --controller wss://controller.example:8443 --token bst1....
+
+# 3. Approve it. Until you do, the agent is connected and contributing nothing
+#    — which is what makes a stolen token visible instead of silently effective.
+curl -s localhost:8000/api/v1/agents
+curl -sX POST localhost:8000/api/v1/agents/<engine-id>/approve
+
+# Revoking is the same shape, and takes effect on the next connection: it is an
+# allow-list check, so there is no CRL to publish and nothing to wait for.
+curl -sX POST localhost:8000/api/v1/agents/<engine-id>/revoke
+
+# Whether a host can join at all. Minting works with the listener off — it is
+# how you get to the point of turning it on — so this is the one thing a
+# successful mint does not tell you.
+curl -s localhost:8000/api/v1/agents/enrollment
+# -> {"enabled": true, "auto_approve": false, "listen": "0.0.0.0:8443"}
+```
+
+Certificates last 90 days and are **renewed by the Controller at two thirds
+elapsed, over the connection that is already open and already authenticated**.
+No cron job, no second channel, no expiry outage.
 
 ### The agent
 
@@ -185,19 +293,30 @@ One static binary, written in Rust ([ADR-0013](docs/adr/0013-agent-in-rust.md)).
 
 ```bash
 cd agent && cargo build --release
-./target/release/bystack-agent --controller ws://controller:8000/api/v1/agents/connect
+./target/release/bystack-agent --controller wss://controller:8443 --token bst1....
+./target/release/bystack-agent --controller wss://controller:8443   # already enrolled
 ```
+
+There is no insecure mode: no flag, no environment variable, and `ws://` is
+refused with a message saying why. The SSH transport had one
+(`insecure_skip_host_key_check`) and it was already a documented footgun; this
+connection hands a remote party commands to run as root.
 
 Measured managing 100 containers — the budget it is held to is in
 [ADR-0010](docs/adr/0010-agent-implementation-language.md), and it comes in an
 order of magnitude under it:
 
-| | Budget | Measured (MiB) |
-|---|---|---|
-| Binary, static, stripped | < 12 | **0.82** |
-| RSS after a full sync | < 20 | **2.92** |
-| CPU, idle | < 0.1 % | **0.00 %** |
-| Connect + full sync | — | **25 ms** |
+| | Budget | Measured (MiB) | Before mTLS |
+|---|---|---|---|
+| Binary, static, stripped | < 12 | **1.81** | 0.82 |
+| RSS after a full sync | < 20 | **3.92** | 2.92 |
+| CPU, idle | < 0.1 % | **0.00 %** | 0.00 % |
+| Connect + enrol + full sync | — | **29 ms** | 25 ms |
+
+The third column is what mutual TLS cost — rustls, `ring` and `rcgen`. Recorded
+rather than quietly overwritten: "under budget" only means something if the
+movement is visible. The unix-socket endpoint added 0.05 MiB on top of it,
+which is the entire cost of the Controller managing its own machine.
 
 Building it needs nothing but a Rust toolchain — no `protoc`, because the
 compiled descriptor set is checked in.
@@ -212,7 +331,7 @@ cd backend
 ```
 
 This starts a **scripted Docker Engine** on a unix socket and a Controller,
-runs the agent between them, and drives fourteen behaviours. It is
+runs the agent between them, and drives seventeen behaviours. It is
 language-agnostic: any reimplementation is checked by the same command.
 
 Three of the checks exist because the failures are **invisible at runtime** —
@@ -267,10 +386,12 @@ the fixtures: `conformance/engine.py` now returns `null` where a real daemon
 returns `null`, so the class of defect it caught is held with no daemon
 required.
 
-> **Not yet authenticated.** ADR-0011's mTLS enrollment is the next step. Until
-> it lands the endpoint trusts whoever reaches it, which is why it is off by
-> default and refuses unknown engine ids unless `auto_approve` is set. Neither
-> is a substitute for a certificate. Do not expose this port.
+> **Authenticated, both directions.** Every connection is mutual TLS against
+> the Controller's internal CA, the Engine ID is bound into the certificate
+> subject, and an agent whose `Hello` disagrees with its own certificate is
+> refused. The listener still defaults to off — not because we cannot tell who
+> is calling, but because it binds a port, usually a public one, and a
+> Controller started to look at a graph should not open one unasked.
 
 Why the delta protocol is shaped the way it is, measured on the real encoder
 for a compose-managed host of 100 containers:

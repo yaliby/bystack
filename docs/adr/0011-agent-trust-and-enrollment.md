@@ -52,7 +52,7 @@ claim to be a host it is not.
 k3s's and Tailscale's, for the same reasons:
 
 ```
-operator          bystack-ctl agent-token new --ttl 15m   ──►  one-time token
+operator          POST /api/v1/agents/tokens {"ttl_minutes": 15}  ──►  one-time token
 host              bystack-agent --controller wss://… --token <token>
                        │  TLS to the Controller, CA pinned
                        ├─ CSR + Engine ID + agent version
@@ -60,6 +60,16 @@ host              bystack-agent --controller wss://… --token <token>
                        └─ token is burned; never valid again
 thereafter        certificate only. The token is never stored anywhere.
 ```
+
+**The token carries the CA's fingerprint** — `bst1.<sha256>.<secret>`. Without
+it the first exchange would be trust-on-first-use and the secret would go to
+whatever answered the address; with it the agent authenticates the Controller
+before it says anything. The token is therefore two credentials in one, which
+is why it is long. That is k3s's design and it is not an incidental detail.
+
+*As built: the operator surface is REST on the browser-facing port, not a
+`bystack-ctl`. The sketch above said otherwise; a CLI over these four routes
+is packaging work and is tracked as such.*
 
 The token is a bootstrap credential and nothing else. It grants exactly one
 capability — "obtain one certificate" — for a few minutes. A token leaked from

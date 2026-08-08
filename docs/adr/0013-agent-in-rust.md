@@ -35,16 +35,26 @@ All sizes in MiB.
 
 | | ADR-0010 budget | Go, realistic | Rust, measured |
 |---|---|---|---|
-| Binary, static, stripped | < 12 | ~8–12 | **0.82** |
-| RSS, after full sync | < 20 | ~10–15 | **2.92** |
-| RSS, during a 200-event burst | — | — | **3.07** |
+| Binary, static, stripped | < 12 | ~8–12 | **1.76** |
+| RSS, after full sync | < 20 | ~10–15 | **3.90** |
 | CPU, idle | < 0.1 % | ~0 % | **0.00 %** |
-| Connect + full sync of 100 containers | — | — | **25 ms** |
+| Connect + enrol + full sync of 100 containers | — | — | **29 ms** |
 
-Fourteen times under the binary budget and seven times under the memory
-budget. The Go column is an estimate — a Go runtime baseline alone is single
-digit MB before any of our code — but the comparison does not turn on its
-precision.
+Seven times under the binary budget and five times under the memory budget.
+The Go column is an estimate — a Go runtime baseline alone is single digit MB
+before any of our code — but the comparison does not turn on its precision.
+
+**Revised upward once, deliberately.** The first measurement was 0.82 and 2.92
+MiB, before ADR-0011's mutual TLS existed; rustls, `ring` and `rcgen` roughly
+doubled the binary. That is recorded rather than quietly overwritten, because
+the argument this ADR makes is about headroom and headroom is only meaningful
+if it is watched being spent. Two crypto stacks would fit in what is left; a
+Go baseline still would not.
+
+`ring` rather than the default `aws-lc-rs`, for the same reason the descriptor
+set is checked in: `aws-lc-rs` wants cmake and a C toolchain in every
+cross-compilation target, and "builds where Rust builds" is the property that
+makes a five-architecture fleet a build matrix rather than a project.
 
 Three properties beyond the numbers:
 
@@ -97,14 +107,17 @@ would have to be satisfied in each of those toolchains.
 
 **Stay with Go.** The safer choice, and defensible: it meets the stated budget,
 and a budget that is met is met. Rejected because the budget was written to
-protect machines we do not own, and choosing 8 MB when 0.8 MB is available is
-not a decision that gets easier to justify at fleet scale.
+protect machines we do not own, and choosing 8 MB when 2 MB is available is
+not a decision that gets easier to justify at fleet scale. (The measurement
+that decided this was 0.82 MiB, before mutual TLS. The gap narrowed; it did
+not close.)
 
-**Zig or C.** Smaller still — a few hundred KB is reachable. Rejected on
-ecosystem: there is no mature WebSocket, TLS and protobuf stack in either, so
-we would hand-roll framing and TLS bindings in a process holding
-root-equivalent access to someone else's machine. The remaining ~700 KB is not
-worth writing our own TLS glue for.
+**Zig or C.** Smaller still. Rejected on ecosystem: there is no mature
+WebSocket, TLS and protobuf stack in either, so we would hand-roll framing and
+TLS bindings in a process holding root-equivalent access to someone else's
+machine. ADR-0011 made this argument stronger rather than weaker — most of the
+binary is now rustls and `ring`, and *those* are precisely the megabyte nobody
+should be writing themselves.
 
 **Reversal condition.** If the agent's scope grows past observation and
 command execution into something that genuinely benefits from a large
@@ -119,10 +132,11 @@ implementation can be checked against in a single command.
   `cargo test` covers the hashing rules.
 - **`python -m bystack.conformance <binary>` is the acceptance gate**, and it
   is language-agnostic. It starts a scripted Docker Engine and a Controller,
-  runs the agent between them, and checks fourteen behaviours — including the
+  runs the agent between them, and checks seventeen behaviours — including the
   three that are invisible at runtime (the `Status` hash exclusion, silence at
-  steady state, and burst coalescing). A rewrite in any language is verified
-  by the same command.
+  steady state, and burst coalescing) and the three budget gates above, so
+  the table in this ADR is measured on every run rather than remembered. A
+  rewrite in any language is verified by the same command.
 - The budget table in ARCHITECTURE §11 is revised down. It is now a measured
   ceiling rather than a projection, and `bystack.conformance` is where a
   regression would be caught.
