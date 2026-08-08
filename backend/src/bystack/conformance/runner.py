@@ -183,6 +183,39 @@ async def scenario_status_string_is_not_hashed(h: Harness) -> None:
     )
 
 
+async def scenario_health_is_hashed(h: Harness) -> None:
+    """The mirror image of the check above, and the opposite conclusion.
+
+    Both are about a field beside `state` that `state` does not cover, and
+    they are pulled apart by one question: does it change on a clock, or on
+    an event? The status line changes on a clock and hashing it costs 100x
+    for nothing. The healthcheck's verdict changes when the verdict changes,
+    and *not* hashing it costs correctness -- a container stays `running`
+    while it fails its probe, so an agent with the verdict outside the hash
+    has nothing new to send and the map goes on drawing it green.
+
+    Neither failure raises anything. This is the check that catches the
+    second one, and it belongs beside the first so that whoever is tempted
+    to "make the hashing consistent" finds both reasons in one place.
+    """
+    for container in h.engine.containers:
+        if container["State"] == "running":
+            container["Health"] = {"Status": "unhealthy", "FailingStreak": 3}
+
+    before = h.store.seq
+    await h.engine.emit("container")
+    moved = await h.until(lambda: h.store.seq > before)
+    verdicts = {n.attrs.get("health") for n in h.nodes_of(NodeKind.CONTAINER)}
+
+    h.record(
+        "a container that goes unhealthy is resent",
+        "the state does not move when a healthcheck starts failing, so a verdict "
+        "outside the hash is a broken container drawn in green, forever",
+        moved and "unhealthy" in verdicts,
+        f"seq {before} -> {h.store.seq}, verdicts {sorted(v or '-' for v in verdicts)}",
+    )
+
+
 async def scenario_steady_state_is_silent(h: Harness) -> None:
     before = h.store.seq
     await h.engine.emit("container")
@@ -384,6 +417,7 @@ SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("initial sync", scenario_initial_sync),
     ("watch", scenario_watch),
     ("status hash", scenario_status_string_is_not_hashed),
+    ("health hash", scenario_health_is_hashed),
     ("steady state", scenario_steady_state_is_silent),
     ("coalescing", scenario_coalescing),
     ("removal", scenario_removal),
