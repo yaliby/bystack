@@ -12,6 +12,8 @@ import { useFleet } from './features/hosts/model/useFleet';
 import { HostsPanel } from './features/hosts/ui/HostsPanel';
 import { useActivity } from './features/activity/model/useActivity';
 import { ActivityPanel } from './features/activity/ui/ActivityPanel';
+import { useLogs } from './features/logs/model/useLogs';
+import { LogsPanel } from './features/logs/ui/LogsPanel';
 import { useOperations } from './features/operations/model/useOperations';
 import { ActionBar } from './features/operations/ui/ActionBar';
 import { useGraphStream } from './features/topology/model/useGraphStream';
@@ -103,6 +105,10 @@ export default function App() {
   // Operations are scoped to whatever is selected. Only nodes the Controller
   // will act on get an action bar, and it decides which — not this component.
   const operations = useOperations(API_BASE, selected, graph.nodes);
+
+  // Reads nothing until the panel is opened. See `useLogs` — a fetch per
+  // selection would put an agent round trip behind clicking through a canvas.
+  const logs = useLogs(API_BASE, selected);
 
   /**
    * Run, then refresh the timeline at once.
@@ -400,6 +406,9 @@ export default function App() {
                   onDismiss={operations.dismiss}
                 />
               ) : null
+            }
+            logs={
+              selectedNode ? <LogsPanel logs={logs} kind={selectedNode.kind} /> : null
             }
           />
         ) : null}

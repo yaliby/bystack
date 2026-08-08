@@ -42,8 +42,11 @@ from bystack.core.ports.command import (
 )
 from bystack.core.ports.provider import GraphWriter, ProviderHealth, ProviderState
 from bystack.providers.agent.commands import (
+    CAP_LOGS,
     SUPPORTED,
     CommandChannel,
+    LogsChannel,
+    LogsResult,
     refuse_read_only,
 )
 from bystack.providers.agent.ingest import AgentIngest
@@ -67,6 +70,15 @@ KIND = "agent"
 #: uplink the managed host sits behind.
 COMMAND_TIMEOUT = 45.0
 
+#: How long to wait for an agent to answer a log read.
+#:
+#: Shorter than a command's deadline, and the difference is not arbitrary. A
+#: command may legitimately take thirty seconds -- a graceful stop waits out
+#: its own grace period at the far end -- whereas a log read is one bounded
+#: response from a daemon on the same machine as the agent. An operator
+#: staring at a spinner is better served by a refusal they can retry.
+LOGS_TIMEOUT = 20.0
+
 
 class AgentProvider:
     """One enrolled host, managed through its agent."""
@@ -77,6 +89,7 @@ class AgentProvider:
         "_ingest",
         "_session",
         "_channel",
+        "_logs",
         "_state",
         "_detail",
         "_connected_at",
@@ -92,6 +105,7 @@ class AgentProvider:
         self._ingest = AgentIngest(provider_id, writer)
         self._session: AgentSession | None = None
         self._channel = CommandChannel()
+        self._logs = LogsChannel()
         self._state = ProviderState.STOPPED
         self._detail: str | None = None
         self._connected_at = 0.0
@@ -162,6 +176,7 @@ class AgentProvider:
                 "deltas": self._deltas,
                 "frames": self._frames,
                 "pending_commands": len(self._channel),
+                "pending_logs": len(self._logs),
                 "connected_for": int(time.time() - self._connected_at) if self.connected else 0,
             },
         )
@@ -184,6 +199,7 @@ class AgentProvider:
 
         self._session = session
         self._channel = CommandChannel()
+        self._logs = LogsChannel()
         self._connected_at = time.time()
         self._set(ProviderState.STARTING, None)
 
@@ -197,6 +213,7 @@ class AgentProvider:
         # command in flight gets an immediate answer rather than waiting out
         # its full deadline for a reply that provably cannot arrive.
         self._channel.abandon(reason)
+        self._logs.abandon(reason)
         self._session = None
         # The membership cache describes a live agent's view. Keeping it
         # across a gap would let the reconnecting agent's first Delta be
@@ -245,6 +262,8 @@ class AgentProvider:
                 self._set(ProviderState.READY, None)
             case "command_result":
                 self._channel.resolve(envelope.command_result)
+            case "logs_response":
+                self._logs.resolve(envelope.logs_response)
             case other:
                 # Not an error. An agent from a later release may send frames
                 # this Controller predates, and mixed-version fleets are a
@@ -321,6 +340,37 @@ class AgentProvider:
         if session.read_only:
             raise refuse_read_only(self._id)
         return await self._channel.dispatch(session, request, target, COMMAND_TIMEOUT)
+
+    # -- reads -------------------------------------------------------------
+
+    async def logs(self, container_id: str, tail: int) -> LogsResult:
+        """The tail of one container's log.
+
+        Deliberately not a `CommandKind`, and deliberately not routed through
+        `CommandService`. That enum is the closed set of *mutations* a
+        read-only Controller refuses; refusing to show an operator why a
+        container is failing because the platform is in its safe mode would be
+        exactly backwards. `session.read_only` is not consulted here for the
+        same reason, and the agent answers regardless of its own setting.
+
+        Refuses with a reason rather than an empty list, because those are
+        different answers: a container that has written nothing is `ok` with
+        no lines, and a host whose agent is asleep is not.
+        """
+        session = self._session
+        if session is None:
+            return LogsResult(
+                False, f"the agent on {self._id} is not currently connected"
+            )
+        if CAP_LOGS not in session.capabilities:
+            # Absence is the answer for both "too old" and "compiled out", and
+            # it is named as a version so an operator knows what to upgrade.
+            return LogsResult(
+                False,
+                f"the agent on {self._id} (version {session.agent_version or 'unknown'}) "
+                f"cannot read container logs",
+            )
+        return await self._logs.fetch(session, container_id, tail, LOGS_TIMEOUT)
 
     # -- internals ---------------------------------------------------------
 

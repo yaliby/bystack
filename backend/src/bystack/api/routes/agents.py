@@ -104,7 +104,14 @@ _TERMINAL: Final = frozenset(
 class WebSocketAgentSession:
     """An :class:`~bystack.core.ports.agent.AgentSession` over a WebSocket."""
 
-    __slots__ = ("_socket", "_engine_id", "_read_only", "_local", "_agent_version")
+    __slots__ = (
+        "_socket",
+        "_engine_id",
+        "_read_only",
+        "_local",
+        "_agent_version",
+        "_capabilities",
+    )
 
     def __init__(
         self, socket: WebSocket, engine_id: str, hello: wire.Hello, *, local: bool = False
@@ -118,6 +125,10 @@ class WebSocketAgentSession:
         self._read_only = hello.read_only
         self._local = local
         self._agent_version = hello.agent_version
+        # Frozen at Hello and not re-read, because it describes the binary at
+        # the other end of *this* connection. An agent upgraded in place
+        # reconnects, and the new session carries the new set.
+        self._capabilities = frozenset(hello.capabilities)
 
     @property
     def engine_id(self) -> str:
@@ -134,6 +145,10 @@ class WebSocketAgentSession:
     @property
     def agent_version(self) -> str:
         return self._agent_version
+
+    @property
+    def capabilities(self) -> frozenset[str]:
+        return self._capabilities
 
     async def send(self, envelope: object) -> None:
         assert isinstance(envelope, wire.Envelope)

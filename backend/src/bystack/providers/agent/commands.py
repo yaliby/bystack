@@ -1,18 +1,25 @@
-"""Command dispatch over an agent connection.
+"""Request/response correlation over an agent connection.
 
 The `command_id` correlation map ADR-0009 chose to hand-roll rather than take
 8 MB of gRPC machinery for. It is the sixty lines the ADR budgeted, and this
 is the file where the bet is settled.
 
-The shape of the problem: commands go down one stream, results come back up
+The shape of the problem: requests go down one stream, answers come back up
 the same stream, out of order, and the caller is an `await` in an HTTP request
 that must not hang forever. So each dispatch parks a future in a map keyed by
-`command_id`, and the receive loop resolves it.
+its own id, and the receive loop resolves it.
 
 Three things must be true or this leaks, and each is handled explicitly below:
 the future is always removed, a disconnect fails every waiter rather than
-leaving them parked, and a result for a command we do not remember is
+leaving them parked, and an answer to a question we do not remember asking is
 discarded loudly rather than raising in the receive loop.
+
+Two channels live here, and the second is deliberately *not* a command.
+:class:`LogsChannel` carries reads: `CommandKind` is the closed set of
+mutations a read-only Controller refuses, and refusing to show an operator why
+a container is failing because the platform is in its safe mode would be
+exactly backwards. Logs are their own frame, the agent answers them regardless
+of `read_only`, and nothing about them goes through `CommandService`.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Final
 
 from bystack.agent.v1 import agent_pb2 as wire
@@ -45,6 +53,25 @@ SUPPORTED: Final[frozenset[CommandKind]] = frozenset(CommandKind)
 #: set is verb-specific and open; the agent ignores what it does not know.
 ARG_TIMEOUT: Final = "timeout"
 ARG_SIGNAL: Final = "signal"
+
+#: The capability an agent advertises at `Hello` when it can answer a
+#: `LogsRequest`. Checked before sending one: a frame an older agent does not
+#: recognise is ignored at the far end, so without this the request would time
+#: out with no diagnosis rather than refuse with one.
+CAP_LOGS: Final = "logs"
+
+#: The most lines an operator may ask for.
+#:
+#: Mirrors `MAX_LOG_LINES` in `agent/src/docker.rs`, which is where the real
+#: clamp is -- this one exists so the refusal happens before a frame crosses
+#: the network, and so the OpenAPI schema states the bound. The duplication is
+#: intentional and the agent's copy is authoritative: it is the side holding
+#: the memory budget, and it must not trust a number we sent it.
+MAX_LOG_TAIL: Final = 2000
+
+#: What a caller gets who does not say. A screenful of scrollback and change,
+#: which is what "why did this container die" actually needs.
+DEFAULT_LOG_TAIL: Final = 200
 
 
 class CommandChannel:
@@ -135,6 +162,126 @@ class CommandChannel:
         operator watching a spinner for thirty seconds after the host has
         already gone.
         """
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(AgentDisconnected(reason))
+        self._pending.clear()
+
+
+@dataclass(frozen=True, slots=True)
+class LogLine:
+    """One line, with the stream it came out of.
+
+    The tag is kept per line rather than flattened into one blob, because the
+    line that explains a crash is almost always on stderr and that is most of
+    the diagnostic value of showing logs at all.
+    """
+
+    stderr: bool
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class LogsResult:
+    """An answer, or a refusal that says why.
+
+    Never an empty list on its own. `GET /commands/actions` set the precedent:
+    an empty answer with no reason renders as nothing at all, which an
+    operator reads as a feature that failed to load rather than as an answer.
+    A container that genuinely has written nothing is `ok` with no lines, and
+    the UI can say so.
+    """
+
+    ok: bool
+    reason: str | None = None
+    lines: tuple[LogLine, ...] = ()
+
+
+class LogsChannel:
+    """Outstanding log reads for one agent connection.
+
+    The same shape as :class:`CommandChannel` and for the same three reasons,
+    which is why it is a sibling rather than a generalisation of it: the two
+    differ in what a failure *means*. A command that times out may still have
+    mutated the host, so its outcome is `REJECTED` and carries a warning
+    against retrying. A log read that times out changed nothing, so it is
+    simply a refusal an operator can act on by asking again.
+    """
+
+    __slots__ = ("_pending",)
+
+    def __init__(self) -> None:
+        self._pending: dict[str, asyncio.Future[wire.LogsResponse]] = {}
+
+    def __len__(self) -> int:
+        return len(self._pending)
+
+    async def fetch(
+        self, session: AgentSession, container_id: str, tail: int, deadline: float
+    ) -> LogsResult:
+        """Ask for the tail of one container's log, and wait for it.
+
+        ``container_id`` is Docker's own id, never a URN -- the same line
+        ADR-0009 §1 draws for commands, for the same reason: the agent does
+        not know the URN scheme and must not learn it.
+        """
+        request_id = uuid.uuid4().hex[:16]
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[wire.LogsResponse] = loop.create_future()
+        self._pending[request_id] = future
+
+        try:
+            await session.send(
+                wire.Envelope(
+                    logs_request=wire.LogsRequest(
+                        request_id=request_id,
+                        target_id=container_id,
+                        tail=min(max(tail, 1), MAX_LOG_TAIL),
+                    )
+                )
+            )
+            async with asyncio.timeout(deadline):
+                response = await future
+        except AgentDisconnected as exc:
+            return LogsResult(False, str(exc))
+        except TimeoutError:
+            return LogsResult(
+                False, f"the agent did not answer within {deadline:.0f}s"
+            )
+        finally:
+            # Unconditional, exactly as above. Every path out of here --
+            # answer, disconnect, timeout, or the operator navigating away and
+            # cancelling the request -- must drop the entry.
+            self._pending.pop(request_id, None)
+
+        if not response.ok:
+            # The engine's own words, carried through unchanged. An operator
+            # chasing a failure should not have to guess whether the container
+            # or the request was wrong.
+            return LogsResult(False, response.reason or "the agent could not read the log")
+        return LogsResult(
+            True,
+            None,
+            tuple(LogLine(stderr=line.stderr, text=line.text) for line in response.lines),
+        )
+
+    def resolve(self, response: wire.LogsResponse) -> None:
+        """Hand an answer to whoever is waiting for it.
+
+        Called from the receive loop, so it must never raise: an unknown
+        `request_id` is a late answer after a timeout, and tearing down a
+        healthy connection over it would turn a cosmetic problem into an
+        outage.
+        """
+        future = self._pending.get(response.request_id)
+        if future is None:
+            log.debug("logs for unknown request %s; ignoring", response.request_id)
+            return
+        if not future.done():
+            future.set_result(response)
+
+    def abandon(self, reason: str) -> None:
+        """Fail every waiter. Called when the connection drops."""
         for future in list(self._pending.values()):
             if not future.done():
                 future.set_exception(AgentDisconnected(reason))

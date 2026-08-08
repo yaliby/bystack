@@ -59,10 +59,22 @@ C2 = "d" * 64
 class FakeSession:
     """An agent that records what it was sent and answers when told to."""
 
-    def __init__(self, *, read_only: bool = False, dead: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        read_only: bool = False,
+        dead: bool = False,
+        capabilities: tuple[str, ...] = ("commands", "resync", "renewal", "logs"),
+    ) -> None:
         self.engine_id = ENGINE_ID
         self.read_only = read_only
         self.dead = dead
+        # Mirrors the port. What a build can do is advertised at Hello rather
+        # than inferred from a version, because absence is the same answer for
+        # "too old" and "compiled out" -- see `core/ports/agent.py`.
+        self.capabilities = frozenset(capabilities)
+        self.agent_version = "0.1.0"
+        self.local = False
         self.sent: list[wire.Envelope] = []
 
     async def send(self, envelope: object) -> None:

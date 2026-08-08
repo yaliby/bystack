@@ -24,6 +24,7 @@ from bystack.core.ports.command import (
     TargetOutcome,
 )
 from bystack.core.ports.provider import ProviderHealth
+from bystack.providers.agent.commands import LogsResult
 from bystack.runtime.commands import AvailableActions
 
 
@@ -258,6 +259,39 @@ class ActionsOut(BaseModel):
             commands=[str(k) for k in actions.commands],
             reason=str(actions.reason) if actions.reason else None,
             detail=actions.detail,
+        )
+
+
+class LogLineOut(BaseModel):
+    """One line, and which stream it came out of."""
+
+    stderr: bool
+    text: str
+
+
+class ContainerLogsOut(BaseModel):
+    """The tail of a container's log, or a reason there is none.
+
+    ``ok`` is what separates "this container has written nothing" from "we
+    could not ask" -- two situations that render identically as an empty list
+    and mean nothing like the same thing to whoever is debugging.
+    """
+
+    target: str
+    ok: bool
+    reason: str | None = None
+    lines: list[LogLineOut] = []
+
+    @classmethod
+    def of(cls, target: str, result: LogsResult) -> ContainerLogsOut:
+        return cls.model_construct(
+            target=target,
+            ok=result.ok,
+            reason=result.reason,
+            lines=[
+                LogLineOut.model_construct(stderr=line.stderr, text=line.text)
+                for line in result.lines
+            ],
         )
 
 

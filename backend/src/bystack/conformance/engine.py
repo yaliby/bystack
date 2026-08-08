@@ -70,6 +70,11 @@ class ScriptedEngine:
         self.networks = list(networks)
         self.volumes = list(volumes)
         self.images = list(images)
+        #: Container id -> the lines it has written, as ``(stderr, text)``.
+        #:
+        #: Held per container rather than globally so that asking the wrong
+        #: one is a visible failure rather than a coincidence that passes.
+        self.logs: dict[str, list[tuple[bool, str]]] = {}
         self.recorded = Recorded()
 
         self._server: asyncio.AbstractServer | None = None
@@ -171,6 +176,14 @@ class ScriptedEngine:
             await self._act(path, query, writer)
             return
 
+        # Matched on shape rather than prefix: the list endpoint is
+        # `/containers/json`, so a `startswith("/containers/")` test alone
+        # would send it here as a container called "json".
+        parts = path.strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "containers" and parts[2] == "logs":
+            await self._logs(parts[1], query, writer)
+            return
+
         match path:
             case "/info":
                 await _json(writer, self.info)
@@ -228,6 +241,39 @@ class ScriptedEngine:
         }.get(verb, state)
         await _raw(writer, 204, b"")
 
+    async def _logs(
+        self, container_id: str, query: dict[str, list[str]], writer: asyncio.StreamWriter
+    ) -> None:
+        """``GET /containers/{id}/logs``, in Docker's multiplexed framing.
+
+        The framing is the whole point of scripting this endpoint rather than
+        returning plain text: an 8-byte header per chunk whose first byte is
+        the stream (1 = stdout, 2 = stderr) and whose last four are the
+        payload length, big-endian. An agent that returns lines but loses the
+        tag passes every plain-text fixture and throws away most of the
+        diagnostic value -- the line that explains a crash is almost always
+        the one on stderr.
+
+        ``tail`` is applied here, by the daemon, because that is what makes
+        the answer bounded on a container that has been logging for a month.
+        Docker applies it per stream; so does this.
+        """
+        if not any(c["Id"] == container_id for c in self.containers):
+            await _status(writer, 404, {"message": f"No such container: {container_id}"})
+            return
+
+        lines = self.logs.get(container_id, [])
+        tail = int(query.get("tail", [str(len(lines))])[0] or len(lines))
+
+        # Tailed per stream and then restored to write order, which is what
+        # the daemon does -- and the reason the agent's `demultiplex` has to
+        # tail the merged result a second time.
+        kept: set[int] = set()
+        for stream in (False, True):
+            indexes = [i for i, (s, _) in enumerate(lines) if s is stream]
+            kept.update(indexes[-tail:])
+        await _raw(writer, 200, b"".join(_frame(*lines[i]) for i in sorted(kept)))
+
     async def _stream_events(
         self, query: dict[str, list[str]], writer: asyncio.StreamWriter
     ) -> None:
@@ -250,6 +296,17 @@ class ScriptedEngine:
         # closes it, or the agent goes away.
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.Event().wait()
+
+
+def _frame(stderr: bool, text: str) -> bytes:
+    """One chunk in Docker's multiplexed log framing.
+
+    Byte 0 is the stream, bytes 1-3 are zero, bytes 4-8 are the payload
+    length big-endian. The three zero bytes are what an agent uses to tell a
+    framed body from a TTY container's raw one, so they are not padding.
+    """
+    payload = (text + "\n").encode()
+    return bytes([2 if stderr else 1, 0, 0, 0]) + len(payload).to_bytes(4, "big") + payload
 
 
 async def _json(writer: asyncio.StreamWriter, payload: Any) -> None:

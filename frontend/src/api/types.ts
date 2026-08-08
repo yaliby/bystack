@@ -156,6 +156,33 @@ export interface Actions {
   readonly detail: string | null;
 }
 
+/**
+ * One log line, and which stream the container wrote it to.
+ *
+ * The tag survives the whole way from Docker's multiplexed framing rather
+ * than being flattened on the way through, because the line that explains a
+ * crash is almost always the one on stderr.
+ */
+export interface LogLine {
+  readonly stderr: boolean;
+  readonly text: string;
+}
+
+/**
+ * The tail of a container's log, or a reason there is none.
+ *
+ * `ok` is what separates "this container has written nothing" from "we could
+ * not ask" — two situations that are the same empty list and nothing like the
+ * same answer to whoever is debugging. A disconnected host arrives here as
+ * `ok: false` with a reason, not as an HTTP error.
+ */
+export interface ContainerLogs {
+  readonly target: Urn;
+  readonly ok: boolean;
+  readonly reason: string | null;
+  readonly lines: readonly LogLine[];
+}
+
 // ---------------------------------------------------------------------------
 // Enrollment (ADR-0011)
 //

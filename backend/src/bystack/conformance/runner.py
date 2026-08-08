@@ -301,6 +301,67 @@ async def scenario_command(h: Harness) -> None:
     )
 
 
+async def scenario_logs(h: Harness) -> None:
+    """A log read, which is deliberately not a command.
+
+    `CommandKind` is the closed set of mutations a read-only Controller
+    refuses. Logs are their own frame and the agent answers them regardless of
+    its own `read_only` setting, because refusing to show an operator why a
+    container is failing on the grounds that the platform is in its safe mode
+    is exactly backwards.
+
+    The check that cannot be made anywhere else is the framing. Docker
+    multiplexes both streams down one connection with an 8-byte header per
+    chunk, and an agent that returns the lines but loses the tag passes every
+    plain-text fixture while throwing away most of the diagnostic value.
+    """
+    target = next(iter(h.nodes_of(NodeKind.CONTAINER)))
+    container_id = target.urn.segments[-1]
+    h.engine.logs[container_id] = [
+        (False, "listening on :80"),
+        (True, "upstream timed out"),
+        (False, "shutting down"),
+    ]
+
+    provider = h.collector.agent_provider(target.source, create=False)
+    if provider is None:
+        h.record("logs round trip", "the host must have a provider to read through", False)
+        return
+
+    result = await provider.logs(container_id, 100)
+    h.record(
+        "logs round trip",
+        "a logs request must reach the socket and its answer must find its way back",
+        result.ok and len(result.lines) == 3,
+        result.reason or f"{len(result.lines)} lines",
+    )
+
+    tagged = [(line.stderr, line.text) for line in result.lines]
+    h.record(
+        "log streams stay tagged",
+        "the line that explains a crash is almost always the one on stderr",
+        (True, "upstream timed out") in tagged
+        and (False, "listening on :80") in tagged,
+        f"{sum(1 for stderr, _ in tagged if stderr)} of {len(tagged)} on stderr",
+    )
+
+    tailed = await provider.logs(container_id, 1)
+    h.record(
+        "tail is applied by the daemon",
+        "an unbounded read is how a month-old log exhausts a small agent",
+        tailed.ok and len(tailed.lines) < 3,
+        f"{len(tailed.lines)} lines for tail=1",
+    )
+
+    missing = await provider.logs("0" * 64, 100)
+    h.record(
+        "a refusal says why",
+        "an operator must not have to guess whether the container or the request was wrong",
+        not missing.ok and bool(missing.reason),
+        missing.reason or "refused with no reason",
+    )
+
+
 async def scenario_reconnect(h: Harness) -> None:
     """Kill the event stream and confirm the agent notices.
 
@@ -422,6 +483,7 @@ SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("coalescing", scenario_coalescing),
     ("removal", scenario_removal),
     ("commands", scenario_command),
+    ("logs", scenario_logs),
     ("reconnect", scenario_reconnect),
     ("budget", scenario_budget),
 ]

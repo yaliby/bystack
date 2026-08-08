@@ -25,6 +25,15 @@ interface Props {
    * in the app.
    */
   readonly actions?: React.ReactNode;
+  /**
+   * The log panel, passed in for the same reason as `actions`.
+   *
+   * Kept a slot rather than a prop bundle so this component still fetches
+   * nothing: reading a log is a round trip to an agent on a remote host, and
+   * putting that behind a selection change in the least testable file in the
+   * app is exactly what this separation exists to prevent.
+   */
+  readonly logs?: React.ReactNode;
 }
 
 export function NodeInspector({
@@ -35,6 +44,7 @@ export function NodeInspector({
   onNavigate,
   onClose,
   actions = null,
+  logs = null,
 }: Props) {
   if (edge && !node) {
     return (
@@ -85,6 +95,11 @@ export function NodeInspector({
       {/* Above identity and attributes: during an incident the operator is
           here to act, not to read a URN. */}
       {actions}
+
+      {/* Directly under the actions and above identity: an operator who has
+          just been offered `restart` is here because something is wrong, and
+          the log is how they decide whether to press it. */}
+      {logs}
 
       <Section title="Identity">
         <Row label="URN" value={node.urn} mono />

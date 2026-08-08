@@ -813,6 +813,111 @@ body {
   opacity: 1;
 }
 
+/* -- logs ---------------------------------------------------------------
+   Collapsed until asked. Opening it costs a round trip to an agent on a
+   remote host, and an inspector that led with two hundred lines of log would
+   bury the identity and the actions the operator came here for.
+
+   The header is a flex row so the disclosure, the stderr count and Refresh
+   share the line the section title would otherwise have to itself. */
+.inspector h3:has(.logs__toggle) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logs__toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  /* Inherits the section heading's type on purpose: it is the heading, and a
+     disclosure that restyled itself would read as a control bolted beside
+     one. */
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.logs__toggle:hover {
+  color: var(--ink-secondary);
+}
+
+.logs__caret {
+  font-size: 9px;
+  opacity: 0.75;
+}
+
+.logs__errors {
+  color: var(--serious);
+  letter-spacing: 0.04em;
+}
+
+.logs__refresh {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.logs__refresh:hover {
+  text-decoration: underline;
+}
+
+.logs__notice {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Muted for an answer, serious for a failure to get one. A quiet container
+   and an offline host are both an empty list and are not the same news. */
+.logs__notice--muted {
+  color: var(--ink-muted);
+}
+
+.logs__notice--warning {
+  color: var(--serious);
+}
+
+.logs {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface);
+  list-style: none;
+  /* Bounded height with its own scroll: the tail is up to 200 lines and the
+     inspector still has relationships below it. */
+  max-height: 260px;
+  overflow: auto;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.logs__line {
+  color: var(--ink-secondary);
+  /* Wrapped rather than truncated: a stack trace clipped at the panel edge is
+     the half of the line that does not say what threw. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.logs__line--stderr {
+  color: var(--critical);
+}
+
+.logs__foot {
+  margin: 6px 0 0;
+  font-size: 11px;
+}
+
 /* -- hosts --------------------------------------------------------------
    Enrollment lives on the canvas because the topology map is the control
    surface: adding a host is a change to the picture, not a trip to a

@@ -68,6 +68,25 @@ class AgentSession(Protocol):
         ...
 
     @property
+    def capabilities(self) -> frozenset[str]:
+        """What this agent build can do, as advertised in ``Hello``.
+
+        A set rather than a version comparison, because absence is the same
+        answer for "too old to know the frame" and "compiled out of this
+        build" -- and the caller's decision is identical in both cases. A
+        version table would have to be maintained on the Controller for every
+        agent release ever shipped, and would still be wrong for a build with
+        a feature disabled.
+
+        Mixed-version fleets are a normal operating state under ADR-0008, not
+        a migration window, so this is consulted before sending any frame an
+        older agent would not recognise -- it would otherwise be silently
+        ignored at the far end and the request would time out with no
+        diagnosis, which is the worst of the available failures.
+        """
+        ...
+
+    @property
     def local(self) -> bool:
         """Whether this agent is the one the Controller spawned itself.
 
