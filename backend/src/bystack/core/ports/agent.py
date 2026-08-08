@@ -57,6 +57,29 @@ class AgentSession(Protocol):
         """
         ...
 
+    @property
+    def agent_version(self) -> str:
+        """What the agent said it was, in ``Hello``.
+
+        Taken from the live connection rather than from the enrollment record,
+        because an agent upgraded in place never enrols again -- a record-based
+        answer would report the version the host joined with, indefinitely.
+        """
+        ...
+
+    @property
+    def local(self) -> bool:
+        """Whether this agent is the one the Controller spawned itself.
+
+        A property of the *connection*, not of the host: it says the session
+        arrived on a unix socket and was admitted by filesystem permissions
+        rather than by a certificate, and therefore that there is no enrollment
+        record behind it and no certificate to renew. Everything else about the
+        session is identical, which is why this is the only place the
+        difference appears above the transport.
+        """
+        ...
+
     async def send(self, envelope: object) -> None:
         """Push one frame to the agent.
 

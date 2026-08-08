@@ -13,13 +13,19 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use prost::Message;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::docker::{ActionResult, Engine};
 use crate::informer::{self, State, ALL_SLICES};
+use crate::trust::{self, Credentials};
 use crate::wire::{self, envelope::Payload, Slice};
-use crate::Config;
+use crate::{Config, Endpoint};
 
 /// Agent-initiated, so it also keeps the NAT mapping alive.
 ///
@@ -42,9 +48,9 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
     // what makes the first frame of every connection a genuine full Sync.
     state.clear();
 
-    let (socket, _) = match tokio_tungstenite::connect_async(&config.controller_url).await {
-        Ok(pair) => pair,
-        Err(e) => return Ended::Disconnected(format!("cannot reach the controller: {e}")),
+    let socket = match dial(config).await {
+        Ok(socket) => socket,
+        Err(ended) => return ended,
     };
     let (mut sink, mut stream) = socket.split();
 
@@ -69,7 +75,12 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
         // arrives on the wire; telling the Controller lets the UI disable the
         // actions rather than offer them and watch every one bounce.
         read_only: config.read_only,
-        capabilities: vec!["commands".into(), "resync".into()],
+        capabilities: vec!["commands".into(), "resync".into(), "renewal".into()],
+        // Our clock, so the Controller can name a skew as a skew. Certificate
+        // validation is time-sensitive and a badly wrong clock otherwise
+        // surfaces as a generic TLS error that sends whoever is debugging it
+        // to look at the CA (ADR-0011, Consequences).
+        unix_time: unix_time(),
     });
     if sink.send(WsMessage::Binary(send(hello, &mut seq))).await.is_err() {
         return Ended::Disconnected("controller closed during Hello".into());
@@ -87,12 +98,22 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
     };
 
     if !ack.accepted {
-        // "certificate revoked" does not improve by reconnecting.
-        return Ended::Refused(if ack.reason.is_empty() {
-            "controller refused this agent".into()
+        let reason = if ack.reason.is_empty() {
+            "controller refused this agent".to_string()
         } else {
             ack.reason
-        });
+        };
+        // The two refusals are not the same shape and treating them alike
+        // gets one of them badly wrong. "Awaiting approval" is answered by an
+        // operator clicking approve, with this process doing nothing but
+        // coming back; "certificate revoked" is answered by a person on this
+        // host, and retrying it forever is a log line a minute until someone
+        // notices.
+        return if ack.retry {
+            Ended::Disconnected(reason)
+        } else {
+            Ended::Refused(reason)
+        };
     }
 
     let resync_interval = Duration::from_secs(if ack.resync_interval == 0 {
@@ -102,7 +123,7 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
     });
     log(&format!(
         "connected to {} (epoch {}, resync {}s)",
-        config.controller_url,
+        config.controller.describe(),
         ack.controller_epoch,
         resync_interval.as_secs()
     ));
@@ -146,6 +167,12 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
     resync.tick().await; // the first tick is immediate
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.tick().await;
+
+    //: The private key for a renewal we have asked for and not yet been
+    //: answered. Held here rather than written to disk, because a key with no
+    //: certificate is not a credential and a half-written pair is worse than
+    //: neither -- the two only become useful together.
+    let mut pending_key: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -230,6 +257,70 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
                             return Ended::Disconnected(reason);
                         }
                     }
+                    // Our certificate is two thirds through its life. Answer
+                    // with a CSR, over the connection that is already open and
+                    // already authenticated -- no cron job, no second channel,
+                    // no expiry outage (ADR-0011).
+                    Some(Payload::RenewalOffer(offer)) => {
+                        match trust::new_request() {
+                            Ok(request) => {
+                                pending_key = Some(request.key_pem);
+                                let frame = send(
+                                    Payload::CertificateRequest(wire::CertificateRequest {
+                                        csr_pem: request.csr_pem,
+                                    }),
+                                    &mut seq,
+                                );
+                                if sink.send(WsMessage::Binary(frame)).await.is_err() {
+                                    watcher.abort();
+                                    return Ended::Disconnected(
+                                        "controller closed during renewal".into(),
+                                    );
+                                }
+                            }
+                            // Not fatal. The certificate is still valid for a
+                            // third of its life, and the offer comes again on
+                            // every connection until one of them works.
+                            Err(e) => log(&format!(
+                                "cannot renew (certificate expires at {}): {e}",
+                                offer.not_after
+                            )),
+                        }
+                    }
+
+                    Some(Payload::CertificateIssued(issued)) => {
+                        // The key is the one we generated for the CSR that
+                        // asked for this. Without it the certificate is
+                        // useless, so a reply we did not ask for is dropped
+                        // rather than written over a working identity.
+                        match (issued.ok, pending_key.take()) {
+                            (true, Some(key_pem)) => {
+                                match Credentials::replace(
+                                    &config.state_dir,
+                                    &issued.certificate_pem,
+                                    &key_pem,
+                                    &issued.ca_pem,
+                                ) {
+                                    // Takes effect on the next connection,
+                                    // which is where the credentials are read.
+                                    // Renegotiating this one would buy nothing:
+                                    // the old certificate is valid until it
+                                    // is not.
+                                    Ok(()) => log(&format!(
+                                        "certificate renewed, valid until {}",
+                                        issued.not_after
+                                    )),
+                                    Err(e) => log(&format!(
+                                        "renewed certificate could not be stored in {}: {e}",
+                                        config.state_dir.display()
+                                    )),
+                                }
+                            }
+                            (false, _) => log(&format!("renewal refused: {}", issued.reason)),
+                            (true, None) => log("ignoring a certificate we did not ask for"),
+                        }
+                    }
+
                     // Unknown frames are ignored, not fatal. A Controller from
                     // a later release may send what this agent predates, and
                     // mixed versions are a normal operating state.
@@ -250,12 +341,98 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
     }
 }
 
-type Sink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    WsMessage,
->;
+// --------------------------------------------------------------------------
+// The pipe
+// --------------------------------------------------------------------------
+
+/// Anything the framing can run over.
+///
+/// Boxed rather than made a type parameter on purpose: a generic session would
+/// be monomorphised into two complete copies of the informer, the command
+/// path and the renewal path, in a binary whose size is a measured budget
+/// (ARCHITECTURE §11). One virtual call per frame is not on any path that
+/// matters — a busy host produces a handful of frames a minute.
+pub trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
+
+type Io = Box<dyn IoStream>;
+
+/// One type for both endpoints, which is what keeps everything below this
+/// point ignorant of which one it is talking over.
+type Upstream = WebSocketStream<MaybeTlsStream<Io>>;
+
+type Sink = futures_util::stream::SplitSink<Upstream, WsMessage>;
+
+/// The Host header has to be *something*, and nothing reads this one: a unix
+/// socket is already the address. `ws://` rather than `wss://` is what selects
+/// the plaintext branch of the handshake — there is no TLS to do over a pipe
+/// whose only reachable end is a file on this machine.
+const LOCAL_URL: &str = "ws://localhost/api/v1/agents/connect";
+
+/// Open the stream, however this Controller is reached.
+///
+/// The two arms differ in the socket and in the connector, and in nothing
+/// else. Both end in the same handshake against the same route, which is the
+/// property `docs/MIGRATION.md` §4 is asking for: the local case is a
+/// transport, not a second implementation.
+async fn dial(config: &Config) -> Result<Upstream, Ended> {
+    match &config.controller {
+        Endpoint::Local(path) => {
+            let socket = UnixStream::connect(path).await.map_err(|e| {
+                Ended::Disconnected(format!("cannot reach the controller on {}: {e}", path.display()))
+            })?;
+            let request = LOCAL_URL
+                .into_client_request()
+                .map_err(|e| Ended::Refused(format!("unusable local endpoint: {e}")))?;
+            open(request, Box::new(socket), None).await.map_err(Ended::Disconnected)
+        }
+
+        Endpoint::Remote(base) => {
+            // Re-read on every connection, not held across them. A renewal that
+            // arrived over the last stream wrote a new certificate, and this is
+            // where it takes effect -- without it, automatic renewal would need
+            // a restart to do anything, which is most of the point of it gone.
+            let credentials = match Credentials::load(&config.state_dir) {
+                Ok(Some(credentials)) => credentials,
+                Ok(None) => return Err(Ended::Refused("this host's credentials are gone".into())),
+                Err(e) => return Err(Ended::Refused(e)),
+            };
+            let connector = trust::mutual_connector(&credentials).map_err(Ended::Refused)?;
+
+            let request = crate::connect_url(base)
+                .into_client_request()
+                .map_err(|e| Ended::Refused(format!("unusable controller URL: {e}")))?;
+            let socket = tcp(&request).await.map_err(Ended::Disconnected)?;
+            open(request, socket, Some(connector)).await.map_err(Ended::Disconnected)
+        }
+    }
+}
+
+/// Connect the TCP socket the TLS handshake will run over.
+///
+/// Dialled here rather than by `connect_async` so that both endpoints can
+/// produce the same stream type. Name resolution and multi-address fallback
+/// are `ToSocketAddrs`' job either way.
+async fn tcp(request: &Request<()>) -> Result<Io, String> {
+    let uri = request.uri();
+    let host = uri.host().ok_or_else(|| format!("no host in {uri}"))?;
+    let port = uri.port_u16().unwrap_or(443);
+    let socket = TcpStream::connect((host, port))
+        .await
+        .map_err(|e| trust::explain(&format!("cannot reach the controller at {host}:{port}: {e}")))?;
+    // Frames are small and infrequent, and latency is what the operator sees.
+    // Nagle would hold a delta back waiting for company that is not coming.
+    let _ = socket.set_nodelay(true);
+    Ok(Box::new(socket))
+}
+
+async fn open(request: Request<()>, socket: Io, connector: Option<Connector>) -> Result<Upstream, String> {
+    let (upstream, _) =
+        tokio_tungstenite::client_async_tls_with_config(request, socket, None, connector)
+            .await
+            .map_err(|e| trust::explain(&format!("cannot reach the controller: {e}")))?;
+    Ok(upstream)
+}
 
 /// Re-List the dirty slices and send whatever moved.
 async fn push(

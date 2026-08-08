@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 #: What a `hosts:` block used to mean, and why it is now refused.
 #:
@@ -46,19 +46,106 @@ class AgentsConfig(BaseModel):
         default=False,
         description="Accept agent connections. Off until an operator opts in.",
     )
+    """Off until asked, though no longer because we cannot tell who is calling.
+
+    Every connection is mutually authenticated now (ADR-0011), so an open
+    listener is not the exposure it was before step 4. What is left is
+    narrower and still worth defaulting away from: this binds a port, usually
+    a public one, and a Controller someone started to look at a graph should
+    not open it without being asked.
+    """
+
+    listen: str = Field(
+        default="0.0.0.0:8443",
+        description="host:port where agents dial in. Separate from the UI port.",
+    )
+    """A separate listener from the browser's, deliberately (MIGRATION section 3).
+
+    One side is browser-facing and may sit behind an ordinary reverse proxy;
+    this one requires client certificates and must not be terminated by
+    anything that would strip them. Two ports is the honest way to say that.
+
+    `0.0.0.0` because an agent listener that only accepts loopback accepts no
+    agents -- the whole model is remote hosts dialling in. The exposure is
+    bounded by the fact that nothing without a certificate from our CA
+    completes a handshake.
+    """
+
+    server_names: list[str] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "::1"],
+        description="Names and addresses the listener's certificate is valid for.",
+    )
+    """What agents will have typed after `wss://`.
+
+    This has to be configured for any deployment agents reach by a real name:
+    a certificate without the name in it fails verification, correctly, and
+    the agent will say so. Defaulted to loopback rather than to a guess,
+    because a guessed hostname produces a certificate that is wrong in a way
+    that looks like a bug in the CA.
+    """
 
     auto_approve: bool = Field(
         default=False,
-        description="Adopt an unknown agent on first connection instead of refusing it.",
+        description="Approve an agent on enrollment instead of leaving it pending.",
     )
     """Off by default, and the default is the security control.
 
-    Until mTLS enrollment lands (ADR-0011) the agent endpoint has no way to
-    tell a real agent from anything else that can reach the port, so an
-    unknown engine id is refused unless an operator has said otherwise. With
-    ``auto_approve`` on, whatever connects first *becomes* a managed host --
-    acceptable on a trusted network, never as a shipped default.
+    A valid join token always yields a certificate; approval is the separate
+    question of whether that agent contributes to the graph. Leaving it off
+    means a stolen token produces a visible pending agent instead of a silent
+    managed host -- and that visibility is the entire point (ADR-0011).
+
+    With it on, whatever redeems a token becomes a managed host immediately.
+    Reasonable while bringing up a fleet, never as a shipped default.
     """
+
+    cert_ttl_days: int = Field(
+        default=90,
+        ge=1,
+        le=825,
+        description="Lifetime of an issued agent certificate.",
+    )
+    """Short, and renewed at two thirds elapsed over the stream that is already
+    open. No cron job, no second channel, no expiry outage. The ceiling is the
+    825 days browsers settled on; nothing here needs to go near it."""
+
+    max_clock_skew: int = Field(
+        default=60,
+        ge=1,
+        description="Seconds of disagreement with an agent's clock we tolerate.",
+    )
+    """Certificate validation is time-sensitive, so a badly wrong clock is a
+    connection failure -- and one that surfaces as a generic TLS error saying
+    nothing useful. The agent reports its own clock in `Hello` so we can refuse
+    with the actual diagnosis while its certificate is still valid."""
+
+    state_dir: str = Field(
+        default="~/.local/state/bystack",
+        description="Where the CA key and the enrollment registry live.",
+    )
+    """The one directory in this project worth backing up.
+
+    It holds the CA private key -- losing it means re-enrolling the fleet --
+    and the enrollment registry, which is the operator's record of which hosts
+    were approved. Everything else the Controller knows is rebuilt from the
+    agents within seconds of a cold start (ADR-0001).
+    """
+
+    @property
+    def listen_address(self) -> tuple[str, int]:
+        """``listen`` split, with ``[::]:8443`` spelled the way it must be.
+
+        Validated on load rather than at bind time: a port typo that surfaces
+        when uvicorn starts is a stack trace, and one that surfaces here is a
+        message naming the field.
+        """
+        return _split_address(self.listen)
+
+    @field_validator("listen")
+    @classmethod
+    def _validate_listen(cls, value: str) -> str:
+        _split_address(value)
+        return value
 
     resync_interval: int = Field(
         default=900,
@@ -75,6 +162,62 @@ class AgentsConfig(BaseModel):
     """
 
 
+class LocalAgentConfig(BaseModel):
+    """The agent the Controller spawns for its own machine.
+
+    This is what zero-config startup is (`docs/MIGRATION.md` §4). It is not a
+    second discovery path: the Controller runs the same agent binary every
+    managed host runs, over a unix socket instead of TLS, and everything above
+    the transport — informer, frames, ingest, partition writer — is the code
+    that serves the fleet.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Manage this machine's Docker engine by spawning a local agent.",
+    )
+    """On by default, unlike `agents.enabled`, and for the reason that one is
+    off: this binds no port and admits no stranger. It costs a 1.8 MiB child
+    process reading a socket that is already on this machine.
+
+    When there is no engine here -- a Controller on a host that manages
+    others -- it finds no Docker socket and says so, which is a better first
+    run than an empty graph with no explanation.
+    """
+
+    binary: str = Field(
+        default="",
+        description="Path to bystack-agent. Empty means find it.",
+    )
+    """Empty searches `BYSTACK_AGENT_BINARY`, the bundled copy, `PATH`, and the
+    build directory of a source checkout, in that order. Set explicitly it is
+    an assertion and is never fallen back from -- an operator who named a
+    binary and silently got a different one would have no way to find out."""
+
+    docker_socket: str = Field(
+        default="/var/run/docker.sock",
+        min_length=1,
+        description="The engine the local agent reads. Never read by the Controller.",
+    )
+    """Required, unlike the two paths above, because there is no sensible way to
+    search for it and an empty string is not one: `Path("")` is the current
+    directory, which exists -- so a blank value would sail through the "is
+    there an engine here" check and spawn an agent pointed at a directory.
+    Refused at load, where the message can name the field."""
+    """The Controller does not open this and never will (ARCHITECTURE §1); it
+    is passed to the child, which is the only process here that speaks to
+    Docker at all."""
+
+    socket: str = Field(
+        default="",
+        description="Where the local agent dials. Empty means inside agents.state_dir.",
+    )
+    """Created 0600 in a 0700 directory, which is the whole of this
+    connection's authentication: anything that can open it is already this
+    user on this machine, with the access to the Docker socket that an agent
+    would be protecting."""
+
+
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     """Loopback by default. This service holds root-equivalent access to every
@@ -87,6 +230,7 @@ class ApiConfig(BaseModel):
 
 class Settings(BaseModel):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    local_agent: LocalAgentConfig = Field(default_factory=LocalAgentConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     read_only: bool = Field(
         default=True,
@@ -124,13 +268,31 @@ class Settings(BaseModel):
 
     @classmethod
     def default(cls) -> Settings:
-        """Zero-config startup: a Controller with nothing to manage yet.
+        """Zero-config startup: manage this machine, and wait for the rest.
 
-        It used to mean "discover the local engine", which the Controller can
-        no longer do -- it reaches no socket, local or remote. Hosts arrive by
-        installing an agent, and the endpoint they dial stays off until an
-        operator turns it on, because until mTLS lands (ADR-0011) it trusts
-        whoever reaches it. Defaulting it to on would be a Controller that
-        adopts the first thing to find the port.
+        It means "discover the local engine" again, and it does so without the
+        Controller reaching a Docker socket: a local agent is spawned and dials
+        in over a unix socket, through the same ingest path every enrolled host
+        uses (`runtime/localagent.py`, `docs/MIGRATION.md` section 4).
+
+        The fleet listener stays off until an operator turns it on. That is a
+        different question and keeps its answer: it binds a port, usually a
+        public one, and a Controller started to look at a graph should not open
+        one unasked.
         """
         return cls()
+
+
+def _split_address(value: str) -> tuple[str, int]:
+    """``host:port``, including the bracketed IPv6 spelling."""
+    host, separator, port = value.rpartition(":")
+    if not separator or not host:
+        raise ValueError(f"expected host:port, got {value!r}")
+    host = host.strip("[]")
+    try:
+        number = int(port)
+    except ValueError:
+        raise ValueError(f"{port!r} is not a port number in {value!r}") from None
+    if not 1 <= number <= 65535:
+        raise ValueError(f"port {number} is out of range in {value!r}")
+    return host, number

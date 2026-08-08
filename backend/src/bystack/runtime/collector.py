@@ -52,11 +52,13 @@ class Collector:
         enrolled host and binds inbound connections to them
         (`docs/MIGRATION.md` §2).
 
-        ``create=False`` is the refusal path for an agent we do not know.
-        Until enrollment lands (ADR-0011) that check is the only thing
-        standing between the endpoint and anything else that can reach the
-        port, so it is a parameter the caller must pass deliberately rather
-        than a default that can be forgotten.
+        ``create=False`` is the refusal path for an agent we do not know. It
+        is no longer the security control it was before ADR-0011 landed --
+        enrollment and admission are, in `runtime/trust.py`, and by the time
+        anything calls this with ``create=True`` the engine id has come out of
+        a certificate this Controller signed. It stays an explicit parameter
+        anyway: the caller is asserting that it checked, and a default would
+        make that assertion by omission.
 
         The partition key is the engine id, which is also the agent's identity
         under ADR-0011. An agent reinstalled on the same host therefore keeps

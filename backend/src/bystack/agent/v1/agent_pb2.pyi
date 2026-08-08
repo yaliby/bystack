@@ -21,7 +21,7 @@ SLICE_VOLUME: Slice
 SLICE_IMAGE: Slice
 
 class Envelope(_message.Message):
-    __slots__ = ("seq", "hello", "hello_ack", "sync", "delta", "command", "command_result", "resync_request")
+    __slots__ = ("seq", "hello", "hello_ack", "sync", "delta", "command", "command_result", "resync_request", "enroll_request", "enroll_response", "renewal_offer", "certificate_request", "certificate_issued")
     SEQ_FIELD_NUMBER: _ClassVar[int]
     HELLO_FIELD_NUMBER: _ClassVar[int]
     HELLO_ACK_FIELD_NUMBER: _ClassVar[int]
@@ -30,6 +30,11 @@ class Envelope(_message.Message):
     COMMAND_FIELD_NUMBER: _ClassVar[int]
     COMMAND_RESULT_FIELD_NUMBER: _ClassVar[int]
     RESYNC_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    ENROLL_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    ENROLL_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    RENEWAL_OFFER_FIELD_NUMBER: _ClassVar[int]
+    CERTIFICATE_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    CERTIFICATE_ISSUED_FIELD_NUMBER: _ClassVar[int]
     seq: int
     hello: Hello
     hello_ack: HelloAck
@@ -38,35 +43,98 @@ class Envelope(_message.Message):
     command: Command
     command_result: CommandResult
     resync_request: ResyncRequest
-    def __init__(self, seq: _Optional[int] = ..., hello: _Optional[_Union[Hello, _Mapping]] = ..., hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., sync: _Optional[_Union[Sync, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., command: _Optional[_Union[Command, _Mapping]] = ..., command_result: _Optional[_Union[CommandResult, _Mapping]] = ..., resync_request: _Optional[_Union[ResyncRequest, _Mapping]] = ...) -> None: ...
+    enroll_request: EnrollRequest
+    enroll_response: EnrollResponse
+    renewal_offer: RenewalOffer
+    certificate_request: CertificateRequest
+    certificate_issued: CertificateIssued
+    def __init__(self, seq: _Optional[int] = ..., hello: _Optional[_Union[Hello, _Mapping]] = ..., hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., sync: _Optional[_Union[Sync, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., command: _Optional[_Union[Command, _Mapping]] = ..., command_result: _Optional[_Union[CommandResult, _Mapping]] = ..., resync_request: _Optional[_Union[ResyncRequest, _Mapping]] = ..., enroll_request: _Optional[_Union[EnrollRequest, _Mapping]] = ..., enroll_response: _Optional[_Union[EnrollResponse, _Mapping]] = ..., renewal_offer: _Optional[_Union[RenewalOffer, _Mapping]] = ..., certificate_request: _Optional[_Union[CertificateRequest, _Mapping]] = ..., certificate_issued: _Optional[_Union[CertificateIssued, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("agent_version", "engine_id", "engine", "read_only", "capabilities")
+    __slots__ = ("agent_version", "engine_id", "engine", "read_only", "capabilities", "unix_time")
     AGENT_VERSION_FIELD_NUMBER: _ClassVar[int]
     ENGINE_ID_FIELD_NUMBER: _ClassVar[int]
     ENGINE_FIELD_NUMBER: _ClassVar[int]
     READ_ONLY_FIELD_NUMBER: _ClassVar[int]
     CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
+    UNIX_TIME_FIELD_NUMBER: _ClassVar[int]
     agent_version: str
     engine_id: str
     engine: EngineInfo
     read_only: bool
     capabilities: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, agent_version: _Optional[str] = ..., engine_id: _Optional[str] = ..., engine: _Optional[_Union[EngineInfo, _Mapping]] = ..., read_only: _Optional[bool] = ..., capabilities: _Optional[_Iterable[str]] = ...) -> None: ...
+    unix_time: int
+    def __init__(self, agent_version: _Optional[str] = ..., engine_id: _Optional[str] = ..., engine: _Optional[_Union[EngineInfo, _Mapping]] = ..., read_only: _Optional[bool] = ..., capabilities: _Optional[_Iterable[str]] = ..., unix_time: _Optional[int] = ...) -> None: ...
 
 class HelloAck(_message.Message):
-    __slots__ = ("controller_epoch", "resync_interval", "accepted", "reason", "feature_flags")
+    __slots__ = ("controller_epoch", "resync_interval", "accepted", "reason", "feature_flags", "retry")
     CONTROLLER_EPOCH_FIELD_NUMBER: _ClassVar[int]
     RESYNC_INTERVAL_FIELD_NUMBER: _ClassVar[int]
     ACCEPTED_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
     FEATURE_FLAGS_FIELD_NUMBER: _ClassVar[int]
+    RETRY_FIELD_NUMBER: _ClassVar[int]
     controller_epoch: str
     resync_interval: int
     accepted: bool
     reason: str
     feature_flags: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, controller_epoch: _Optional[str] = ..., resync_interval: _Optional[int] = ..., accepted: _Optional[bool] = ..., reason: _Optional[str] = ..., feature_flags: _Optional[_Iterable[str]] = ...) -> None: ...
+    retry: bool
+    def __init__(self, controller_epoch: _Optional[str] = ..., resync_interval: _Optional[int] = ..., accepted: _Optional[bool] = ..., reason: _Optional[str] = ..., feature_flags: _Optional[_Iterable[str]] = ..., retry: _Optional[bool] = ...) -> None: ...
+
+class EnrollRequest(_message.Message):
+    __slots__ = ("join_token", "engine_id", "csr_pem", "agent_version")
+    JOIN_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    ENGINE_ID_FIELD_NUMBER: _ClassVar[int]
+    CSR_PEM_FIELD_NUMBER: _ClassVar[int]
+    AGENT_VERSION_FIELD_NUMBER: _ClassVar[int]
+    join_token: str
+    engine_id: str
+    csr_pem: str
+    agent_version: str
+    def __init__(self, join_token: _Optional[str] = ..., engine_id: _Optional[str] = ..., csr_pem: _Optional[str] = ..., agent_version: _Optional[str] = ...) -> None: ...
+
+class EnrollResponse(_message.Message):
+    __slots__ = ("accepted", "reason", "certificate_pem", "ca_pem", "not_after", "pending_approval")
+    ACCEPTED_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    CERTIFICATE_PEM_FIELD_NUMBER: _ClassVar[int]
+    CA_PEM_FIELD_NUMBER: _ClassVar[int]
+    NOT_AFTER_FIELD_NUMBER: _ClassVar[int]
+    PENDING_APPROVAL_FIELD_NUMBER: _ClassVar[int]
+    accepted: bool
+    reason: str
+    certificate_pem: str
+    ca_pem: str
+    not_after: int
+    pending_approval: bool
+    def __init__(self, accepted: _Optional[bool] = ..., reason: _Optional[str] = ..., certificate_pem: _Optional[str] = ..., ca_pem: _Optional[str] = ..., not_after: _Optional[int] = ..., pending_approval: _Optional[bool] = ...) -> None: ...
+
+class RenewalOffer(_message.Message):
+    __slots__ = ("not_after",)
+    NOT_AFTER_FIELD_NUMBER: _ClassVar[int]
+    not_after: int
+    def __init__(self, not_after: _Optional[int] = ...) -> None: ...
+
+class CertificateRequest(_message.Message):
+    __slots__ = ("csr_pem",)
+    CSR_PEM_FIELD_NUMBER: _ClassVar[int]
+    csr_pem: str
+    def __init__(self, csr_pem: _Optional[str] = ...) -> None: ...
+
+class CertificateIssued(_message.Message):
+    __slots__ = ("ok", "reason", "certificate_pem", "ca_pem", "not_after")
+    OK_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    CERTIFICATE_PEM_FIELD_NUMBER: _ClassVar[int]
+    CA_PEM_FIELD_NUMBER: _ClassVar[int]
+    NOT_AFTER_FIELD_NUMBER: _ClassVar[int]
+    ok: bool
+    reason: str
+    certificate_pem: str
+    ca_pem: str
+    not_after: int
+    def __init__(self, ok: _Optional[bool] = ..., reason: _Optional[str] = ..., certificate_pem: _Optional[str] = ..., ca_pem: _Optional[str] = ..., not_after: _Optional[int] = ...) -> None: ...
 
 class Sync(_message.Message):
     __slots__ = ("slice", "entities")

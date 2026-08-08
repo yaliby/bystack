@@ -22,15 +22,12 @@ import os
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 
-import uvicorn
 from fastapi import FastAPI
 
-from bystack.api.app import API_PREFIX, create_app
 from bystack.api.deps import AppContext
-from bystack.config import AgentsConfig, Settings
+from bystack.conformance import controller as conformance_controller
 from bystack.conformance.engine import (
     DEFAULT_IMAGE,
     DEFAULT_NETWORK,
@@ -38,6 +35,7 @@ from bystack.conformance.engine import (
     ScriptedEngine,
     make_container,
 )
+from bystack.conformance.report import Check, report
 from bystack.core.graph.model import Node
 from bystack.core.graph.store import GraphStore
 from bystack.core.identity import NodeKind
@@ -52,19 +50,24 @@ C2 = "d" * 64
 SETTLE = 6.0
 
 
-@dataclass
-class Check:
-    name: str
-    why: str
-    passed: bool
-    detail: str = ""
-
-
 class Harness:
-    def __init__(self, engine: ScriptedEngine, app: FastAPI, port: int) -> None:
+    def __init__(
+        self,
+        engine: ScriptedEngine,
+        app: FastAPI,
+        port: int,
+        *,
+        binary: Path,
+        pid: int | None = None,
+    ) -> None:
         self.engine = engine
         self.app = app
         self.port = port
+        # The binary and the process running it, for the budget checks. Held
+        # here rather than passed to one scenario, because a scenario
+        # signature that varies is a scenario list that cannot be reordered.
+        self.binary = binary
+        self.pid = pid
         self.checks: list[Check] = []
 
     @property
@@ -282,6 +285,101 @@ async def scenario_reconnect(h: Harness) -> None:
     )
 
 
+async def scenario_budget(h: Harness) -> None:
+    """The numbers in ARCHITECTURE §11, measured rather than remembered.
+
+    A budget that is only written down has already been exceeded. This is the
+    check that noticed mutual TLS doubling the binary — which was fine, and
+    which nobody would have known was fine without measuring it.
+
+    Runs last, because it loads the engine to the hundred containers the
+    published figures are quoted for and leaves it that way.
+    """
+    if h.pid is None or _rss_mib(h.pid) is None:
+        h.record(
+            "agent budget",
+            "the budget is the whole argument for the agent's design",
+            True,
+            "skipped: no /proc on this platform",
+        )
+        return
+
+    size = h.binary.stat().st_size / MIB
+    h.record(
+        "binary within budget",
+        f"the artifact is copied onto every managed host; budget {BUDGET_BINARY_MIB} MiB",
+        size < BUDGET_BINARY_MIB,
+        f"{size:.2f} MiB",
+    )
+
+    for index in range(100):
+        h.engine.containers.append(make_container(f"{index:064x}", f"budget-{index}"))
+    await h.engine.emit("container")
+    await h.until(lambda: len(h.nodes_of(NodeKind.CONTAINER)) >= 100, within=15.0)
+
+    rss = _rss_mib(h.pid)
+    h.record(
+        "RSS within budget",
+        f"multiplied by the fleet, on hardware bought for something else; "
+        f"budget {BUDGET_RSS_MIB} MiB",
+        rss is not None and rss < BUDGET_RSS_MIB,
+        f"{rss:.2f} MiB with {len(h.nodes_of(NodeKind.CONTAINER))} containers"
+        if rss is not None
+        else "unreadable",
+    )
+
+    # Measured over a window with nothing happening, which is where the agent
+    # spends almost all of its life. A polling loop that looks free at one
+    # sample does not survive three seconds of arithmetic.
+    before = _cpu_seconds(h.pid)
+    await asyncio.sleep(IDLE_WINDOW)
+    used = _cpu_seconds(h.pid)
+    idle = None if before is None or used is None else (used - before) / IDLE_WINDOW * 100
+    h.record(
+        "idle CPU within budget",
+        f"an idle agent must cost nothing measurable; budget {BUDGET_CPU_PERCENT} %",
+        idle is not None and idle < BUDGET_CPU_PERCENT,
+        f"{idle:.2f} % over {IDLE_WINDOW:.0f}s" if idle is not None else "unreadable",
+    )
+
+
+#: ADR-0010's budget, quoted as written. ARCHITECTURE §11 carries the measured
+#: figures; these are the ceilings they must stay under.
+BUDGET_BINARY_MIB = 12.0
+BUDGET_RSS_MIB = 20.0
+BUDGET_CPU_PERCENT = 0.1
+
+MIB = 1024 * 1024
+
+#: Long enough that a busy-wait cannot hide in the rounding, short enough not
+#: to dominate the run.
+IDLE_WINDOW = 3.0
+
+
+def _rss_mib(pid: int) -> float | None:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) / 1024
+    except OSError:
+        return None
+    return None
+
+
+def _cpu_seconds(pid: int) -> float | None:
+    """User + system time, from `/proc/<pid>/stat`.
+
+    Split on `") "` rather than on whitespace: the second field is the
+    executable name in parentheses and may contain spaces, which is the
+    classic way a naive parser reads this file wrong.
+    """
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    except (OSError, IndexError):
+        return None
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
 SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("initial sync", scenario_initial_sync),
     ("watch", scenario_watch),
@@ -291,6 +389,7 @@ SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("removal", scenario_removal),
     ("commands", scenario_command),
     ("reconnect", scenario_reconnect),
+    ("budget", scenario_budget),
 ]
 
 
@@ -312,36 +411,20 @@ async def run(agent_binary: Path, port: int, keep_going: bool) -> int:
     )
     await engine.start()
 
-    app = create_app(
-        Settings(
-            read_only=False,
-            agents=AgentsConfig(enabled=True, auto_approve=True, resync_interval=60),
-        )
-    )
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    )
-    serving = asyncio.create_task(server.serve())
-    # uvicorn signals readiness with a plain attribute rather than an event,
-    # so there is nothing here to await on.
-    while not server.started:  # noqa: ASYNC110
-        await asyncio.sleep(0.05)
+    controller = await conformance_controller.start(workdir, port)
 
-    url = f"ws://127.0.0.1:{port}{API_PREFIX}/agents/connect"
     print(f"engine socket : {socket_path}")
-    print(f"controller    : {url}")
+    print(f"controller    : {controller.url} (mutual TLS)")
     print(f"agent         : {agent_binary}\n")
 
     agent = await asyncio.create_subprocess_exec(
-        str(agent_binary),
-        "--controller", url,
-        "--socket", str(socket_path),
+        *controller.agent_args(agent_binary, socket_path, "solo"),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         env={**os.environ, "RUST_BACKTRACE": "1"},
     )
 
-    harness = Harness(engine, app, port)
+    harness = Harness(engine, controller.app, port, binary=agent_binary, pid=agent.pid)
     try:
         for name, scenario in SCENARIOS:
             if agent.returncode is not None:
@@ -364,29 +447,10 @@ async def run(agent_binary: Path, port: int, keep_going: bool) -> int:
                 if output:
                     print("--- agent output ---")
                     print(output.decode().rstrip())
-        server.should_exit = True
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(serving, timeout=5.0)
+        await controller.stop()
         await engine.stop()
 
-    return report(harness)
-
-
-def report(harness: Harness) -> int:
-    print("\n--- conformance ---")
-    failed = 0
-    for check in harness.checks:
-        mark = "PASS" if check.passed else "FAIL"
-        print(f"  [{mark}] {check.name}")
-        if check.detail:
-            print(f"         {check.detail}")
-        if not check.passed:
-            failed += 1
-            print(f"         why it matters: {check.why}")
-
-    total = len(harness.checks)
-    print(f"\n{total - failed}/{total} checks passed")
-    return 1 if failed else 0
+    return report("conformance", harness.checks)
 
 
 def main(argv: list[str] | None = None) -> int:

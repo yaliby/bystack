@@ -17,13 +17,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from bystack.api.deps import AppContext
 from bystack.api.routes import agents as agent_routes
 from bystack.api.routes import commands as commands_routes
-from bystack.api.routes import graph, health, stream
+from bystack.api.routes import enrollment, graph, health, stream
 from bystack.config import Settings
 from bystack.core.graph.store import InMemoryGraphStore
 from bystack.infra.audit.memory import InMemoryAuditLog
 from bystack.infra.eventbus.memory import InMemoryEventBus
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
+from bystack.runtime.localagent import LocalAgent
+from bystack.runtime.trust import AgentTrust
 
 log = logging.getLogger(__name__)
 
@@ -51,13 +53,24 @@ def build_context(settings: Settings) -> AppContext:
         read_only=settings.read_only,
     )
     return AppContext(
-        settings=settings, store=store, bus=bus, collector=collector, commands=commands
+        settings=settings,
+        store=store,
+        bus=bus,
+        collector=collector,
+        commands=commands,
+        # Opened whether or not the listener is enabled: minting a token is
+        # how an operator gets to the point of enabling it, and the CA has to
+        # exist before there is a fingerprint to put in one.
+        trust=AgentTrust.from_settings(settings),
+        # Constructed whether or not it can run, so that a Controller which
+        # could not spawn one can say why rather than showing an empty fleet.
+        local_agent=LocalAgent(settings),
     )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, context: AppContext | None = None) -> FastAPI:
     settings = settings or Settings.default()
-    context = build_context(settings)
+    context = context or build_context(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -93,10 +106,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(graph.router, prefix=API_PREFIX)
     app.include_router(stream.router, prefix=API_PREFIX)
     app.include_router(commands_routes.router, prefix=API_PREFIX)
-    # Agents share the browser's port for now. MIGRATION §3 puts them on a
-    # separate listener, because one side is browser-facing and may sit behind
-    # an ordinary reverse proxy while the other requires client certificates —
-    # and that split only becomes meaningful once ADR-0011's mTLS exists to be
-    # required.
+    # Minting tokens and approving hosts, on the operator's side of the split.
+    # The agent's side is `create_agent_app` and shares nothing but the
+    # context.
+    app.include_router(enrollment.router, prefix=API_PREFIX)
+    return app
+
+
+def create_agent_app(context: AppContext) -> FastAPI:
+    """The listener agents dial, on its own port (MIGRATION section 3).
+
+    Separate from the browser's app rather than a path on it, because the two
+    have incompatible requirements at the transport: this one demands a client
+    certificate and must not be terminated by anything that would strip it,
+    and the other is meant to sit behind an ordinary reverse proxy. A single
+    port cannot honestly be both.
+
+    It carries **two routes and no middleware**. No CORS, because nothing here
+    is reached by a browser; no lifespan, because the collector belongs to the
+    process and is started once by the app that owns it. The smaller this
+    surface is, the less there is to reason about on the port that faces the
+    fleet.
+    """
+    app = FastAPI(
+        title="ByStack Agent Listener",
+        version="0.1.0",
+        summary="Mutually-authenticated agent connections (ADR-0011)",
+        # No schema endpoints. They document nothing an agent reads -- the
+        # contract is the `.proto` -- and an unauthenticated GET that
+        # enumerates the surface is not worth the convenience.
+        openapi_url=None,
+    )
+    app.state.context = context
     app.include_router(agent_routes.router, prefix=API_PREFIX)
+    return app
+
+
+def create_local_agent_app(context: AppContext) -> FastAPI:
+    """The unix socket the Controller's own agent dials (MIGRATION section 4).
+
+    A third app rather than a path on either of the other two. It carries the
+    single route a local agent uses and no enrollment, and it is bound to a
+    socket in a directory only this user can enter -- so the reason the
+    mutually-authenticated listener demands a certificate (anyone can reach
+    it) simply does not apply, and the reason this one does not (only we can
+    reach it) does not transfer to that one either.
+
+    Making it an app of its own is what keeps that from being a runtime
+    argument. Neither listener can serve the other's admission rule by
+    accident, because neither one has the other's route.
+    """
+    app = FastAPI(
+        title="ByStack Local Agent Listener",
+        version="0.1.0",
+        summary="The bundled agent, over a unix socket",
+        openapi_url=None,
+    )
+    app.state.context = context
+    app.include_router(agent_routes.local_router, prefix=API_PREFIX)
     return app

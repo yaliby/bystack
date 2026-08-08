@@ -29,8 +29,38 @@ serde_json = "1"
 
 prost = { version = "0.13", default-features = false, features = ["std", "derive"] }
 
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect", "handshake",
+    # rustls with *no* root store. The two public spellings of this
+    # (`rustls-tls-webpki-roots`, `rustls-tls-native-roots`) each bring a set
+    # of public CAs we would never consult: the agent trusts exactly one CA,
+    # the Controller's, and a public CA that mis-issues for the Controller's
+    # hostname must not be a way in. This is the underscore-prefixed feature
+    # both of those enable, taken directly and pinned to 0.24 for that reason.
+    "__rustls-tls",
+] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+# Mutual TLS (ADR-0011). Manual roots rather than the platform trust store:
+# the agent pins *our* CA and nothing else, so a public CA that mis-issues for
+# the Controller's hostname is not a way in.
+#
+# `ring` rather than the default `aws-lc-rs` throughout, for the reason the
+# checked-in descriptor set exists: the agent is cross-compiled for every
+# architecture in a fleet, and aws-lc-rs wants cmake and a C toolchain in each
+# of those. `ring` builds where Rust builds.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+
+# CSR generation. The private key never leaves the host and the Controller
+# never sees it -- a CA that generated keys for its clients would be a CA that
+# can impersonate every one of them.
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+
+# Already in the tree via rustls; used directly for the one SHA-256 that
+# checks the CA fingerprint out of a join token.
+ring = "0.17"
 
 [build-dependencies]
 # Reads the checked-in descriptor set rather than shelling out to protoc, so

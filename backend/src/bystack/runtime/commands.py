@@ -187,10 +187,32 @@ class CommandService:
             )
 
         available: set[CommandKind] = set()
+        reachable = False
         for candidate in targets:
             executor = self._executor_for(candidate)
             if executor is not None:
+                reachable = True
                 available |= executor.supported_commands(candidate)
+
+        if not available:
+            # An empty list with no reason renders as nothing at all, which
+            # reads as a feature that failed to load. Name which of the two
+            # emptinesses this is: nobody to ask, or nothing to ask for.
+            return AvailableActions(
+                target=target,
+                kind=node.kind,
+                targets=urns,
+                reason=(
+                    RejectionReason.UNSUPPORTED_STATE
+                    if reachable
+                    else RejectionReason.PROVIDER_UNAVAILABLE
+                ),
+                detail=(
+                    f"nothing can be done to a container that is {node.status!r}"
+                    if reachable
+                    else "no connected agent owns this host right now"
+                ),
+            )
 
         return AvailableActions(
             target=target,

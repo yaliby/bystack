@@ -48,6 +48,14 @@ from bystack.providers.agent.commands import (
 )
 from bystack.providers.agent.ingest import AgentIngest
 
+# Not the cross-provider dependency ARCHITECTURE §6 forbids: that rule is
+# about reading another provider's *partition*, and this is a pure function of
+# a node with no state, no socket and no partition of its own. Both providers
+# speak Docker's state vocabulary because the agent ships Docker's own
+# vocabulary upward (§5) -- see the module docstring, which outlived the
+# provider it was written beside.
+from bystack.providers.docker.capability import supported_commands
+
 log = logging.getLogger(__name__)
 
 KIND = "agent"
@@ -103,6 +111,27 @@ class AgentProvider:
     @property
     def connected(self) -> bool:
         return self._session is not None
+
+    @property
+    def local(self) -> bool:
+        """Whether the attached agent is the Controller's own child.
+
+        Read from the live session rather than remembered, because it is a
+        property of the connection: the same host can be managed locally today
+        and by an enrolled remote agent tomorrow, and the answer must follow
+        whichever one is actually attached.
+        """
+        return self._session is not None and self._session.local
+
+    @property
+    def agent_version(self) -> str:
+        """What the attached agent reported, or empty when none is."""
+        return self._session.agent_version if self._session is not None else ""
+
+    @property
+    def connected_at(self) -> float:
+        """When the current session attached; zero when none is attached."""
+        return self._connected_at if self._session is not None else 0.0
 
     # -- Provider ----------------------------------------------------------
 
@@ -251,14 +280,28 @@ class AgentProvider:
     # -- CommandExecutor ---------------------------------------------------
 
     def supported_commands(self, node: Node) -> frozenset[CommandKind]:
-        """What can be done to this node through this agent.
+        """What can be done to this node through this agent, in its current state.
 
-        Note what is *not* here: any reasoning about the container's state.
-        The Docker provider can consult a live socket; this one is holding a
-        cached view of a host it reaches over someone's home uplink, and the
-        agent will apply the real check against the real daemon a moment
-        later. Duplicating the state table here would add a second opinion
-        that can only ever be more stale than the first.
+        This used to answer state-blind, on the grounds that a cached view of
+        a host reached over someone's home uplink is a second opinion staler
+        than the agent's own check (`docs/MIGRATION.md` §6.6 recorded it as a
+        decision to revisit). Revisited: it is not a second opinion. ``node``
+        is the very node the dashboard is drawing, so consulting it makes the
+        buttons agree with the state displayed beside them — and the failure
+        it removes is a card that reads `running` above a `Start` button,
+        which is incoherent with itself before it is stale.
+
+        Freshness is not the real constraint here either. The agent watches a
+        local event stream and pushes within its 250ms coalescing window, and
+        it still applies the authoritative check against the real daemon
+        (ARCHITECTURE §9 keeps both choke points). What is gained is that an
+        action guaranteed to fail is not offered; what is risked is a button
+        missing for a fraction of a second after a transition, which the next
+        delta repairs.
+
+        Intersected with what this transport can carry, so a command the
+        agent protocol does not implement cannot appear because Docker's
+        state table permits it.
         """
         if self._session is None or node.kind != NodeKind.CONTAINER:
             return frozenset()
@@ -266,7 +309,7 @@ class AgentProvider:
             # Advertised at Hello, so the UI can disable the actions rather
             # than offer them and watch the agent bounce every one.
             return frozenset()
-        return SUPPORTED
+        return SUPPORTED & supported_commands(node)
 
     async def execute(self, request: CommandRequest, target: Node) -> TargetOutcome:
         session = self._session

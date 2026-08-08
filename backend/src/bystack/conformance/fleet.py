@@ -34,12 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import uvicorn
-
 from bystack.agent.v1 import agent_pb2 as wire
-from bystack.api.app import API_PREFIX, create_app
-from bystack.config import AgentsConfig, Settings
+from bystack.conformance import controller as conformance_controller
 from bystack.conformance.engine import ScriptedEngine, make_container
+from bystack.conformance.report import Check, report
 from bystack.core.graph.model import EdgeKind
 from bystack.core.identity import NodeKind, engine_scope, image_urn
 from bystack.core.ports.command import CommandKind, CommandRejected, CommandRequest
@@ -169,19 +167,11 @@ def fleet() -> list[Host]:
     ]
 
 
-@dataclass
-class Check:
-    name: str
-    why: str
-    passed: bool
-    detail: str = ""
-
-
 class Harness:
-    def __init__(self, hosts: list[Host], app: Any, url: str) -> None:
+    def __init__(self, hosts: list[Host], controller: conformance_controller.Controller) -> None:
         self.hosts = {h.name: h for h in hosts}
-        self.app = app
-        self.url = url
+        self.controller = controller
+        self.app = controller.app
         self.checks: list[Check] = []
 
     @property
@@ -226,7 +216,13 @@ class Harness:
     # -- driving agents ----------------------------------------------------
 
     async def spawn(self, host: Host) -> None:
-        args = [str(AGENT_BINARY), "--controller", self.url, "--socket", str(host.socket)]
+        assert host.socket is not None, "the scripted engine must be started first"
+        # A fresh join token and a fresh state directory per spawn. That is
+        # not ceremony for the harness's sake: an agent restarted here goes
+        # through enrollment again, which is the path a reinstalled agent
+        # takes, and it must land back on the same partition because the
+        # engine id is the identity (ADR-0002).
+        args = self.controller.agent_args(AGENT_BINARY, host.socket, host.name)
         if host.read_only:
             args.append("--read-only")
         host.process = await asyncio.create_subprocess_exec(
@@ -743,23 +739,10 @@ async def run(binary: Path, port: int) -> int:
     workdir = Path(tempfile.mkdtemp(prefix="bystack-fleet-"))
     hosts = fleet()
 
-    app = create_app(
-        Settings(
-            read_only=False,
-            agents=AgentsConfig(enabled=True, auto_approve=True, resync_interval=60),
-        )
-    )
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    )
-    serving = asyncio.create_task(server.serve())
-    while not server.started:  # noqa: ASYNC110
-        await asyncio.sleep(0.05)
+    controller = await conformance_controller.start(workdir, port)
+    harness = Harness(hosts, controller)
 
-    url = f"ws://127.0.0.1:{port}{API_PREFIX}/agents/connect"
-    harness = Harness(hosts, app, url)
-
-    print(f"controller : {url}")
+    print(f"controller : {controller.url} (mutual TLS)")
     print(f"agent      : {binary}")
     for host in hosts:
         host.socket = workdir / f"{host.name}.sock"
@@ -787,9 +770,7 @@ async def run(binary: Path, port: int) -> int:
     finally:
         for host in hosts:
             await harness.kill(host)
-        server.should_exit = True
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(serving, timeout=5.0)
+        await controller.stop()
         for host in hosts:
             if host.engine is not None:
                 await host.engine.stop()
@@ -802,24 +783,7 @@ async def run(binary: Path, port: int) -> int:
                     print(f"  [{name}] {line}")
             print()
 
-    return report(harness)
-
-
-def report(harness: Harness) -> int:
-    print("--- fleet conformance ---")
-    failed = 0
-    for check in harness.checks:
-        mark = "PASS" if check.passed else "FAIL"
-        print(f"  [{mark}] {check.name}")
-        if check.detail:
-            print(f"         {check.detail}")
-        if not check.passed:
-            failed += 1
-            print(f"         why it matters: {check.why}")
-
-    total = len(harness.checks)
-    print(f"\n{total - failed}/{total} checks passed")
-    return 1 if failed else 0
+    return report("fleet conformance", harness.checks)
 
 
 def main(argv: list[str] | None = None) -> int:

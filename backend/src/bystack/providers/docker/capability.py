@@ -18,11 +18,13 @@ which went with the agentless path (`docs/MIGRATION.md` §6). The policy did
 not, because it never touched a socket: it is a pure function of a node that
 is already in the graph, and the graph is filled by agents now.
 
-Note that nothing consults it at present. :class:`AgentProvider` deliberately
-does not -- see its ``supported_commands`` -- so ``GET /commands/actions`` is
-currently state-blind for every host. That is a decision to revisit, not a
-table to delete; re-deriving Docker's state vocabulary later is exactly the
-kind of thing that gets it subtly wrong.
+:class:`AgentProvider` consults it, which it did not always do -- for a while
+``GET /commands/actions`` was state-blind for every host, on the grounds that
+a cached view is a staler opinion than the check the agent applies anyway.
+What settled it is that the node passed in here is the same node the dashboard
+is drawing: agreeing with it is coherence, not a second opinion, and a card
+reading `running` above a `Start` button was wrong on its own terms before
+freshness entered into it.
 """
 
 from __future__ import annotations

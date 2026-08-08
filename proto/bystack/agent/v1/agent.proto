@@ -50,6 +50,12 @@ message Envelope {
     Command command = 20;
     CommandResult command_result = 21;
     ResyncRequest resync_request = 22;
+
+    EnrollRequest enroll_request = 30;
+    EnrollResponse enroll_response = 31;
+    RenewalOffer renewal_offer = 32;
+    CertificateRequest certificate_request = 33;
+    CertificateIssued certificate_issued = 34;
   }
 }
 
@@ -92,6 +98,16 @@ message Hello {
   // older agent without a version table: absence of a capability is the
   // answer, and it is the same answer for "too old" and "compiled out".
   repeated string capabilities = 5;
+
+  // The agent's own clock, seconds since the epoch.
+  //
+  // Certificate validation is time-sensitive, so a host with a badly wrong
+  // clock cannot connect -- and the way it fails is a generic TLS handshake
+  // error that says nothing useful (ADR-0011, Consequences). This field lets
+  // the Controller name the real problem on the connection *before* the
+  // certificate ages out from under it, which is worth hours to whoever is
+  // holding the pager.
+  int64 unix_time = 6;
 }
 
 // The Controller's answer. Sent before any command is dispatched.
@@ -113,6 +129,100 @@ message HelloAck {
   string reason = 4;
 
   repeated string feature_flags = 5;
+
+  // Set with `accepted = false` when the refusal may resolve on its own.
+  //
+  // The two cases are not the same shape and an agent that treats them alike
+  // gets one of them badly wrong. "Awaiting approval" is answered by an
+  // operator clicking approve, with the agent doing nothing but coming back;
+  // "certificate revoked" is answered by a person on the host, and an agent
+  // that retries it forever is a log line every minute until someone notices.
+  bool retry = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Trust (ADR-0011)
+// ---------------------------------------------------------------------------
+//
+// Enrollment runs over the same WebSocket and the same framing as everything
+// else, on a separate path (`/agents/enroll`) that does not require a client
+// certificate -- because the whole point of enrolling is that the agent does
+// not have one yet.
+//
+// It could have been an HTTP POST. It is not, because the agent would then
+// need a TLS-capable HTTP client for exactly one request, in a binary whose
+// budget is measured (ARCHITECTURE section 11). One protocol, one contract,
+// one client.
+//
+// The connection is still authenticated in *both* directions before the token
+// crosses it: the join token carries the Controller CA's fingerprint, and the
+// agent refuses to speak to a server whose chain does not end in it. That is
+// k3s's design and it is why enrollment is not trust-on-first-use.
+
+// Agent -> Controller, first and only frame on `/agents/enroll`.
+message EnrollRequest {
+  // Single-use, short-lived, and worth nothing once redeemed or expired. It
+  // grants exactly one capability -- "obtain one certificate" -- for a few
+  // minutes. Compare a long-lived shared secret on every host, which is worth
+  // the whole fleet forever.
+  string join_token = 1;
+
+  // `GET /info` -> `.ID`. Becomes the certificate subject, so this is the
+  // moment "which host is this" and "which agent is this" become the same
+  // question (ADR-0002, ADR-0011).
+  string engine_id = 2;
+
+  // PKCS#10, PEM. The private key never leaves the host and the Controller
+  // never sees it -- a CA that generated keys for its clients would be a CA
+  // that can impersonate every one of them.
+  string csr_pem = 3;
+
+  string agent_version = 4;
+}
+
+message EnrollResponse {
+  bool accepted = 1;
+  string reason = 2;
+
+  string certificate_pem = 3;
+
+  // The CA the agent pins from here on. Sent so the agent's steady-state
+  // connections verify against the certificate rather than the fingerprint it
+  // was handed in a token.
+  string ca_pem = 4;
+
+  int64 not_after = 5;
+
+  // True when the certificate was issued but the agent is not yet approved.
+  //
+  // Enrollment succeeding and being admitted are deliberately two things: a
+  // valid token yields a certificate, and the agent still contributes nothing
+  // to the graph until an operator approves it. The agent connects anyway and
+  // waits, so approval needs no second visit to the host.
+  bool pending_approval = 6;
+}
+
+// Controller -> Agent, over the already-authenticated stream at 2/3 of the
+// certificate's life. No cron job, no second channel, no expiry outage.
+message RenewalOffer {
+  // When the current certificate stops working, so the agent can log
+  // something an operator can act on if renewal keeps failing.
+  int64 not_after = 1;
+}
+
+// Agent -> Controller, in reply to a RenewalOffer. Carries no token: the
+// connection it arrives on is already mutually authenticated, which is the
+// entire reason renewal happens here rather than over a second channel.
+message CertificateRequest {
+  string csr_pem = 1;
+}
+
+message CertificateIssued {
+  bool ok = 1;
+  string reason = 2;
+  string certificate_pem = 3;
+  string ca_pem = 4;
+  int64 not_after = 5;
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,8 @@ from bystack.core.graph.store import GraphStore
 from bystack.core.ports.eventbus import EventBus
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
+from bystack.runtime.localagent import LocalAgent
+from bystack.runtime.trust import AgentTrust
 
 
 @dataclass(slots=True)
@@ -29,6 +31,23 @@ class AppContext:
     bus: EventBus
     collector: Collector
     commands: CommandService
+    trust: AgentTrust
+    """Enrollment, admission and renewal (ADR-0011).
+
+    Shared by both listeners, and it has to be: the operator mints a token on
+    the browser port and the agent redeems it on the other one. One CA, one
+    registry, one answer to "is this host allowed".
+    """
+
+    local_agent: LocalAgent
+    """The agent this Controller spawned for its own machine.
+
+    Reachable from the API only so that a first run can be *explained*: if it
+    could not start, the reason is the difference between a graph that is empty
+    because this machine runs nothing and one that is empty because the binary
+    is missing. Nothing routes commands or observations through it -- those go
+    through the provider its child creates, like every other host's.
+    """
 
 
 def get_context(request: Request) -> AppContext:
@@ -51,8 +70,13 @@ def get_commands(context: Annotated[AppContext, Depends(get_context)]) -> Comman
     return context.commands
 
 
+def get_trust(context: Annotated[AppContext, Depends(get_context)]) -> AgentTrust:
+    return context.trust
+
+
 Context = Annotated[AppContext, Depends(get_context)]
 Store = Annotated[GraphStore, Depends(get_store)]
 Bus = Annotated[EventBus, Depends(get_bus)]
 Collectors = Annotated[Collector, Depends(get_collector)]
 Commands = Annotated[CommandService, Depends(get_commands)]
+Trust = Annotated[AgentTrust, Depends(get_trust)]

@@ -16,6 +16,11 @@ dependencies = [
     # the generated bindings are checked in, so installing the Controller
     # never needs a protobuf compiler.
     "protobuf>=5.27",
+    # The internal CA (ADR-0011): key generation, CSR verification, issuing.
+    # Not optional and not replaceable by the standard library -- `ssl` can
+    # consume certificates but cannot make them, and hand-rolling X.509 is the
+    # last thing anyone should do on a root-equivalent trust path.
+    "cryptography>=43",
 ]
 
 [project.optional-dependencies]

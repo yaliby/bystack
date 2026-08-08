@@ -25,14 +25,46 @@ read_only: true
 # A managed host is not listed anywhere: it registers itself on first
 # connection and is keyed by its Docker Engine ID.
 agents:
-  # Off by default. mTLS enrollment (ADR-0011) is not built yet, so this
-  # endpoint currently trusts whoever reaches it. Do not expose the port.
+  # Off by default, though no longer because we cannot tell who is calling --
+  # every connection is mutually authenticated against the Controller's own CA
+  # (ADR-0011). What is left is narrower and still worth defaulting away from:
+  # this binds a port, usually a public one, and a Controller someone started
+  # to look at a graph should not open it unasked.
   enabled: false
 
-  # Adopt an unknown engine id on first connection instead of refusing it.
-  # With this on, whatever connects first *becomes* a managed host --
-  # acceptable on a trusted network, never as a shipped default.
+  # Where agents dial. A separate listener from the browser's, deliberately:
+  # one side may sit behind an ordinary reverse proxy, and this one must not be
+  # terminated by anything that would strip a client certificate.
+  listen: "0.0.0.0:8443"
+
+  # What agents will have typed after `wss://`. THE ONE FIELD A REAL
+  # DEPLOYMENT MUST SET: a certificate without the name in it fails
+  # verification, correctly, and the agent will say so. Defaulted to loopback
+  # rather than to a guess, because a guessed hostname produces a certificate
+  # that is wrong in a way that reads as a bug in the CA.
+  server_names:
+    - localhost
+    - 127.0.0.1
+
+  # Approve an agent on enrollment instead of leaving it pending. A valid join
+  # token always yields a certificate; approval is the separate question of
+  # whether that agent contributes to the graph. Leaving this off means a
+  # stolen token produces a *visible pending host* rather than a silent managed
+  # one -- and that visibility is the entire point. Reasonable while bringing
+  # up a fleet, never as a shipped default.
   auto_approve: false
+
+  # Lifetime of an issued agent certificate. Renewed by the Controller at two
+  # thirds elapsed, over the connection that is already open and already
+  # authenticated: no cron job, no second channel, no expiry outage.
+  cert_ttl_days: 90
+
+  # The CA private key and the enrollment registry. THE ONE DIRECTORY HERE
+  # WORTH BACKING UP -- losing the key means re-enrolling the fleet, and the
+  # registry is the operator's record of which hosts were approved. Everything
+  # else the Controller knows is rebuilt from the agents within seconds of a
+  # cold start.
+  state_dir: "~/.local/state/bystack"
 
   # Seconds between agent-side resyncs, sent to the agent in HelloAck. Long,
   # because the agent reads a unix socket on the same kernel and there is no
@@ -40,6 +72,33 @@ agents:
   # at steady state it puts zero bytes on the wire, because nothing changed
   # and therefore nothing is sent.
   resync_interval: 900
+
+# The agent the Controller spawns for its own machine (docs/MIGRATION.md #4).
+#
+# This is what zero-config startup is. It is not a second discovery path: the
+# Controller runs the same agent binary every managed host runs, over a unix
+# socket instead of TLS, and everything above the transport is the code that
+# serves the fleet. The Controller still opens no Docker socket itself.
+local_agent:
+  # On by default, unlike `agents.enabled`, and for the reason that one is off:
+  # this binds no port and admits no stranger. Where there is no engine on this
+  # machine it says so and costs nothing.
+  enabled: true
+
+  # Path to bystack-agent. Empty searches BYSTACK_AGENT_BINARY, the bundled
+  # copy, PATH, and a source checkout's build directory, in that order. Set
+  # explicitly it is an assertion and is never fallen back from.
+  binary: ""
+
+  # The engine the child reads. Never opened by the Controller.
+  docker_socket: /var/run/docker.sock
+
+  # Where the local agent dials. Empty puts it in `agents.state_dir`. Created
+  # 0600 in a 0700 directory, which is the whole of this connection's
+  # authentication: anything that can open it is already this user on this
+  # machine, with the access to the Docker socket that an agent would be
+  # protecting.
+  socket: ""
 
 api:
   # Loopback by default. This service holds root-equivalent access to every
