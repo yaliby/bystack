@@ -19,10 +19,11 @@ import asyncio
 import contextlib
 import logging
 import os
+import signal
 import socket
 import ssl
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Final
 
 import uvicorn
@@ -52,13 +53,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-class _Secondary(uvicorn.Server):
+class _Managed(uvicorn.Server):
     """A server that does not touch signal handlers.
 
     Two `uvicorn.Server` instances in one loop both install a SIGINT handler,
     and the second one wins -- so Ctrl-C would stop one listener and leave the
-    other running. Signals belong to the primary server; this one is shut down
-    by :func:`serve` when the primary returns.
+    other running. Signals belong to :func:`serve`, which shuts all of them
+    down together; see :func:`_stop_on_signal` for why not even the primary
+    may keep uvicorn's own handling.
     """
 
     @contextlib.contextmanager
@@ -66,7 +68,37 @@ class _Secondary(uvicorn.Server):
         yield
 
 
-def agent_listener(context: AppContext, log_level: str) -> _Secondary:
+def _stop_on_signal(servers: Sequence[uvicorn.Server]) -> None:
+    """Make SIGINT and SIGTERM an ordinary return from `Server.serve()`.
+
+    uvicorn's own handling cannot do this job. `serve()` restores the handler
+    it replaced and then re-raises the signal it caught, so the *default*
+    disposition terminates the process at that moment -- after the listener
+    has closed but before anything the caller arranged to run afterwards. The
+    visible symptom was a SIGTERM leaving the local agent's socket in the
+    state directory, and it is a systemd `stop` rather than an exotic case.
+
+    Owning the signal here makes the return from `serve()` an ordinary return,
+    so the cleanup in :func:`serve` runs. A second signal is the escape hatch
+    for a shutdown that is itself stuck, and keeps Ctrl-C twice meaning what
+    everyone expects it to mean.
+    """
+    forcing = False
+
+    def request_stop(*_: object) -> None:
+        nonlocal forcing
+        for server in servers:
+            server.should_exit = True
+            if forcing:
+                server.force_exit = True
+        if not forcing:
+            forcing = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, request_stop)
+
+
+def agent_listener(context: AppContext, log_level: str) -> _Managed:
     """The mutually-authenticated listener, with its certificate in hand.
 
     The server certificate is issued by the same internal CA that signs agent
@@ -97,10 +129,10 @@ def agent_listener(context: AppContext, log_level: str) -> _Secondary:
     # six keyword arguments -- which is also what lets `agent_ssl_context`
     # require TLS 1.3 and explain why.
     config.ssl = agent_ssl_context(credentials, context.trust.ca.ca_certificate_path)
-    return _Secondary(config)
+    return _Managed(config)
 
 
-def local_listener(context: AppContext, log_level: str) -> tuple[_Secondary, socket.socket] | None:
+def local_listener(context: AppContext, log_level: str) -> tuple[_Managed, socket.socket] | None:
     """The unix socket the Controller's own agent dials, if there is one.
 
     The socket is bound by :class:`LocalAgent` rather than by uvicorn, because
@@ -121,12 +153,12 @@ def local_listener(context: AppContext, log_level: str) -> tuple[_Secondary, soc
         access_log=False,
     )
     config.load()
-    return _Secondary(config), listener
+    return _Managed(config), listener
 
 
 async def serve(settings: Settings, host: str | None, port: int | None) -> None:
     context = build_context(settings)
-    primary = uvicorn.Server(
+    primary = _Managed(
         uvicorn.Config(
             create_app(settings, context),
             host=host or settings.api.host,
@@ -136,7 +168,7 @@ async def serve(settings: Settings, host: str | None, port: int | None) -> None:
     )
 
     background: list[asyncio.Task[None]] = []
-    servers: list[_Secondary] = []
+    servers: list[_Managed] = []
     log_level = settings.log_level.lower()
 
     local = local_listener(context, log_level)
@@ -167,6 +199,9 @@ async def serve(settings: Settings, host: str | None, port: int | None) -> None:
             "Mint a token with POST %s and set agents.enabled: true to add hosts",
             "/api/v1/agents/tokens",
         )
+
+    # After the secondaries exist, so one Ctrl-C stops all three.
+    _stop_on_signal([primary, *servers])
 
     try:
         await primary.serve()

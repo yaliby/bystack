@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -58,6 +59,94 @@ async def until(predicate: object, within: float = SETTLE) -> bool:
             return True
         await asyncio.sleep(0.05)
     return bool(predicate())
+
+
+async def stopped_by_signal(agent_binary: Path) -> list[Check]:
+    """Stop the Controller the way a service manager stops it.
+
+    Every other check here drives shutdown by calling it. A service manager
+    sends a signal instead, and that was a different path: uvicorn restores
+    the handler it replaced and then re-raises the signal when `serve()`
+    returns, so the process died before the cleanup its caller arranged could
+    run, and a `systemctl stop` left the socket in the state directory.
+
+    No in-process harness can observe that -- the bug is in what happens to
+    the process. So this one spawns the real entry point and signals it, and
+    is the only check in the suite that does.
+    """
+    workdir = Path(tempfile.mkdtemp(prefix="bystack-signal-"))
+    engine = ScriptedEngine(
+        workdir / "docker.sock",
+        containers=[make_container(C1, "shop-web-1")],
+        networks=[DEFAULT_NETWORK],
+        volumes=[DEFAULT_VOLUME],
+        images=[DEFAULT_IMAGE],
+    )
+    await engine.start()
+
+    socket_path = workdir / "state" / "local-agent.sock"
+    config = workdir / "bystack.yaml"
+    # Port 0 because nothing here connects to the browser's listener; what is
+    # under test is the exit, and a fixed port would make this check fail for
+    # the one reason it must never fail for.
+    config.write_text(
+        "read_only: true\n"
+        "agents:\n  enabled: false\n"
+        f"  state_dir: {workdir / 'controller'}\n"
+        "local_agent:\n  enabled: true\n"
+        f"  binary: {agent_binary}\n"
+        f"  docker_socket: {workdir / 'docker.sock'}\n"
+        f"  socket: {socket_path}\n"
+        "api:\n  host: 127.0.0.1\n  port: 0\n"
+    )
+
+    checks: list[Check] = []
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "bystack", "--config", str(config),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        started = await until(socket_path.exists)
+        checks.append(
+            Check(
+                "the spawned Controller binds its socket",
+                "the rest of this check means nothing if it never started",
+                started,
+                str(socket_path),
+            )
+        )
+
+        process.send_signal(signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=SETTLE)
+            exited = True
+        except TimeoutError:
+            exited = False
+            process.kill()
+            await process.wait()
+
+        checks.append(
+            Check(
+                "SIGTERM stops it, and stops it cleanly",
+                "a service manager sends this, and an exit status is what it reports "
+                "to whoever asks why the unit is not running",
+                exited and process.returncode == 0,
+                f"exit status {process.returncode}" if exited else "did not exit",
+            )
+        )
+        checks.append(
+            Check(
+                "and a signalled shutdown leaves no socket behind either",
+                "the same claim as the check above, on the path a deployment "
+                "actually takes -- `systemctl stop` is not an exotic case",
+                not socket_path.exists(),
+                str(socket_path),
+            )
+        )
+    finally:
+        await engine.stop()
+
+    return checks
 
 
 async def run(agent_binary: Path) -> int:
@@ -262,6 +351,8 @@ async def run(agent_binary: Path) -> int:
             str(context.local_agent.socket_path),
         )
     )
+
+    checks.extend(await stopped_by_signal(agent_binary))
 
     return report("zero-config conformance", checks)
 
