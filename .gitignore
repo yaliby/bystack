@@ -8,3 +8,12 @@ agent/target/
 .ruff_cache/
 dist/
 build/
+*.tsbuildinfo
+
+# A real config, not the example one. It names ports, hostnames and a state
+# directory for one machine; `bystack.example.yaml` is the tracked copy.
+bystack.yaml
+
+# The CA private key lives here by default (MIGRATION section 3).
+.local/
+state/
