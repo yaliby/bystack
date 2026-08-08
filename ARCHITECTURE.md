@@ -379,9 +379,11 @@ reason mapping does: only the Controller holds the whole graph.
 **Only reversible lifecycle transitions exist** — start, stop, restart, pause,
 unpause, kill. Nothing destroys state. That is a sequencing decision, not a
 difficulty: `remove` is one more HTTP call, but it is only defensible once the
-platform can answer *who deleted the database volume*, and the audit log is
-still an in-memory ring with every entry attributed to `anonymous`.
-Destructive operations, durable audit and authentication arrive together.
+platform can answer *who deleted the database volume*. The audit log is
+durable now (`infra/audit/durable.py`, ADR-0012 §4a) and answers *what* and
+*when* across restarts; every entry is still attributed to `anonymous`, so it
+does not answer *who*. Destructive operations, durable audit and
+authentication arrive together, and one of the three is still missing.
 
 Read-only mode is enforced at **two** choke points now, deliberately:
 
@@ -394,6 +396,26 @@ acceptable sole justification for acting on it. An agent configured read-only
 refuses mutations regardless of what arrives on the wire, and advertises that
 at enrollment so the UI can disable the actions rather than offer them and
 fail.
+
+**Reads are not commands, and a log is a read.** `GET /graph/node/logs` does
+not go through `CommandService`, is not a `CommandKind`, and is answered in
+full by a read-only Controller through a read-only agent. Both choke points
+above exist to stop the platform *changing* something it should not; refusing
+to show an operator why a container is failing because the platform is in its
+safe mode would be exactly backwards. It is its own frame on the wire
+(`LogsRequest` / `LogsResponse`, tags 23 and 24), one shot rather than a
+stream, with `tail` clamped by the daemon and again by the agent — following a
+live log is a different feature with a different backpressure problem, and
+this is deliberately not its first half.
+
+**Whether a frame can be sent at all is asked of the connection.** Agents
+advertise a capability set in `Hello`, and the Controller checks it before
+sending anything an older build would not recognise. A set rather than a
+version comparison: absence is the same answer for "too old" and "compiled
+out", and the caller's decision is identical. Mixed-version fleets are a
+normal operating state under ADR-0008, not a migration window, and a frame an
+agent silently ignores is a request that times out with no diagnosis — the
+worst of the available failures.
 
 ---
 
@@ -444,8 +466,8 @@ and the headroom is large enough that the distinction never decides anything.
 
 | | Budget | Measured (MiB) | Before mTLS |
 |---|---|---|---|
-| Binary, static, stripped | < 12 | **1.81** | 0.82 |
-| RSS after a full sync | < 20 | **3.92** | 2.92 |
+| Binary, static, stripped | < 12 | **1.82** | 0.82 |
+| RSS after a full sync | < 20 | **3.95** | 2.92 |
 | CPU, idle | < 0.1 % | **0.00 %** | 0.00 % |
 | Connect + enrol + full sync, 100 containers | — | **29 ms** | 25 ms |
 
@@ -491,6 +513,10 @@ Design consequences, non-negotiable:
 3. **No polling where an event stream exists.** Preference order:
    native event stream → push → incremental sync → periodic reconcile.
 4. **Every table has a retention policy.** No unbounded growth, anywhere.
+   The audit log is the first durable one to answer it: bounded by *count*
+   (20,000 operations) rather than by age, because a duration makes the file's
+   size a function of how busy the installation is — a count is a bound, a
+   duration is a hope ([ADR-0012](docs/adr/0012-operations-and-audit.md) §4a).
 5. ~~Collectors are agentless.~~ **Superseded by
    [ADR-0008](docs/adr/0008-controller-agent-topology.md).** Agents are
    installed on managed hosts. The cost this clause was protecting against —

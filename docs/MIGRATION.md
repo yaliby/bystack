@@ -206,7 +206,7 @@ Four things were decisions rather than transcription:
   and `GET /agents/enrollment` carries it to the fleet panel.
 
 `python -m bystack.conformance.local <binary>` drives the real supervisor, the
-real listener and the real binary through nine checks, against a scripted
+real listener and the real binary through twelve checks, against a scripted
 engine. A harness that built its own subprocess and its own socket would pass
 while the Controller's wiring was broken, which is the only way this can fail.
 
@@ -261,14 +261,14 @@ New, and non-optional:
   than asserted from a spreadsheet — see [ADR-0013](adr/0013-agent-in-rust.md).
   A budget that is only written down has already been exceeded.
 - ✅ **`python -m bystack.conformance <binary>`** — a scripted Docker Engine
-  plus a Controller, driving any agent binary through seventeen behaviours
+  plus a Controller, driving any agent binary through twenty-six behaviours
   — including the three budget gates below, so the figures in ARCHITECTURE §11
   are measured on every run rather than remembered.
   Language-agnostic, so it survives a rewrite. It is where `test_informer.py`'s
   scenarios were translated to rather than re-derived, as §5 asks.
 - ✅ **`python -m bystack.conformance.local <binary>`** — the Controller
   managing its own machine, with no CA, no token, no approval and no open port
-  anywhere (§4). Nine checks, driving the real supervisor and the real
+  anywhere (§4). Twelve checks, driving the real supervisor and the real
   listener: that the socket is 0600 in a 0700 directory, that the graph fills
   with the same URNs any other host produces, that nothing is written to the
   enrollment registry, that a command reaches the engine and lands on the

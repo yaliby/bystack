@@ -19,6 +19,13 @@ single-agent run can observe it -- and each fails silently: the graph looks
 plausible, and it is describing the wrong machine.
 
 Three real agent binaries, three scripted engines, one Controller.
+
+**KNOWN GAP -- `docs/OPEN-WORK.md` §3.3.** Reading a container's log is a
+per-host request too, and it is not checked here: nothing rules out a logs
+request for host B's container being answered by host A's agent, which is
+exactly the class of bug the list above exists for. The engines already hold
+distinguishable containers, so the check is one scenario -- ask A's provider
+for B's container id and assert it is refused rather than answered.
 """
 
 from __future__ import annotations

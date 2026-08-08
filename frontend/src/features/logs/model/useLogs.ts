@@ -27,7 +27,15 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ContainerLogs, Urn } from '../../../api/types';
 import type { LogsState } from './logs';
 
-/** Lines to ask for. The Controller bounds this at 2000 and the agent again. */
+/**
+ * Lines to ask for. The Controller bounds this at 2000 and the agent again.
+ *
+ * **KNOWN GAP — `docs/OPEN-WORK.md` §3.4.** This mirrors `DEFAULT_LOG_TAIL`
+ * on the Controller with nothing keeping the two in step, and the panel's
+ * "Last N lines" footer would go on claiming 200 if the Controller's default
+ * moved. The cheapest fix is deleting this: omit `tail` and take the
+ * Controller's answer, which is the side that owns the bound.
+ */
 const TAIL = 200;
 
 export interface Logs {

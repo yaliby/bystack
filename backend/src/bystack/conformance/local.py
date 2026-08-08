@@ -15,6 +15,12 @@ own wiring was broken, which is the only way this can fail.
 
 The scripted engine keeps the rule the whole suite keeps: **no test anywhere
 requires a Docker daemon or a network.**
+
+**KNOWN GAP -- `docs/OPEN-WORK.md` §3.3.** Reading a container's log is not
+checked here, so nothing proves it works on the zero-config path. This is the
+only suite that drives the unix-socket transport, and the frames it carries
+are the ones a first-run user has. The scenario is a copy of `runner.py`'s
+`scenario_logs`, ~15 lines.
 """
 
 from __future__ import annotations

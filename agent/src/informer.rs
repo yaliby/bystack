@@ -117,6 +117,14 @@ pub const ALL_SLICES: [Slice; 4] =
 /// exactly the set for which the number means anything: a container that has
 /// never restarted is correctly zero without being asked.
 ///
+/// **KNOWN GAP — `docs/OPEN-WORK.md` §3.2.** "Bounded" here is statistical,
+/// not enforced: there is no cap, and the round trips are serialised. A host
+/// with fifty containers in a crash loop pays fifty sequential inspects
+/// before any frame is sent, delaying the containers that are healthy along
+/// with the ones that are not — the informer's cost model inverted, in the
+/// situation an operator is actually watching. The fix is a hard cap plus a
+/// `JoinSet`, and it is two lines of policy rather than a redesign.
+///
 /// A failed inspect is swallowed rather than failing the scan, and silently:
 /// the container may have been removed between the List and this call — the
 /// same race the informer handles everywhere else — and losing the depth of a

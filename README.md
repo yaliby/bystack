@@ -39,16 +39,19 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 | Working now | Being built | Not built yet |
 |---|---|---|
 | Docker discovery (List / Watch / Resync) | Packaging: static builds, image, systemd | User authentication and RBAC |
-| Canonical graph, two-layer identity | | Durable persistence & event timeline |
-| Compose stacks, services, `depends_on` | | Destructive operations (needs both of the above) |
-| Incremental deltas over WebSocket | | Plugin system |
-| Interactive topology canvas | | |
+| Canonical graph, two-layer identity | | Destructive operations (needs the above) |
+| Compose stacks, services, `depends_on` | | Durable graph history |
+| Incremental deltas over WebSocket | | Following a live log |
+| Interactive topology canvas | | Plugin system |
 | Container / service / stack operations | | |
 | Agent wire protocol + Controller ingest | | |
 | mTLS, join-token enrollment, auto-renewal | | |
-| The agent — Rust, 1.81 MiB, 3.9 MiB RSS | | |
-| **Zero-config startup — a bundled local agent** | | |
-| **Hosts and the operations timeline, on the map** | | |
+| The agent — Rust, 1.82 MiB, 3.9 MiB RSS | | |
+| Zero-config startup — a bundled local agent | | |
+| Hosts and the operations timeline, on the map | | |
+| **Container logs, in the node inspector** | | |
+| **Crash-loop depth (`RestartCount`)** | | |
+| **A durable operations log** | | |
 
 Metrics providers are not on that list and never will be: collecting anything
 Prometheus already collects is a **non-goal**, not a missing feature
@@ -115,6 +118,7 @@ situations that otherwise look like the same empty canvas.
 - `GET  /api/v1/graph` — full snapshot
 - `GET  /api/v1/graph/node?urn=…` — one node
 - `GET  /api/v1/graph/node/edges?urn=…` — relationship tracing
+- `GET  /api/v1/graph/node/logs?urn=…&tail=…` — a container's recent output
 - `WS   /api/v1/stream` — snapshot, then incremental deltas
 - `WS   /api/v1/agents/connect` — where agents dial in (protobuf frames)
 - `POST /api/v1/commands` — run an operation
@@ -191,8 +195,8 @@ Three things about that are worth knowing before you rely on it:
   *"Applied · waiting for discovery to confirm"* during that window rather
   than pretending it already happened — see [ADR-0012](docs/adr/0012-operations-and-audit.md).
 - **Nothing here deletes anything.** Only reversible lifecycle transitions
-  exist. `remove` and `prune` wait on durable audit and authentication, which
-  are the things that could answer "who deleted this".
+  exist. `remove` and `prune` wait on authentication — the audit trail is
+  durable now, but "who deleted this" still reads `anonymous`.
 
 **Activity** in the topbar is the timeline of everything that has been run,
 including what was refused and why — a read-only Controller declining to
@@ -202,11 +206,16 @@ Each row is a way back to the node: clicking it selects the target on the
 canvas, and a target that has since been recreated under a new id says so
 rather than offering a click that does nothing.
 
-It is in-memory, lost on restart, and every entry is attributed to
-`anonymous` — the panel says all three, because a timeline that looked durable
-would be trusted as an audit log, and it is not one until authentication and
-durable storage arrive. That is the same reason nothing here deletes anything.
-The same data is at `GET /api/v1/commands/audit`.
+It survives a restart — the log is a JSON Lines file in `agents.state_dir`,
+bounded at 20,000 operations and compacted in place (ADR-0012 §4a). Every
+entry is still attributed to `anonymous`, and the panel says so, because a
+timeline read as an audit log would be trusted for exactly the question it
+cannot answer. That is the same reason nothing here deletes anything. The same
+data is at `GET /api/v1/commands/audit`.
+
+Set `audit.durable: false` for a Controller with nowhere to write; it falls
+back to a bounded in-memory ring rather than refusing to start, and says so at
+ERROR.
 
 ---
 
@@ -225,6 +234,11 @@ agents:
   cert_ttl_days: 90
   state_dir: "~/.local/state/bystack"  # the CA key. Back this up.
   resync_interval: 900
+
+audit:
+  durable: true                 # the operations log survives a restart
+  retain: 20000                 # ADR-0006 clause 4: bounded by count, not by age
+  # path: ""                    # empty means inside agents.state_dir
 ```
 
 `server_names` is the field a real deployment must set: it is what agents will
@@ -313,8 +327,8 @@ order of magnitude under it:
 
 | | Budget | Measured (MiB) | Before mTLS |
 |---|---|---|---|
-| Binary, static, stripped | < 12 | **1.81** | 0.82 |
-| RSS after a full sync | < 20 | **3.92** | 2.92 |
+| Binary, static, stripped | < 12 | **1.82** | 0.82 |
+| RSS after a full sync | < 20 | **3.95** | 2.92 |
 | CPU, idle | < 0.1 % | **0.00 %** | 0.00 % |
 | Connect + enrol + full sync | — | **29 ms** | 25 ms |
 
@@ -336,7 +350,7 @@ cd backend
 ```
 
 This starts a **scripted Docker Engine** on a unix socket and a Controller,
-runs the agent between them, and drives seventeen behaviours. It is
+runs the agent between them, and drives twenty-six behaviours. It is
 language-agnostic: any reimplementation is checked by the same command.
 
 Three of the checks exist because the failures are **invisible at runtime** —
@@ -584,3 +598,28 @@ Each of these cost real debugging time and is defended by a test:
   its *repr*. Two nodes that compare equal then get different revisions, and a
   mapping's hash depends on insertion order — which would re-upsert every node
   on every reconcile, the same failure as hashing `Status`, by a third route.
+- **`RestartCount` is not on `GET /containers/json`.** It exists only on the
+  inspect endpoint, at every API version, so carrying it is not the addition
+  of a field — it is one request per container on every List, in place of one
+  per slice. The agent inspects only containers already listed as
+  `restarting`: bounded, usually empty, and exactly the set the number means
+  anything for. `bystack.conformance` asserts *which* ids were inspected, not
+  how many, because an agent that inspects everything answers correctly and
+  costs a hundred times more.
+- **Hashing a counter is only wrong when the counter is a clock.** `Status`
+  advances on wall time and must not be hashed; `RestartCount` advances on an
+  actual restart and must be, or a crash loop is reported once and never
+  again — `restarting` is the same state on the second failure and the four
+  hundredth. The cost is a resend per restart of a looping container, which is
+  a host that has a problem worth a frame. `FailingStreak` sits on the other
+  side of the same line and is deliberately not hashed.
+- **Logs are not a command.** `CommandKind` is the closed set of *mutations* a
+  read-only Controller refuses. Routing a log read through it would refuse to
+  show an operator why a container is failing on the grounds that the platform
+  is in its safe mode — exactly backwards. Its own frame, answered regardless
+  of `read_only` on both sides.
+- **Ask an agent's `Hello` what it can do; never its version.** A capability
+  absent from the set is the same answer for "too old to know the frame" and
+  "compiled out of this build", and the caller's decision is identical.
+  Sending the frame anyway is worse than refusing: an older agent ignores it
+  silently and the request times out with no diagnosis at all.

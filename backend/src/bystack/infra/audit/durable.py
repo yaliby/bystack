@@ -121,6 +121,12 @@ class DurableAuditLog:
         have aged out between dispatch and result, and losing its outcome is
         not worth failing the command over. The attempt is on disk either way,
         which is the half that matters during an incident.
+
+        **KNOWN GAP — `docs/OPEN-WORK.md` §3.5.** The scan below starts at the
+        oldest end to find an id that is almost always the newest, so it is
+        O(retain): 0.50 ms with the ring full. Inherited from `memory.py`,
+        where the ring is 2,000 and it did not matter; raising retention to
+        20,000 made it 10x worse without anyone deciding to.
         """
         if entry_id not in self._index:
             return
@@ -155,6 +161,15 @@ class DurableAuditLog:
         Synchronous and durable per record, because the entry this cannot
         afford to lose is the one written immediately before a command that
         then hung the process. Buffering would lose exactly that one.
+
+        **KNOWN GAP — `docs/OPEN-WORK.md` §3.1. Fix this before adding
+        anything here.** This runs on the event loop: `CommandService.execute`
+        is a coroutine and calls `record` and `finalize` directly, so every
+        command stops the agent pumps and the browser streams for the length
+        of two fsyncs. Measured 0.01 ms on tmpfs and 0.78 ms on NVMe, which
+        means the test suite cannot see it -- `tmp_path` is tmpfs. On slower
+        storage it is tens of milliseconds. The fix is `asyncio.to_thread`,
+        not a write-behind queue; the doc says why.
 
         A failed write is logged and swallowed. `AuditLog.record` is
         documented never to fail a command by failing itself, and that is the

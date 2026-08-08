@@ -127,6 +127,8 @@ def _full_container() -> wire.Container:
         created=1,
         state="running",
         status_text="Up 3 hours",
+        health="healthy",
+        restart_count=417,
         labels={"com.docker.compose.project": "shop"},
         ports=[wire.Port(private_port=80, public_port=8080, protocol="tcp", host_ip="0.0.0.0")],
         networks=[

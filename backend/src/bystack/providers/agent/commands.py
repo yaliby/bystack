@@ -67,6 +67,12 @@ CAP_LOGS: Final = "logs"
 #: the network, and so the OpenAPI schema states the bound. The duplication is
 #: intentional and the agent's copy is authoritative: it is the side holding
 #: the memory budget, and it must not trust a number we sent it.
+#:
+#: **KNOWN GAP — `docs/OPEN-WORK.md` §3.4.** The two are kept in step by this
+#: comment and nothing else. This repo already decided that cross-language
+#: drift gets a guard (`test_wire.py`'s mapper/wire check); this pair has not
+#: got one yet, and the failure is silent: the route would go on accepting a
+#: number the agent quietly truncates.
 MAX_LOG_TAIL: Final = 2000
 
 #: What a caller gets who does not say. A screenful of scrollback and change,
@@ -206,6 +212,12 @@ class LogsChannel:
     mutated the host, so its outcome is `REJECTED` and carries a warning
     against retrying. A log read that times out changed nothing, so it is
     simply a refusal an operator can act on by asking again.
+
+    **KNOWN GAP — `docs/OPEN-WORK.md` §3.6.** The duplication was deliberate
+    and is still ~60 copied lines: fix the leaked-future bug in one of these
+    and the other keeps it. If you extract anything, extract only the parked
+    future — the envelope construction and the outcome mapping are the parts
+    that legitimately differ.
     """
 
     __slots__ = ("_pending",)
