@@ -50,6 +50,8 @@ message Envelope {
     Command command = 20;
     CommandResult command_result = 21;
     ResyncRequest resync_request = 22;
+    LogsRequest logs_request = 23;
+    LogsResponse logs_response = 24;
 
     EnrollRequest enroll_request = 30;
     EnrollResponse enroll_response = 31;
@@ -429,4 +431,54 @@ message CommandResult {
 // costs the same zero bytes.
 message ResyncRequest {
   repeated Slice slices = 1;
+}
+
+// -- container logs ---------------------------------------------------------
+//
+// A read, and deliberately not a `Command`. `CommandKind` is the closed set
+// of *mutations* a read-only Controller refuses, and refusing to show an
+// operator why a container is failing because the platform is in its safe
+// mode would be exactly backwards -- read-only exists so that looking is
+// always allowed.
+//
+// One shot, not a stream. `tail` bounds the answer at the daemon, which is
+// what makes this safe to answer from an agent with a small memory budget on
+// a container that has been logging for a month. Following a live log is a
+// different feature with a different backpressure problem, and pretending
+// this is the first half of it would build the wrong shape.
+
+message LogsRequest {
+  // Correlates the response, exactly as `command_id` does. Same reason.
+  string request_id = 1;
+
+  // Docker's own id. The agent does not know the URN scheme.
+  string target_id = 2;
+
+  // Lines from the end. Clamped by the agent: an unbounded request is a way
+  // to make a remote host read a gigabyte into memory on our behalf.
+  uint32 tail = 3;
+}
+
+message LogsResponse {
+  string request_id = 1;
+
+  // False when the engine refused or the container is gone. `reason` then
+  // carries the engine's own words -- an operator chasing a failure should
+  // not have to guess whether the container or the request was wrong.
+  bool ok = 2;
+  string reason = 3;
+
+  repeated LogLine lines = 4;
+}
+
+message LogLine {
+  // Docker multiplexes both streams down one connection and tags each frame.
+  // Keeping the tag is most of the diagnostic value: the line that explains
+  // a crash is almost always on stderr.
+  bool stderr = 1;
+
+  // The line as the container wrote it, prefixed by the RFC 3339 timestamp
+  // the daemon records. Requested from the daemon rather than stamped here,
+  // because the agent's clock is not when the line was written.
+  string text = 2;
 }

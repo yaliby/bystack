@@ -75,7 +75,7 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
         // arrives on the wire; telling the Controller lets the UI disable the
         // actions rather than offer them and watch every one bounce.
         read_only: config.read_only,
-        capabilities: vec!["commands".into(), "resync".into(), "renewal".into()],
+        capabilities: vec!["commands".into(), "resync".into(), "renewal".into(), "logs".into()],
         // Our clock, so the Controller can name a skew as a skew. Certificate
         // validation is time-sensitive and a badly wrong clock otherwise
         // surfaces as a generic TLS error that sends whoever is debugging it
@@ -239,6 +239,19 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
                         )).await.is_err() {
                             watcher.abort();
                             return Ended::Disconnected("controller closed during a command".into());
+                        }
+                    }
+                    Some(Payload::LogsRequest(request)) => {
+                        // Not gated on `read_only`. That flag refuses
+                        // mutations; refusing to show an operator why a
+                        // container is failing because the platform is in
+                        // its safe mode would have it exactly backwards.
+                        let response = fetch_logs(engine, request).await;
+                        if sink.send(WsMessage::Binary(
+                            send(Payload::LogsResponse(response), &mut seq)
+                        )).await.is_err() {
+                            watcher.abort();
+                            return Ended::Disconnected("controller closed during a logs read".into());
                         }
                     }
                     Some(Payload::ResyncRequest(request)) => {
@@ -535,6 +548,46 @@ async fn execute(
             ok: false,
             detail: e.to_string(),
             unchanged: false,
+        },
+    }
+}
+
+/// Answer a logs read, or say why not.
+///
+/// The same id validation the lifecycle path uses, for the same reason: the
+/// target goes into a URL against an API that runs as root, and a container
+/// id is hexadecimal. A refusal here is a bug on the Controller's side, so it
+/// is reported rather than logged and dropped.
+async fn fetch_logs(engine: &Engine, request: wire::LogsRequest) -> wire::LogsResponse {
+    if request.target_id.is_empty()
+        || !request.target_id.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return wire::LogsResponse {
+            request_id: request.request_id,
+            ok: false,
+            reason: "target is not a container id".into(),
+            lines: Vec::new(),
+        };
+    }
+
+    match engine.logs(&request.target_id, request.tail).await {
+        Ok(lines) => wire::LogsResponse {
+            request_id: request.request_id,
+            ok: true,
+            reason: String::new(),
+            lines: lines
+                .into_iter()
+                .map(|line| wire::LogLine { stderr: line.stderr, text: line.text })
+                .collect(),
+        },
+        Err(e) => wire::LogsResponse {
+            request_id: request.request_id,
+            ok: false,
+            // The engine's own words. An operator chasing a failure should
+            // not have to guess whether the container or the request was
+            // wrong.
+            reason: e.to_string(),
+            lines: Vec::new(),
         },
     }
 }
