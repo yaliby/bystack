@@ -3,10 +3,15 @@
  */
 
 import { useCallback, useMemo, useState } from 'react';
-import type { GraphNode, Urn } from './api/types';
+import type { CommandKind, GraphNode, Urn } from './api/types';
 import { prepareTopologyGraph } from './features/topology/layout/prepareTopology';
 import { neighborsOf } from './features/topology/model/graphStore';
 import { deriveStatus, explainEmpty } from './features/topology/model/status';
+import { pendingCount } from './features/hosts/model/hosts';
+import { useFleet } from './features/hosts/model/useFleet';
+import { HostsPanel } from './features/hosts/ui/HostsPanel';
+import { useActivity } from './features/activity/model/useActivity';
+import { ActivityPanel } from './features/activity/ui/ActivityPanel';
 import { useOperations } from './features/operations/model/useOperations';
 import { ActionBar } from './features/operations/ui/ActionBar';
 import { useGraphStream } from './features/topology/model/useGraphStream';
@@ -16,18 +21,26 @@ import { Legend } from './features/topology/ui/Legend';
 import { NodeInspector } from './features/topology/ui/NodeInspector';
 import { TopologyCanvas } from './features/topology/ui/TopologyCanvas';
 import { DARK, LIGHT } from './features/topology/ui/theme';
+import { useMediaQuery } from './lib/useMediaQuery';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? window.location.origin;
 
+/** Keep in step with the `@media (max-width: 720px)` chrome in `index.css`. */
+const NARROW_QUERY = '(max-width: 720px)';
+
 const INSPECTOR_WIDTH = 320;
+/** The hosts panel, on the other side. Keep in step with `.hosts` in CSS. */
+const HOSTS_WIDTH = 340;
 /**
  * The legend plus the status bar under it, measured from the canvas bottom.
  * Keep in step with `.legend` in CSS — it is 107px tall and sits 42px up, and
  * the old 120 here let `fit` finish 11px underneath its first line.
  */
 const LEGEND_HEIGHT = 150;
+const LEGEND_HEIGHT_NARROW = 118;
 /** The topbar floats over a full-bleed canvas, so `fit` has to allow for it. */
 const TOPBAR_HEIGHT = 58;
+const TOPBAR_HEIGHT_NARROW = 96;
 /** So does the banner, when there is one. Keep in step with `.banner` in CSS. */
 const BANNER_HEIGHT = 33;
 /** Docker's own networks. Present on every host, so counting them says nothing. */
@@ -40,9 +53,16 @@ export default function App() {
   const [traceDepth, setTraceDepth] = useState(1);
   const [query, setQuery] = useState('');
   const [fitToken, setFitToken] = useState(0);
+  const [hostsOpen, setHostsOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const narrow = useMediaQuery(NARROW_QUERY);
 
   const { graph, connection, resyncs } = useGraphStream(API_BASE);
   const health = useHealth(API_BASE);
+  // Polled faster while the panel is open: a host that has just been given the
+  // install command is the thing the operator is watching for.
+  const fleet = useFleet(API_BASE, hostsOpen);
+  const activity = useActivity(API_BASE, activityOpen);
   const palette = dark ? DARK : LIGHT;
 
   const status = useMemo(() => deriveStatus(connection, health), [connection, health]);
@@ -69,9 +89,37 @@ export default function App() {
     [graph.nodes],
   );
 
+  /**
+   * An engine id is also a host URN — that is ADR-0011's whole point, and it
+   * is what lets the hosts panel show `lab-node-01` instead of twelve hex
+   * characters. Null until discovery has produced the node, which for a
+   * pending host it never has.
+   */
+  const resolveHostName = useCallback(
+    (engineId: string) => graph.nodes.get(`bystack:host:${engineId}`)?.name ?? null,
+    [graph.nodes],
+  );
+
   // Operations are scoped to whatever is selected. Only nodes the Controller
   // will act on get an action bar, and it decides which — not this component.
   const operations = useOperations(API_BASE, selected, graph.nodes);
+
+  /**
+   * Run, then refresh the timeline at once.
+   *
+   * Operations are not on the delta stream — deliberately, since a command
+   * does not change the graph and discovery does (ARCHITECTURE §9) — so the
+   * one moment the timeline exists for produces no event to subscribe to.
+   * Waiting out the poll interval to see your own action appear reads as a
+   * click that missed.
+   */
+  const runOperation = useCallback(
+    async (kind: CommandKind) => {
+      await operations.run(kind);
+      activity.refresh();
+    },
+    [operations, activity],
+  );
 
   /**
    * Two different questions, kept visibly apart.
@@ -118,20 +166,70 @@ export default function App() {
         [...graph.nodes.values()].find((node) => node.kind === 'host')?.source ??
         'local');
   const readOnly = health.kind === 'reached' && health.health.read_only;
+  const pending = pendingCount(fleet.agents);
 
   const inspectorOpen = selectedNode !== null || selectedLink !== null;
   const bannerVisible = status.banner && status.detail !== null;
+  const sheetOpen = narrow && (hostsOpen || activityOpen || inspectorOpen);
+
+  const clearSelection = useCallback(() => {
+    setSelected(null);
+    setSelectedEdge(null);
+  }, []);
+
+  const closeSheets = useCallback(() => {
+    setHostsOpen(false);
+    setActivityOpen(false);
+    clearSelection();
+  }, [clearSelection]);
+
+  // The two left-hand panels answer different questions and share one edge of
+  // the screen, so opening either closes the other. Stacking them would put
+  // the canvas — the thing both of them are about — in a strip.
+  const openHosts = useCallback(() => {
+    setHostsOpen((open) => {
+      const next = !open;
+      if (next) {
+        setActivityOpen(false);
+        if (narrow) clearSelection();
+      }
+      return next;
+    });
+  }, [narrow, clearSelection]);
+
+  const openActivity = useCallback(() => {
+    setActivityOpen((open) => {
+      const next = !open;
+      if (next) {
+        setHostsOpen(false);
+        if (narrow) clearSelection();
+      }
+      return next;
+    });
+  }, [narrow, clearSelection]);
+
+  const topbarPad = narrow ? TOPBAR_HEIGHT_NARROW : TOPBAR_HEIGHT;
+  const legendPad = narrow ? LEGEND_HEIGHT_NARROW : LEGEND_HEIGHT;
 
   return (
-    <div className="app" data-theme={dark ? 'dark' : 'light'}>
+    <div
+      className={`app${narrow ? ' app--narrow' : ''}`}
+      data-theme={dark ? 'dark' : 'light'}
+    >
       <header className="topbar topbar--slim">
+        <div className="brand brand--mark">ByStack</div>
+
         <div className="status-pill" title={status.detail ?? undefined}>
           <span className={`live-dot live-dot--${status.tone}`} />
           <span className="status-pill__text">
-            {providerLabel}
-            <span className="brand__sep">·</span>
-            {status.label}
-            {readOnly ? (
+            {narrow ? status.label : (
+              <>
+                {providerLabel}
+                <span className="brand__sep">·</span>
+                {status.label}
+              </>
+            )}
+            {!narrow && readOnly ? (
               <>
                 <span className="brand__sep">·</span>
                 read-only
@@ -146,54 +244,73 @@ export default function App() {
           </span>
         </div>
 
-        <div className="brand brand--mark">ByStack</div>
-
-        <input
-          className="search"
-          type="search"
-          placeholder="Search…"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-
-        {matches.length > 0 && (
-          <ul className="search__results">
-            {matches.map((node) => (
-              <li key={node.urn}>
-                <button
-                  onClick={() => {
-                    setSelected(node.urn);
-                    setSelectedEdge(null);
-                    setQuery('');
-                  }}
-                >
-                  {node.name} <span className="muted">{node.kind}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        <label className="control">
-          Trace
+        <div className="topbar__search">
           <input
-            type="range"
-            min={1}
-            max={4}
-            value={traceDepth}
-            onChange={(event) => setTraceDepth(Number(event.target.value))}
+            className="search"
+            type="search"
+            placeholder="Search…"
+            enterKeyHint="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
           />
-          <span>{traceDepth}</span>
-        </label>
+
+          {matches.length > 0 && (
+            <ul className="search__results">
+              {matches.map((node) => (
+                <li key={node.urn}>
+                  <button
+                    onClick={() => {
+                      setSelected(node.urn);
+                      setSelectedEdge(null);
+                      setQuery('');
+                      if (narrow) setHostsOpen(false);
+                    }}
+                  >
+                    {node.name} <span className="muted">{node.kind}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {!narrow ? (
+          <label className="control control--trace">
+            Trace
+            <input
+              type="range"
+              min={1}
+              max={4}
+              value={traceDepth}
+              onChange={(event) => setTraceDepth(Number(event.target.value))}
+            />
+            <span>{traceDepth}</span>
+          </label>
+        ) : null}
 
         <div className="spacer" />
 
-        <button className="control" onClick={() => setFitToken((n) => n + 1)}>
-          Fit
-        </button>
-        <button className="control" onClick={() => setDark((value) => !value)}>
-          {dark ? 'Light' : 'Dark'}
-        </button>
+        <div className="topbar__actions">
+          {/* The count rides on the closed button on purpose: a host that has
+              just enrolled is waiting on a person, and it should not need the
+              panel to be open to say so. */}
+          <button
+            className={`control${pending > 0 ? ' control--attention' : ''}`}
+            onClick={openHosts}
+          >
+            Hosts
+            {pending > 0 ? <span className="control__badge">{pending}</span> : null}
+          </button>
+          <button className="control" onClick={openActivity}>
+            Activity
+          </button>
+          <button className="control" onClick={() => setFitToken((n) => n + 1)}>
+            Fit
+          </button>
+          <button className="control" onClick={() => setDark((value) => !value)}>
+            {dark ? 'Light' : 'Dark'}
+          </button>
+        </div>
       </header>
 
       <main className="workspace">
@@ -207,27 +324,66 @@ export default function App() {
           traceDepth={traceDepth}
           onSelect={(node: GraphNode | null) => {
             setSelected(node?.urn ?? null);
-            if (node) setSelectedEdge(null);
+            if (node) {
+              setSelectedEdge(null);
+              if (narrow) setHostsOpen(false);
+            }
           }}
           onSelectEdge={(key) => {
             setSelectedEdge(key);
-            if (key) setSelected(null);
+            if (key) {
+              setSelected(null);
+              if (narrow) setHostsOpen(false);
+            }
           }}
           inset={{
-            top: TOPBAR_HEIGHT + (bannerVisible ? BANNER_HEIGHT : 0),
-            right: inspectorOpen ? INSPECTOR_WIDTH : 0,
-            bottom: LEGEND_HEIGHT,
+            top: topbarPad + (bannerVisible ? BANNER_HEIGHT : 0),
+            // Sheets overlay the canvas on a phone — do not shrink fit into a strip.
+            right: !narrow && inspectorOpen ? INSPECTOR_WIDTH : 0,
+            bottom: legendPad,
+            left: !narrow && (hostsOpen || activityOpen) ? HOSTS_WIDTH : 0,
           }}
           fitToken={fitToken}
         />
+        {sheetOpen ? (
+          <button
+            type="button"
+            className="sheet-backdrop"
+            aria-label="Close panel"
+            onClick={closeSheets}
+          />
+        ) : null}
+        {hostsOpen ? (
+          <HostsPanel
+            fleet={fleet}
+            providers={providers}
+            resolveHostName={resolveHostName}
+            onClose={() => setHostsOpen(false)}
+          />
+        ) : null}
+        {activityOpen ? (
+          <ActivityPanel
+            activity={activity}
+            nodes={graph.nodes}
+            // A row is a way back to the node. Selecting it is what makes the
+            // timeline part of the map rather than a log beside it.
+            onSelect={(urn) => {
+              setSelected(urn);
+              setSelectedEdge(null);
+              if (narrow) setActivityOpen(false);
+            }}
+            onClose={() => setActivityOpen(false)}
+          />
+        ) : null}
         {emptyExplanation ? <EmptyState explanation={emptyExplanation} /> : null}
-        {emptyExplanation ? null : <Legend palette={palette} />}
+        {emptyExplanation || sheetOpen ? null : <Legend palette={palette} />}
         {inspectorOpen ? (
           <NodeInspector
             node={selectedNode}
             edge={selectedLink}
             edges={selectedEdges}
             resolveName={resolveName}
+            onClose={clearSelection}
             onNavigate={(urn) => {
               setSelected(urn);
               setSelectedEdge(null);
@@ -240,7 +396,7 @@ export default function App() {
                   busy={operations.busy}
                   name={selectedNode.name}
                   resolveName={resolveName}
-                  onRun={(kind) => void operations.run(kind)}
+                  onRun={(kind) => void runOperation(kind)}
                   onDismiss={operations.dismiss}
                 />
               ) : null
@@ -249,13 +405,16 @@ export default function App() {
         ) : null}
         <footer className="statusbar statusbar--hero">
           <span className="stat">
-            <strong>{pad(counts.workloads)}</strong> services
+            <strong>{pad(counts.workloads)}</strong>
+            <span className="stat__label"> services</span>
           </span>
           <span className="stat">
-            <strong>{pad(counts.stacks)}</strong> stacks
+            <strong>{pad(counts.stacks)}</strong>
+            <span className="stat__label"> stacks</span>
           </span>
           <span className="stat">
-            <strong>{pad(counts.volumes)}</strong> volumes
+            <strong>{pad(counts.volumes)}</strong>
+            <span className="stat__label"> volumes</span>
           </span>
           <span className="statusbar__hint">
             {counts.containers} containers · {counts.networks} networks discovered

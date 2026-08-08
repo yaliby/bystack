@@ -48,7 +48,12 @@ interface Props {
    * the topbar, the legend, the inspector. The canvas is full-bleed on
    * purpose, so only `fit` knows these exist.
    */
-  readonly inset?: { readonly top?: number; readonly right: number; readonly bottom: number };
+  readonly inset?: {
+    readonly top?: number;
+    readonly right: number;
+    readonly bottom: number;
+    readonly left?: number;
+  };
   readonly fitToken?: number;
 }
 
@@ -225,10 +230,10 @@ export function TopologyCanvas({
     if (!canvas || !bounds) return false;
 
     const rect = canvas.getBoundingClientRect();
-    const { top = 0, right, bottom } = insetRef.current;
+    const { top = 0, right, bottom, left = 0 } = insetRef.current;
     const padding = 18;
 
-    const usableWidth = Math.max(120, rect.width - right - padding * 2);
+    const usableWidth = Math.max(120, rect.width - right - left - padding * 2);
     const usableHeight = Math.max(120, rect.height - top - bottom - padding * 2);
     const graphWidth = Math.max(1, bounds.maxX - bounds.minX);
     const graphHeight = Math.max(1, bounds.maxY - bounds.minY);
@@ -245,7 +250,7 @@ export function TopologyCanvas({
       zoom,
       // Centre inside the free rectangle, not inside the canvas: each inset
       // shifts the midpoint by half its size.
-      x: -right / 2 - centreX * zoom,
+      x: (left - right) / 2 - centreX * zoom,
       y: (top - bottom) / 2 - centreY * zoom,
     };
     return true;

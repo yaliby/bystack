@@ -216,6 +216,17 @@ body {
   border-color: color-mix(in srgb, var(--critical) 55%, var(--border));
 }
 
+.topbar__search {
+  position: relative;
+}
+
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
 .search {
   width: 180px;
   padding: 6px 12px;
@@ -239,10 +250,10 @@ body {
 
 .search__results {
   position: absolute;
-  top: 42px;
-  left: 200px;
+  top: calc(100% + 6px);
+  left: 0;
   z-index: 10;
-  width: 260px;
+  width: min(280px, calc(100vw - 24px));
   margin: 0;
   padding: 4px;
   list-style: none;
@@ -451,15 +462,62 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+  -webkit-overflow-scrolling: touch;
+}
+
+.inspector__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.inspector__head-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.inspector__close {
+  flex: none;
+  border: 0;
+  padding: 0 4px;
+  margin: -4px -4px 0 0;
+  background: none;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.inspector__close:hover {
+  color: var(--ink);
 }
 
 .inspector--empty {
+  position: relative;
   display: flex;
   flex-direction: column;
   justify-content: center;
   text-align: center;
   color: var(--ink-muted);
   font-weight: 500;
+}
+
+.inspector--empty .inspector__close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+}
+
+.sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: rgba(0, 0, 0, 0.4);
+  cursor: pointer;
 }
 
 .inspector h2 {
@@ -754,3 +812,730 @@ body {
 .actions__dismiss:hover {
   opacity: 1;
 }
+
+/* -- hosts --------------------------------------------------------------
+   Enrollment lives on the canvas because the topology map is the control
+   surface: adding a host is a change to the picture, not a trip to a
+   settings page. It mirrors the inspector — same card, other side — so the
+   two panels read as one chrome rather than as two features. */
+
+/* The two left-hand panels share one geometry deliberately: they occupy the
+   same edge, never both at once, and a second set of measurements would drift
+   from this one by a pixel per change. */
+.hosts,
+.activity {
+  position: absolute;
+  top: 58px;
+  left: 14px;
+  bottom: 44px;
+  z-index: 2;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+
+.hosts__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hosts__head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.hosts__close {
+  border: 0;
+  padding: 0 4px;
+  background: none;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.hosts__close:hover {
+  color: var(--ink);
+}
+
+.hosts__add {
+  flex: none;
+  margin-top: 14px;
+}
+
+.hosts__blocked,
+.hosts__empty {
+  margin: 12px 0 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.hosts__error {
+  position: relative;
+  margin: 12px 0 0;
+  padding: 8px 26px 8px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--critical) 12%, var(--surface));
+  color: var(--critical);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.hosts__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 14px;
+}
+
+.host {
+  padding: 11px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+/* Pending is the row an operator came here to find, so it is the one row
+   that does not look like the rest of the list. */
+.host--pending {
+  border-color: color-mix(in srgb, var(--warning) 60%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface));
+}
+
+/* Stale, not absent and not broken: a disconnected host keeps its topology on
+   the canvas, and this card describes something that is still on screen. Muted
+   is the whole treatment — no red, no strikethrough. */
+.host--link-stale {
+  opacity: 0.78;
+  border-style: dashed;
+}
+
+.host--revoked {
+  opacity: 0.6;
+}
+
+.host__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.host__name {
+  flex: 1;
+  min-width: 90px;
+  font-weight: 700;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.host__chip {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.host__chip--pending {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.host__chip--approved {
+  border-color: color-mix(in srgb, var(--good) 55%, var(--border));
+  color: var(--good);
+}
+
+.host__chip--revoked {
+  border-color: color-mix(in srgb, var(--critical) 55%, var(--border));
+  color: var(--critical);
+}
+
+/* This machine. Not an enrollment state, so not one of the three colours that
+   mean "a person decided something about this host" — nobody did. */
+.host__chip--local {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--accent);
+}
+
+.host__chip--link-connected {
+  border-color: color-mix(in srgb, var(--good) 55%, var(--border));
+  color: var(--good);
+}
+
+.host__chip--link-stale {
+  border-color: color-mix(in srgb, var(--serious) 45%, var(--border));
+  color: var(--serious);
+}
+
+.host__chip--link-failed {
+  border-color: color-mix(in srgb, var(--critical) 55%, var(--border));
+  color: var(--critical);
+}
+
+.host__detail,
+.host__note,
+.host__meta {
+  margin: 7px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-secondary);
+}
+
+.host__note {
+  color: var(--serious);
+}
+
+.host__meta {
+  display: flex;
+  gap: 6px;
+  color: var(--ink-muted);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10.5px;
+}
+
+.host__actions {
+  margin-top: 10px;
+}
+
+.host__confirm {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--critical) 10%, var(--surface-raised));
+}
+
+.host__confirm p {
+  margin: 0 0 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+/* ---------------------------------------------------------------------------
+   Activity — the operations timeline
+   --------------------------------------------------------------------------- */
+
+.activity__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 14px;
+}
+
+.activity__row {
+  padding: 10px 11px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  /* The tone rides on the left edge rather than the whole card. A list of
+     filled panels reads as a list of alarms, and most of these are ordinary
+     operations that went fine. */
+  border-left-width: 3px;
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.activity__row--ok {
+  border-left-color: var(--good);
+}
+
+.activity__row--warn {
+  border-left-color: var(--warning);
+}
+
+.activity__row--bad {
+  border-left-color: var(--critical);
+}
+
+.activity__head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.activity__verb {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.activity__target {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.activity__target:hover {
+  text-decoration: underline;
+}
+
+/* Its node is no longer on the canvas — usually a container that has since
+   been recreated with a new id. Not a button, because there is nowhere to go. */
+.activity__target--gone {
+  color: var(--ink-muted);
+  cursor: default;
+  text-decoration: line-through;
+}
+
+.activity__target--gone:hover {
+  text-decoration: line-through;
+}
+
+.activity__chip {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--ink-muted);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.activity__chip--ok {
+  border-color: color-mix(in srgb, var(--good) 55%, var(--border));
+  color: var(--good);
+}
+
+.activity__chip--warn {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.activity__chip--bad {
+  border-color: color-mix(in srgb, var(--critical) 55%, var(--border));
+  color: var(--critical);
+}
+
+.activity__detail {
+  margin: 7px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-secondary);
+}
+
+.activity__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 7px 0 0;
+  color: var(--ink-muted);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 10.5px;
+}
+
+.activity__caveat {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.control--attention {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.control__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--warning);
+  color: var(--surface);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* -- the join token -----------------------------------------------------
+   A modal, which nothing else in this app is. Everything else here can be
+   returned to; this cannot — the Controller keeps a digest, so the value is
+   gone the moment the dialog closes, and the interface should not invite an
+   operator to click past it. */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+}
+
+.modal__card {
+  width: min(560px, calc(100vw - 40px));
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.modal__head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.modal__head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.token-clock {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.token-clock--expired {
+  color: var(--critical);
+}
+
+.modal__lead {
+  margin: 12px 0 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-secondary);
+}
+
+.token {
+  display: flex;
+  gap: 8px;
+}
+
+.token__command {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 11.5px;
+}
+
+.token__copy {
+  flex: none;
+  border-radius: 7px;
+}
+
+.modal__note {
+  margin: 11px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink-muted);
+}
+
+.modal__note code {
+  font-size: 11px;
+}
+
+.modal__warn {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--serious) 12%, var(--surface));
+  color: var(--serious);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.modal__meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.modal__meta .row__value--mono {
+  overflow-wrap: anywhere;
+}
+
+.modal__foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* -- phone / narrow chrome ----------------------------------------------
+   The topology canvas stays full-bleed; only the floating chrome reflows.
+   Keep the breakpoint in step with `NARROW_QUERY` in App.tsx. */
+
+@media (max-width: 720px) {
+  html,
+  body,
+  #root,
+  .app {
+    height: 100dvh;
+    max-height: 100dvh;
+  }
+
+  .app {
+    padding:
+      env(safe-area-inset-top, 0px)
+      env(safe-area-inset-right, 0px)
+      env(safe-area-inset-bottom, 0px)
+      env(safe-area-inset-left, 0px);
+  }
+
+  .topbar--slim {
+    height: auto;
+    min-height: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 10px 8px;
+    row-gap: 8px;
+  }
+
+  .brand--mark {
+    order: 0;
+    font-size: 14px;
+  }
+
+  .status-pill {
+    order: 1;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+    padding: 7px 10px;
+  }
+
+  .status-pill__text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+  }
+
+  .topbar__actions {
+    order: 2;
+    gap: 6px;
+  }
+
+  .topbar__search {
+    order: 3;
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .topbar__search .search {
+    width: 100%;
+    min-height: 40px;
+    font-size: 16px; /* iOS: avoid input zoom */
+    border-radius: 10px;
+  }
+
+  .topbar__search .search__results {
+    width: 100%;
+  }
+
+  .search__results button {
+    min-height: 40px;
+    padding: 10px 12px;
+  }
+
+  .control {
+    min-height: 36px;
+    padding: 8px 12px;
+  }
+
+  .spacer {
+    display: none;
+  }
+
+  .banner {
+    top: calc(env(safe-area-inset-top, 0px) + 88px);
+    padding: 0 12px;
+    height: auto;
+    min-height: 33px;
+    white-space: normal;
+  }
+
+  .banner__text {
+    white-space: normal;
+  }
+
+  .legend {
+    left: 12px;
+    right: 12px;
+    bottom: calc(36px + env(safe-area-inset-bottom, 0px));
+    gap: 14px;
+    flex-wrap: wrap;
+    font-size: 10px;
+  }
+
+  .legend__item--note {
+    display: none;
+  }
+
+  .statusbar {
+    left: 10px;
+    right: 10px;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .statusbar--hero {
+    gap: 14px;
+    font-size: 11px;
+  }
+
+  .statusbar--hero .stat strong {
+    font-size: 13px;
+  }
+
+  .statusbar__hint {
+    flex: 1 1 100%;
+    margin-left: 0;
+    order: 10;
+    font-size: 10px;
+  }
+
+  .sheet-backdrop {
+    display: block;
+  }
+
+  .hosts,
+  .activity,
+  .inspector {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: min(78dvh, 640px);
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 72px);
+    border-radius: 16px 16px 0 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    z-index: 5;
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  .empty-state {
+    padding: 72px 16px 96px;
+  }
+
+  .empty-state__card {
+    max-width: none;
+    width: 100%;
+    padding: 18px 16px;
+  }
+
+  .modal {
+    align-items: end;
+    place-items: end center;
+    padding: 0;
+  }
+
+  .modal__card {
+    width: 100%;
+    max-width: none;
+    max-height: min(92dvh, calc(100dvh - env(safe-area-inset-top, 0px)));
+    margin: 0;
+    border-radius: 16px 16px 0 0;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .token {
+    flex-direction: column;
+  }
+
+  .token__copy {
+    min-height: 40px;
+  }
+
+  .modal__meta {
+    flex-direction: column;
+  }
+
+  .modal__foot {
+    position: sticky;
+    bottom: 0;
+    padding-top: 12px;
+    background: var(--surface-raised);
+  }
+
+  .actions {
+    gap: 8px;
+  }
+
+  .actions .action {
+    min-height: 40px;
+    flex: 1 1 auto;
+  }
+
+  .host__actions .action {
+    min-height: 40px;
+  }
+}
+
+@media (max-width: 420px) {
+  .stat__label {
+    display: none;
+  }
+
+  .statusbar--hero .stat strong::after {
+    content: '';
+  }
+
+  .control {
+    padding: 8px 10px;
+    font-size: 10px;
+  }
+}
+
+/* Backdrop only needed for the phone sheet pattern. */
+@media (min-width: 721px) {
+  .sheet-backdrop {
+    display: none;
+  }
+}
+

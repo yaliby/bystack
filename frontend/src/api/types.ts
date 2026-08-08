@@ -156,6 +156,90 @@ export interface Actions {
   readonly detail: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Enrollment (ADR-0011)
+//
+// Mirrors `api/routes/enrollment.py`. A host joins the fleet by redeeming a
+// join token for a certificate and then being approved by a person; these are
+// the three nouns that describes.
+// ---------------------------------------------------------------------------
+
+/**
+ * `local` is not an enrollment state and is deliberately spelled apart from
+ * the three that are.
+ *
+ * The Controller spawns an agent for its own machine over a unix socket, with
+ * no certificate and no registry entry (`docs/MIGRATION.md` §4). Nobody
+ * approved that host and there is nothing to revoke, so folding it into
+ * `approved` would put two buttons on a row where neither does anything.
+ */
+export type AgentStatus = 'pending' | 'approved' | 'revoked' | 'local';
+
+export interface EnrolledAgent {
+  /** The Docker Engine ID, which is also the agent's identity and the host's. */
+  readonly engine_id: string;
+  /** Whether this agent may contribute to the graph. A person decides it. */
+  readonly status: AgentStatus;
+  readonly certificate_expires_at: number;
+  readonly enrolled_at: number;
+  readonly last_seen: number;
+  readonly agent_version: string;
+  /**
+   * Whether the agent is on the stream *right now*.
+   *
+   * Deliberately not part of `status`, and not to be folded into it here
+   * either: approved-but-offline and revoked-but-still-streaming are both
+   * ordinary states, and each sends an operator somewhere different.
+   */
+  readonly connected: boolean;
+
+  /**
+   * Whether the attached agent is the Controller's own child.
+   *
+   * A third fact, separate from the other two. A machine can be enrolled *and*
+   * currently managed locally — enrol a host, then run the Controller on it —
+   * and `status` answers "what did somebody decide about this host's
+   * certificate" while this answers "which agent is actually attached". A host
+   * with no enrollment behind it at all has `status: 'local'` as well.
+   */
+  readonly local: boolean;
+}
+
+/**
+ * A minted join token. Shown once, then gone.
+ *
+ * The Controller keeps only a digest, so there is nothing to re-read and no
+ * route that could return this again. Nothing in the frontend may persist it.
+ */
+export interface JoinToken {
+  readonly token: string;
+  readonly expires_at: number;
+  readonly ca_fingerprint: string;
+  /** The command to paste, composed by the Controller. Never assembled here. */
+  readonly install: string;
+}
+
+/** Whether a host can join at all, and on what terms. Configuration, not state. */
+export interface EnrollmentTerms {
+  readonly enabled: boolean;
+  readonly auto_approve: boolean;
+  readonly listen: string;
+  readonly local_agent: LocalAgentStatus;
+}
+
+/**
+ * Whether this machine is managing itself, and why not when it is not.
+ *
+ * The explanation for an empty canvas on a first run. Without it, "no Docker
+ * socket here" and "the agent binary is missing" and "somebody turned it off"
+ * all render as the same nothing.
+ */
+export interface LocalAgentStatus {
+  readonly state: 'running' | 'starting' | 'disabled' | 'unavailable';
+  /** Written by the Controller to be shown verbatim. */
+  readonly detail: string;
+}
+
 export interface AuditEntry {
   readonly id: string;
   readonly at: number;
