@@ -69,6 +69,18 @@ pub fn hash_container(container: &Container) -> Fingerprint {
     // never resent -- and the map keeps drawing it green. Only the verdict is
     // hashed, not `failing_streak`, which advances on every failed probe.
     container.health().hash(&mut hasher);
+    // And so must the crash-loop depth, for a version of the same reason.
+    // `state` stays `restarting` across every restart in a loop, so without
+    // this the map would show a container as unstable and never say whether
+    // it has failed twice or four hundred times.
+    //
+    // This one is a decision rather than an obligation, because unlike the
+    // health verdict it does advance repeatedly on a bad host. It advances on
+    // an *event* -- an actual restart -- which is what separates it from
+    // `status`, and the containers it advances for are the ones an operator
+    // is watching. A resend per restart of a looping container is the correct
+    // price.
+    container.restart_count.hash(&mut hasher);
     container.labels.hash(&mut hasher);
     container.ports.hash(&mut hasher);
     container.mounts.hash(&mut hasher);
@@ -247,6 +259,33 @@ mod tests {
         second.health.failing_streak = 41;
 
         assert_eq!(hash_container(&first), hash_container(&second));
+    }
+
+    #[test]
+    fn a_crash_loop_that_deepens_is_resent() {
+        // `state` stays `restarting` across every restart in a loop, so
+        // without the count in the hash the Controller learns that a
+        // container is unstable exactly once and never how badly. The card
+        // would read `Unstable` identically on the second failure and the
+        // four-hundredth.
+        let mut second = container("restarting", "Restarting (137) 2 seconds ago");
+        second.restart_count = 2;
+        let mut four_hundredth = container("restarting", "Restarting (137) 2 seconds ago");
+        four_hundredth.restart_count = 400;
+
+        assert_ne!(hash_container(&second), hash_container(&four_hundredth));
+    }
+
+    #[test]
+    fn a_settled_container_is_not_disturbed_by_the_field_existing() {
+        // The deliberate cost of hashing this is a resend per restart, for
+        // containers that are restarting. Everything else must be untouched,
+        // or the field has quietly become a second `status`.
+        let running = container("running", "Up 3 hours");
+        let same = container("running", "Up 4 hours");
+
+        assert_eq!(hash_container(&running), hash_container(&same));
+        assert_eq!(running.restart_count, 0);
     }
 
     #[test]

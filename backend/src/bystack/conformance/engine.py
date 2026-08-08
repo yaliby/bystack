@@ -176,13 +176,17 @@ class ScriptedEngine:
             await self._act(path, query, writer)
             return
 
-        # Matched on shape rather than prefix: the list endpoint is
-        # `/containers/json`, so a `startswith("/containers/")` test alone
-        # would send it here as a container called "json".
+        # Per-container GETs, matched on shape rather than prefix: the list
+        # endpoint is `/containers/json`, so a `endswith("/json")` test would
+        # route it here and inspect a container called "json".
         parts = path.strip("/").split("/")
-        if len(parts) == 3 and parts[0] == "containers" and parts[2] == "logs":
-            await self._logs(parts[1], query, writer)
-            return
+        if len(parts) == 3 and parts[0] == "containers":
+            if parts[2] == "logs":
+                await self._logs(parts[1], query, writer)
+                return
+            if parts[2] == "json":
+                await self._inspect(parts[1], writer)
+                return
 
         match path:
             case "/info":
@@ -273,6 +277,24 @@ class ScriptedEngine:
             indexes = [i for i, (s, _) in enumerate(lines) if s is stream]
             kept.update(indexes[-tail:])
         await _raw(writer, 200, b"".join(_frame(*lines[i]) for i in sorted(kept)))
+
+    async def _inspect(self, container_id: str, writer: asyncio.StreamWriter) -> None:
+        """``GET /containers/{id}/json``, carrying `RestartCount` and nothing else.
+
+        Deliberately not a faithful inspect response. The real one is the
+        largest document the Engine API serves and an agent that started
+        reading more of it would be building a second model of a container
+        beside the listed one; a fixture that offered the whole thing would
+        make that easy to do by accident.
+
+        The call is recorded like every other, which is what lets a check
+        assert that a steady host pays for no inspects at all.
+        """
+        container = next((c for c in self.containers if c["Id"] == container_id), None)
+        if container is None:
+            await _status(writer, 404, {"message": f"No such container: {container_id}"})
+            return
+        await _json(writer, {"Id": container_id, "RestartCount": container.get("RestartCount", 0)})
 
     async def _stream_events(
         self, query: dict[str, list[str]], writer: asyncio.StreamWriter

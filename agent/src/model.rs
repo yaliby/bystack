@@ -103,6 +103,17 @@ pub struct Container {
     /// this field still report the verdict, in the status line.
     #[serde(rename = "Health", default, deserialize_with = "null_to_default")]
     pub health: Health,
+
+    /// How many times the engine has restarted this container.
+    ///
+    /// **Not present in `GET /containers/json`** — it exists only on the
+    /// inspect endpoint, so it deserializes to zero from a List and is filled
+    /// in afterwards by [`crate::informer`], for restarting containers only.
+    /// The `serde` attribute is kept anyway: it costs nothing, it documents
+    /// the name, and a future API version that carries the field on the List
+    /// would populate it with no code change and no extra request.
+    #[serde(rename = "RestartCount", default, deserialize_with = "null_to_default")]
+    pub restart_count: u32,
 }
 
 impl Container {
@@ -138,6 +149,20 @@ fn health_from_status(status: &str) -> &'static str {
     } else {
         ""
     }
+}
+
+/// The one field the agent reads from `GET /containers/{id}/json`.
+///
+/// Deliberately not the whole inspect response, which is by far the largest
+/// document the Engine API serves — full config, every layer, the whole
+/// network and mount graph again. Deserializing one integer out of it keeps
+/// the cost to the daemon's serialization rather than ours, and keeps the
+/// agent from acquiring a second, richer model of a container that would
+/// immediately start drifting from the listed one.
+#[derive(Debug, Deserialize, Default)]
+pub struct Inspect {
+    #[serde(rename = "RestartCount", default, deserialize_with = "null_to_default")]
+    pub restart_count: u32,
 }
 
 /// Docker's healthcheck summary on a listed container.

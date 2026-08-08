@@ -43,6 +43,11 @@ from bystack.runtime.collector import Collector
 
 C1 = "c" * 64
 C2 = "d" * 64
+#: The crash-loop pair: one container restarting, one beside it that is not.
+#: Both are needed — "inspects only what is looping" is not a claim a
+#: single-container fixture can make.
+LOOPING = "e" * 64
+SETTLED = "f" * 64
 
 #: How long to wait for the graph to reflect something. Generous: a failing
 #: check should mean "the agent does not do this", never "the machine was
@@ -214,6 +219,102 @@ async def scenario_health_is_hashed(h: Harness) -> None:
         moved and "unhealthy" in verdicts,
         f"seq {before} -> {h.store.seq}, verdicts {sorted(v or '-' for v in verdicts)}",
     )
+
+
+async def scenario_crash_loop_depth(h: Harness) -> None:
+    """How deep the loop is, and what it is allowed to cost.
+
+    `RestartCount` is not in `GET /containers/json` at any API version, so
+    carrying it means an inspect per container -- which is the change from one
+    request per List to one per container that the informer's whole design
+    exists to avoid. The answer is to inspect only containers whose listed
+    state is `restarting`: bounded, usually empty, and exactly the set for
+    which the number means anything.
+
+    Three checks, and the first would pass on its own against an agent that
+    inspects everything -- which is why the other two are here. The host is
+    given a mixed population first, because "only the restarting one" is not a
+    claim a single-container fixture can make.
+    """
+    steady = _inspected(h)
+
+    h.engine.containers.append(make_container(LOOPING, "shop-worker-1"))
+    h.engine.containers.append(make_container(SETTLED, "shop-cache-1"))
+    for container in h.engine.containers:
+        if container["Id"] != LOOPING:
+            continue
+        container["State"] = "restarting"
+        container["Status"] = "Restarting (137) 2 seconds ago"
+        container["RestartCount"] = 417
+
+    await h.engine.emit("container")
+    seen = await h.until(
+        lambda: any(n.attrs.get("restart_count") == 417 for n in h.nodes_of(NodeKind.CONTAINER))
+    )
+    depths = {n.attrs.get("restart_count") for n in h.nodes_of(NodeKind.CONTAINER)}
+
+    h.record(
+        "a crash loop reports how deep it is",
+        "`Unstable` is the same word on the second failure and the four-hundredth; "
+        "the count is the only thing that separates a deploy from an incident",
+        seen,
+        f"depths {sorted(str(d) for d in depths)}",
+    )
+
+    # The hashing decision, end to end, and the reason this is a separate
+    # check: above, the state moved too, so an agent with the count outside
+    # its hash would still have resent the container. Here nothing moves but
+    # the number -- which is the case an operator watching a loop deepen is
+    # actually in, and the case where "hash it or not" has an answer.
+    for container in h.engine.containers:
+        if container["Id"] == LOOPING:
+            container["RestartCount"] = 418
+    await h.engine.emit("container")
+    deepened = await h.until(
+        lambda: any(n.attrs.get("restart_count") == 418 for n in h.nodes_of(NodeKind.CONTAINER))
+    )
+
+    h.record(
+        "a loop that deepens is resent",
+        "the state stays `restarting` across every restart, so a count outside "
+        "the hash is a loop that is reported once and never again",
+        deepened,
+        "417 -> 418 with no state change",
+    )
+
+    h.record(
+        "a settled host pays for no inspects",
+        "inspecting every container turns one request per List into one per "
+        "container, which is the cost the informer exists to avoid",
+        steady == set(),
+        f"{len(steady)} inspect(s) before anything was restarting",
+    )
+
+    inspected = _inspected(h) - steady
+    h.record(
+        "and inspects only what is looping",
+        "the bound is the whole design; on a healthy host it is what makes the "
+        "cheap way cheap, and nothing about the answer reveals its absence",
+        inspected == {LOOPING},
+        f"inspected {sorted(i[:12] for i in inspected) or 'nothing'}",
+    )
+
+
+def _inspected(h: Harness) -> set[str]:
+    """Container ids fetched via `GET /containers/{id}/json`.
+
+    Ids rather than a count, because the count is not the claim: an agent that
+    inspects twice as often is wasteful, and one that inspects a container
+    that is not restarting has lost the bound entirely. Excludes the list
+    endpoint, which is `/containers/json` and looks identical to a prefix test.
+    """
+    return {
+        call.split("/")[2]
+        for call in h.engine.recorded.calls
+        if call.startswith("/containers/")
+        and call.endswith("/json")
+        and call != "/containers/json"
+    }
 
 
 async def scenario_steady_state_is_silent(h: Harness) -> None:
@@ -483,6 +584,10 @@ SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("coalescing", scenario_coalescing),
     ("removal", scenario_removal),
     ("commands", scenario_command),
+    # After the command scenario, because it is the first thing that puts a
+    # container into `restarting` and the inspect-budget check reads "how many
+    # inspects has this agent made so far" as its baseline.
+    ("crash loop depth", scenario_crash_loop_depth),
     ("logs", scenario_logs),
     ("reconnect", scenario_reconnect),
     ("budget", scenario_budget),

@@ -45,6 +45,7 @@ use tokio::sync::mpsc;
 
 use crate::docker::{Engine, EngineError};
 use crate::hashset::{self, SliceState};
+use crate::model::Container;
 use crate::wire::{self, entity, Slice};
 
 /// Burst coalescing window.
@@ -106,6 +107,33 @@ impl State {
 pub const ALL_SLICES: [Slice; 4] =
     [Slice::Container, Slice::Network, Slice::Volume, Slice::Image];
 
+/// Fill in `restart_count` for the containers that are actually looping.
+///
+/// `RestartCount` is not in `GET /containers/json` at any API version, so
+/// carrying it costs an inspect. Inspecting every container would turn one
+/// request per List into one per container — the change the informer's whole
+/// design avoids — so this asks only about containers whose listed state is
+/// `restarting`. That set is bounded, is empty on a healthy host, and is
+/// exactly the set for which the number means anything: a container that has
+/// never restarted is correctly zero without being asked.
+///
+/// A failed inspect is swallowed rather than failing the scan, and silently:
+/// the container may have been removed between the List and this call — the
+/// same race the informer handles everywhere else — and losing the depth of a
+/// crash loop is not a reason to lose the topology it belongs to, nor to
+/// print a line per scan for as long as the loop lasts.
+async fn deepen_crash_loops(engine: &Engine, listed: &mut [Container]) {
+    for container in listed.iter_mut().filter(|c| c.state == RESTARTING) {
+        if let Ok(count) = engine.restart_count(&container.id).await {
+            container.restart_count = count;
+        }
+    }
+}
+
+/// Docker's state for a container the engine is restarting under a policy.
+/// The one state for which an inspect is worth a round trip.
+const RESTARTING: &str = "restarting";
+
 /// List one slice and diff it, producing the frame to send.
 ///
 /// `full` forces a `Sync` (every payload) rather than a `Delta` (membership
@@ -121,7 +149,12 @@ pub async fn scan(
     // call; the four of them together are what a resync costs.
     let (ids, fingerprints, entities) = match slice {
         Slice::Container => {
-            let listed = engine.containers().await?;
+            let mut listed = engine.containers().await?;
+            // Before hashing, deliberately: `restart_count` is part of the
+            // content hash, so filling it in afterwards would diff this List
+            // against fingerprints computed from a different field set and
+            // resend every crash-looping container on every scan.
+            deepen_crash_loops(engine, &mut listed).await;
             let fingerprints: Vec<u64> = listed.iter().map(hashset::hash_container).collect();
             let ids: Vec<String> = listed.iter().map(|c| c.id.clone()).collect();
             let entities: Vec<wire::Entity> = listed

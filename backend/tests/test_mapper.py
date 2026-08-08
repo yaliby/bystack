@@ -303,6 +303,30 @@ def test_a_crash_looping_container_still_reports_why_it_died() -> None:
     assert nodes[0].attrs["exit_code"] == 137
 
 
+def test_a_crash_loop_reports_how_deep_it_is() -> None:
+    # `exit_code` says a container died and how. This says whether it has
+    # been dying for four seconds or four days -- the difference between a
+    # deploy in progress and an incident, which neither the state nor the
+    # exit code can express.
+    payload = make_container("q" * 64, "web", state="restarting")
+    payload["Status"] = "Restarting (137) 2 seconds ago"
+    payload["RestartCount"] = 417
+
+    nodes, _ = map_container(SOURCE, ENGINE_ID_SAFE, payload)
+
+    assert nodes[0].attrs["restart_count"] == 417
+
+
+def test_a_container_that_has_never_restarted_claims_no_depth() -> None:
+    # `None` rather than 0, so the inspector renders nothing for the
+    # overwhelming majority of containers instead of a row of zeroes. "Never
+    # restarted" and "the agent did not inspect it" are deliberately the same
+    # answer here, because they mean the same thing: no crash loop.
+    nodes, _ = map_container(SOURCE, ENGINE_ID_SAFE, make_container("r" * 64, "web"))
+
+    assert nodes[0].attrs["restart_count"] is None
+
+
 def test_an_unhealthy_container_is_still_running_and_says_it_is_unhealthy() -> None:
     # Both halves matter. The state must stay `running` because that is what
     # decides which operations are offered, and a failing container's are a

@@ -137,6 +137,16 @@ def map_container(
                 # the operations a running container has. What changes is
                 # what the map is allowed to claim about it.
                 "health": payload.get("Health") or None,
+                # How deep the crash loop is. `exit_code` says a container
+                # died and how; this says whether it has been dying for four
+                # seconds or four days, which is the difference between a
+                # deploy in progress and an incident. `None` rather than 0 so
+                # the inspector renders nothing at all for the overwhelming
+                # majority of containers, which have never restarted -- and so
+                # that "never restarted" and "we did not ask" are not
+                # distinguished here, because they are the same answer: no
+                # crash loop worth reporting.
+                "restart_count": payload.get("RestartCount") or None,
                 "ports": ports,
             },
             observed_at=at,

@@ -120,6 +120,7 @@ def container(
     status_text: str = "Up 3 hours",
     image_id: str = "sha256:abc123",
     volume: str | None = "shop_data",
+    restart_count: int = 0,
 ) -> wire.Entity:
     labels: dict[str, str] = {}
     if project and service:
@@ -144,6 +145,7 @@ def container(
             created=1_700_000_000,
             state=state,
             status_text=status_text,
+            restart_count=restart_count,
             labels=labels,
             ports=[
                 wire.Port(private_port=80, public_port=8080, protocol="tcp", host_ip="0.0.0.0"),
@@ -459,6 +461,54 @@ async def test_the_exit_code_still_arrives_when_the_state_changes(wired) -> None
     )
 
     assert store.node(container_urn(ENGINE, C1)).attrs["exit_code"] == 137
+
+
+async def test_the_depth_of_a_crash_loop_survives_the_wire(wired) -> None:
+    """`RestartCount` is not on Docker's list endpoint at any API version, so
+    the agent pays an inspect for it — and only for containers it has already
+    seen listed as `restarting`. This is the Controller end of that: the
+    number has to arrive as a number and reach the node an operator clicks."""
+    provider, store, _ = await connected(wired)
+
+    await provider.on_frame(
+        sync(
+            wire.SLICE_CONTAINER,
+            container(
+                C1,
+                "web",
+                state="restarting",
+                status_text="Restarting (137) 2 seconds ago",
+                restart_count=417,
+            ),
+        )
+    )
+
+    node = store.node(container_urn(ENGINE, C1))
+    assert node.attrs["restart_count"] == 417
+    # Both halves, because either alone is half a diagnosis.
+    assert node.attrs["exit_code"] == 137
+
+
+async def test_a_deepening_crash_loop_moves_the_graph(wired) -> None:
+    """The deliberate cost of hashing the count on the agent: a looping
+    container is re-sent per restart. That is only worth paying if the
+    Controller actually records the new number, and a store that treated the
+    payload as unchanged would take the cost and drop the information."""
+    provider, store, _ = await connected(wired)
+    looping = dict(
+        state="restarting", status_text="Restarting (137) 2 seconds ago"
+    )
+    await provider.on_frame(
+        sync(wire.SLICE_CONTAINER, container(C1, "web", restart_count=2, **looping))
+    )
+    before = store.snapshot().seq
+
+    await provider.on_frame(
+        sync(wire.SLICE_CONTAINER, container(C1, "web", restart_count=3, **looping))
+    )
+
+    assert store.snapshot().seq > before
+    assert store.node(container_urn(ENGINE, C1)).attrs["restart_count"] == 3
 
 
 # --------------------------------------------------------------------------

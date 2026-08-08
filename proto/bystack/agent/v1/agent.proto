@@ -327,6 +327,33 @@ message Container {
   // Unlike `status_text` this costs nothing to hash: it changes when the
   // healthcheck's verdict changes and at no other time.
   string health = 13;
+
+  // How many times the engine has restarted this container. **Hashed.**
+  //
+  // The depth of a crash loop, and the number an operator is actually looking
+  // for: `Restarting (137)` says the container is failing, and this says
+  // whether it has been failing for four seconds or four days. Neither the
+  // state nor the exit code can distinguish those.
+  //
+  // **Not in `GET /containers/json`**, at any API version. It exists only on
+  // `GET /containers/{id}/json`, so carrying it costs an inspect. The agent
+  // therefore inspects **only containers whose listed state is `restarting`**
+  // -- a set that is bounded, usually empty, and exactly the set for which
+  // the number means anything. A steady host pays nothing.
+  //
+  // Hashing it is a decision rather than an oversight. It advances while a
+  // container loops, so the container is re-sent on each restart -- but that
+  // is an event, not a clock, which is the whole distinction `status_text`
+  // fails. A crash loop that deepened is news; "Up 3 hours" becoming "Up 3
+  // hours" is not. The cost is bounded by the same restarting set, and a host
+  // with a container looping fast enough for this to matter has a problem
+  // worth a frame.
+  //
+  // Zero for a container that has never restarted, which is also proto3's
+  // default -- so an older agent that does not send it reads as "never
+  // restarted" rather than as an error. That is the correct degradation:
+  // absent depth is not a claim of depth.
+  uint32 restart_count = 14;
 }
 
 message Port {

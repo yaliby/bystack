@@ -19,7 +19,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
-use crate::model::{Container, Event, Image, Info, Network, Volume, VolumeList};
+use crate::model::{Container, Event, Image, Info, Inspect, Network, Volume, VolumeList};
 
 /// Placeholder authority. HTTP requires a Host header; nothing resolves it.
 const HOST: &str = "docker";
@@ -77,6 +77,21 @@ impl Engine {
 
     pub async fn containers(&self) -> Result<Vec<Container>, EngineError> {
         self.get_json("/containers/json?all=1").await
+    }
+
+    /// How many times the engine has restarted one container.
+    ///
+    /// One inspect, for one integer. `RestartCount` is not in
+    /// `GET /containers/json` at any API version, so this is the only place
+    /// it can come from — and the caller ([`crate::informer`]) is expected to
+    /// ask only for containers whose listed state is `restarting`, which is a
+    /// bounded and usually empty set. Calling it per container on every List
+    /// would turn one request per slice into one per container, which is the
+    /// change this design exists to avoid.
+    pub async fn restart_count(&self, container_id: &str) -> Result<u32, EngineError> {
+        let path = format!("/containers/{}/json", urlencode(container_id));
+        let inspect: Inspect = self.get_json(&path).await?;
+        Ok(inspect.restart_count)
     }
 
     pub async fn networks(&self) -> Result<Vec<Network>, EngineError> {

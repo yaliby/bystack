@@ -314,6 +314,11 @@ def _container(message: wire.Container) -> dict[str, Any]:
         # mapper reads a string here and the wire is the only place the two
         # spellings a daemon might use are reconciled.
         "Health": message.health,
+        # The depth of a crash loop. Docker only serves this on the inspect
+        # endpoint, so the agent pays a round trip for it and only for
+        # containers it has already seen listed as `restarting` -- which is
+        # why it is zero, not absent, for everything else.
+        "RestartCount": message.restart_count,
         "Labels": dict(message.labels),
         "Ports": [
             {

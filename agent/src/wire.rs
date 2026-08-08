@@ -61,6 +61,10 @@ impl From<&model::Container> for Container {
             // Normalized by `health()`, so the Controller sees one vocabulary
             // whatever the daemon on this host is old enough to send.
             health: source.health().to_string(),
+            // Zero unless the informer inspected this container, which it
+            // does only while the container is restarting. Zero is also the
+            // truth for everything else.
+            restart_count: source.restart_count,
         }
     }
 }

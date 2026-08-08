@@ -197,7 +197,7 @@ class EngineInfo(_message.Message):
     def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., server_version: _Optional[str] = ..., operating_system: _Optional[str] = ..., kernel_version: _Optional[str] = ..., architecture: _Optional[str] = ..., ncpu: _Optional[int] = ..., mem_total: _Optional[int] = ..., containers_running: _Optional[int] = ..., containers_total: _Optional[int] = ...) -> None: ...
 
 class Container(_message.Message):
-    __slots__ = ("id", "names", "image", "image_id", "command", "created", "state", "status_text", "labels", "ports", "networks", "mounts", "health")
+    __slots__ = ("id", "names", "image", "image_id", "command", "created", "state", "status_text", "labels", "ports", "networks", "mounts", "health", "restart_count")
     class LabelsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -218,6 +218,7 @@ class Container(_message.Message):
     NETWORKS_FIELD_NUMBER: _ClassVar[int]
     MOUNTS_FIELD_NUMBER: _ClassVar[int]
     HEALTH_FIELD_NUMBER: _ClassVar[int]
+    RESTART_COUNT_FIELD_NUMBER: _ClassVar[int]
     id: str
     names: _containers.RepeatedScalarFieldContainer[str]
     image: str
@@ -231,7 +232,8 @@ class Container(_message.Message):
     networks: _containers.RepeatedCompositeFieldContainer[NetworkAttachment]
     mounts: _containers.RepeatedCompositeFieldContainer[Mount]
     health: str
-    def __init__(self, id: _Optional[str] = ..., names: _Optional[_Iterable[str]] = ..., image: _Optional[str] = ..., image_id: _Optional[str] = ..., command: _Optional[str] = ..., created: _Optional[int] = ..., state: _Optional[str] = ..., status_text: _Optional[str] = ..., labels: _Optional[_Mapping[str, str]] = ..., ports: _Optional[_Iterable[_Union[Port, _Mapping]]] = ..., networks: _Optional[_Iterable[_Union[NetworkAttachment, _Mapping]]] = ..., mounts: _Optional[_Iterable[_Union[Mount, _Mapping]]] = ..., health: _Optional[str] = ...) -> None: ...
+    restart_count: int
+    def __init__(self, id: _Optional[str] = ..., names: _Optional[_Iterable[str]] = ..., image: _Optional[str] = ..., image_id: _Optional[str] = ..., command: _Optional[str] = ..., created: _Optional[int] = ..., state: _Optional[str] = ..., status_text: _Optional[str] = ..., labels: _Optional[_Mapping[str, str]] = ..., ports: _Optional[_Iterable[_Union[Port, _Mapping]]] = ..., networks: _Optional[_Iterable[_Union[NetworkAttachment, _Mapping]]] = ..., mounts: _Optional[_Iterable[_Union[Mount, _Mapping]]] = ..., health: _Optional[str] = ..., restart_count: _Optional[int] = ...) -> None: ...
 
 class Port(_message.Message):
     __slots__ = ("private_port", "public_port", "protocol", "host_ip")
