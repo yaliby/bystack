@@ -37,8 +37,10 @@ LABEL_DEPENDS_ON: Final = "com.docker.compose.depends_on"
 LABEL_WORKING_DIR: Final = "com.docker.compose.project.working_dir"
 LABEL_CONFIG_FILES: Final = "com.docker.compose.project.config_files"
 
-#: Matches the exit code inside "Exited (137) 3 seconds ago".
-_EXIT_CODE: Final = re.compile(r"Exited \((\d+)\)")
+#: Matches the exit code inside "Exited (137) 3 seconds ago" and inside
+#: "Restarting (137) 2 seconds ago". Both spellings, because the second one
+#: is the crash loop -- see :func:`_exit_code`.
+_EXIT_CODE: Final = re.compile(r"(?:Exited|Restarting) \((\d+)\)")
 
 
 def _now() -> float:
@@ -287,6 +289,12 @@ def _exit_code(status_text: str | None) -> int | None:
     one: 137 is SIGKILL, 143 is SIGTERM, and a crash loop is diagnosed by its
     exit code. The surrounding prose is discarded because it is a rendered
     relative timestamp, not data.
+
+    A restarting container renders the same code under a different verb --
+    ``"Restarting (137) 2 seconds ago"`` -- and that is the crash loop this
+    docstring already claimed to diagnose. Reading only ``Exited`` dropped
+    the code in exactly the state an operator goes looking for it, and left
+    a card that said `Unstable` and nothing else.
     """
     if not status_text:
         return None

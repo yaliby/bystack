@@ -289,6 +289,20 @@ def test_running_containers_have_no_exit_code() -> None:
     assert nodes[0].attrs["exit_code"] is None
 
 
+def test_a_crash_looping_container_still_reports_why_it_died() -> None:
+    # Docker renders the same exit code under a different verb while the
+    # restart policy is retrying, and this is the state an operator actually
+    # catches a crash loop in. Reading only `Exited` left the card saying
+    # `Unstable` with nothing to act on.
+    payload = make_container("p" * 64, "web", state="restarting")
+    payload["Status"] = "Restarting (137) 2 seconds ago"
+
+    nodes, _ = map_container(SOURCE, ENGINE_ID_SAFE, payload)
+
+    assert nodes[0].status == "restarting"
+    assert nodes[0].attrs["exit_code"] == 137
+
+
 def test_an_unhealthy_container_is_still_running_and_says_it_is_unhealthy() -> None:
     # Both halves matter. The state must stay `running` because that is what
     # decides which operations are offered, and a failing container's are a
