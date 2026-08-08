@@ -9,6 +9,11 @@ logs and alerting stay with the systems that already do them well.
 > Read [`ARCHITECTURE.md`](ARCHITECTURE.md) before changing anything, and
 > [`docs/adr/`](docs/adr/) for the decisions behind it. They are load-bearing,
 > and several look arbitrary until you know what goes wrong without them.
+>
+> Picking up unfinished work? [`docs/OPEN-WORK.md`](docs/OPEN-WORK.md) is the
+> handoff: how to establish a green baseline in ninety seconds, what is left,
+> in which order, and which decisions are already made and should not be
+> reopened.
 
 ---
 

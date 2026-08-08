@@ -409,7 +409,10 @@ Each step leaves the tree working.
    `python -m bystack` with no config manages this machine again. See §4 for
    the four decisions inside it.
 7. **Packaging**: static binaries, container image, systemd unit, and
-   Controller-driven upgrade.
+   Controller-driven upgrade. **Still open, and the last step here** — see
+   [OPEN-WORK](OPEN-WORK.md) §5, which also records why it blocks the product
+   rather than only the release: "add a host" composes a command that assumes
+   the binary is already on the target machine.
 
    The one hook the Controller already has for it is
    `bystack/_bundled/bystack-agent`, first in the local agent's search order
