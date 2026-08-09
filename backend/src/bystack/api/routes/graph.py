@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import Final
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -18,6 +20,14 @@ from bystack.providers.agent.commands import (
 )
 
 router = APIRouter(prefix="/graph", tags=["graph"])
+
+#: Seconds of silence on a live log before the stream sends a comment.
+#:
+#: Comfortably inside the shortest read timeout a proxy is likely to impose --
+#: nginx's `proxy_read_timeout` defaults to 60s and is the one this is chosen
+#: against. It is a bound on how long an *idle* stream can look dead, not a
+#: poll: a container that is writing never reaches it.
+STREAM_KEEPALIVE: Final = 15.0
 
 
 @router.get("", response_model=SnapshotOut, summary="Full graph snapshot")
@@ -100,10 +110,10 @@ async def get_node_logs(
     failing because the platform is in its safe mode would be exactly
     backwards -- read-only exists so that looking is always allowed.
 
-    One shot, not a stream. `tail` bounds the answer at the daemon, which is
-    what makes this safe to ask of a container that has been logging for a
-    month. Following a live log is a different feature with a different
-    backpressure problem.
+    One shot. The live tail is its sibling below (`/node/logs/stream`), and
+    this survives beside it as the API and as the fallback for an agent too old
+    to stream -- `tail` bounds the answer at the daemon, which is what makes it
+    safe to ask of a container that has been logging for a month.
 
     A host whose agent is asleep is answered rather than 404'd: the reason
     travels in the body, so the UI can say "this host is offline" instead of
@@ -157,11 +167,18 @@ async def stream_node_logs(
     through `CommandService`, and answered in full by a read-only Controller.
     Read-only exists so that looking is always allowed.
 
-    Three event types, because the client has to tell them apart: `lines`
-    carries output, `end` says the log is over and why, and `error` is a
-    refusal after the stream began. Everything that can be refused *before*
-    it begins is checked below and answered with a status code, because a
-    404 the browser can act on beats a 200 whose first event is an apology.
+    Two event types, plus a comment. `lines` carries output and the count of
+    anything dropped on the way; `end` says the log is over and why, with a
+    `reason` of `null` for an ordinary ending and a string for a failure --
+    the client has to tell those apart, because silence after a crash and
+    silence after a clean stop look identical otherwise. There is deliberately
+    no `error` event: everything that can be refused is refused *before* the
+    response begins, and answered with a status code, because a 409 the browser
+    can act on beats a 200 whose first event is an apology. A failure that
+    arrives later is an `end` with a reason, which is what it is.
+
+    The comment is `: keepalive`, every :data:`STREAM_KEEPALIVE` seconds of
+    silence. SSE ignores it by specification; proxies and idle timers do not.
     """
     parsed = _parse_urn(urn)
     if parsed.kind != NodeKind.CONTAINER or len(parsed.segments) != 2:
@@ -189,7 +206,23 @@ async def stream_node_logs(
     async def events() -> AsyncIterator[str]:
         try:
             while True:
-                event = await stream.next()
+                try:
+                    async with asyncio.timeout(STREAM_KEEPALIVE):
+                        event = await stream.next()
+                except TimeoutError:
+                    # A quiet container is the normal case, not an edge one --
+                    # most containers log at startup and then say nothing for
+                    # hours. Without this the connection carries no bytes at
+                    # all in that time, and the reverse proxy this listener was
+                    # deliberately kept able to sit behind closes it on its own
+                    # read timeout (nginx defaults to 60s). `EventSource` then
+                    # reconnects by itself, which re-subscribes, which re-sends
+                    # the backfill -- so the operator watching an idle log sees
+                    # the same screenful of lines appear again every minute and
+                    # the managed host pays for a new `docker logs --follow`
+                    # each time. A comment costs one line and no event.
+                    yield ": keepalive\n\n"
+                    continue
                 if event.lines or event.dropped:
                     yield _sse(
                         "lines",

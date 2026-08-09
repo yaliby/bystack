@@ -420,15 +420,30 @@ class AgentProvider:
 
         stream = self._streams.open(container_id)
         try:
-            await session.send(
-                wire.Envelope(
-                    logs_subscribe=wire.LogsSubscribe(
-                        request_id=stream.request_id,
-                        target_id=container_id,
-                        tail=min(max(tail, 1), MAX_LOG_TAIL),
+            try:
+                await session.send(
+                    wire.Envelope(
+                        logs_subscribe=wire.LogsSubscribe(
+                            request_id=stream.request_id,
+                            target_id=container_id,
+                            tail=min(max(tail, 1), MAX_LOG_TAIL),
+                        )
                     )
                 )
-            )
+            except AgentDisconnected as exc:
+                # The window between the liveness check above and this send is
+                # small but it is real, and it is the *likeliest* moment for it
+                # to close: a host that just went away is exactly the host an
+                # operator opens the log panel on. Translated rather than left
+                # to escape, because the two exceptions leave by different
+                # doors -- `LogsUnavailable` is a 409 the route already knows
+                # how to say, while an `AgentDisconnected` out of `__aenter__`
+                # is an unhandled error and a 500. A disconnected host is
+                # answered, not 500'd; that is the same line the one-shot read
+                # draws when it returns `ok: false` instead of raising.
+                raise LogsUnavailable(
+                    f"the agent on {self._id} disconnected before the tail began"
+                ) from exc
             yield stream
         finally:
             self._streams.close(stream.request_id)

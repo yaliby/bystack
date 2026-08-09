@@ -421,12 +421,16 @@ class LogsStream:
         if self._closed:
             return
         if event.done:
+            # Set before the put, not after: anything still arriving behind
+            # the end is then ignored rather than queued after it.
             self._closed = True
-            # Make room by force: this one has to land.
-            while self._queue.full():
-                _discard(self._queue)
-                self._dropped += 1
 
+        # One slot, made unconditionally, which is what makes the terminal
+        # event safe as well as the ordinary ones -- a bounded queue needs room
+        # for exactly one and this is where it comes from. There was a second,
+        # forcing loop above this for the `done` case; it discarded the same
+        # single event this does and could never fire twice, so it was doing
+        # nothing but implying the guarantee lived somewhere other than here.
         if self._queue.full():
             _discard(self._queue)
             self._dropped += 1
