@@ -4,18 +4,17 @@
 # default and is documented in `backend/bystack.example.yaml`, which is the
 # file to read to understand any of this.
 #
-# Baked into the image at /etc/bystack/bystack.yaml. To change any of it, mount
-# your own file over that path rather than editing this one:
-#
-#     -v ./bystack.yaml:/etc/bystack/bystack.yaml:ro
+# Baked into the image at /etc/bystack/bystack.yaml, and mounted over that path
+# from the checkout by `compose.yaml`. So on a compose install this file *is*
+# the running configuration: edit it here and `docker compose up -d`.
 
 api:
   # 0.0.0.0 *inside the container*, which is not the same decision as
   # `api.host: 0.0.0.0` on a host. A container's network namespace has nothing
   # else in it, so binding narrower than this would only mean the published
   # port reaches nothing. Where the control surface is actually exposed is
-  # decided by the publish flag, and `packaging/docker-compose.yml` publishes
-  # it to loopback for the reason ADR-0014 gives.
+  # decided by the publish flag, and `compose.yaml` publishes it to loopback
+  # for the reason ADR-0014 gives.
   host: 0.0.0.0
   port: 8000
 
@@ -25,12 +24,23 @@ api:
   cors_origins: []
 
 agents:
-  # Still off, and still for its own reason: this binds a second port. An
-  # image that opened the fleet listener because it happened to be a container
-  # would be deciding something the operator has not been asked yet. Turn it
-  # on when there is a second host, and set `server_names` at the same time --
-  # they are one decision.
+  # Off until there is a second machine. An image that opened the fleet
+  # listener because it happened to be a container would be deciding something
+  # the operator has not been asked yet.
+  #
+  # To manage other servers, change this to `true` and add this Controller's
+  # address to `server_names` below -- both, and then `docker compose up -d`.
+  # They are one decision: the listener issues itself a certificate for the
+  # names in that list, and an agent that dialled anything not in it fails the
+  # handshake and says so.
   enabled: false
+
+  # What your agents will have typed after `wss://`. The default covers a
+  # Controller reached at localhost and nothing else, so add the address or
+  # hostname other machines use to reach this one -- e.g.
+  #
+  #     server_names: ["localhost", "127.0.0.1", "::1", "10.0.0.5"]
+  server_names: ["localhost", "127.0.0.1", "::1"]
 
   # An absolute path, and a volume in the image. The default is under a home
   # directory, which in a container is a directory that lives exactly as long
@@ -40,7 +50,7 @@ agents:
 
 local_agent:
   # Requires the engine's socket to be mounted, and requires this process to
-  # be able to read it. See `packaging/docker-compose.yml`: it is a bind mount
+  # be able to read it. See `compose.yaml`: it is a bind mount
   # plus a supplementary group, and there is no way around either -- reading a
   # Docker socket is root-equivalent and the image will not pretend otherwise
   # by running as root to make it easier.

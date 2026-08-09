@@ -17,3 +17,13 @@ bystack.yaml
 # The CA private key lives here by default (MIGRATION section 3).
 .local/
 state/
+
+# What `compose.yaml` reads: the host's docker gid and, if it was widened, the
+# bind address. One machine's answers, written by the install line in
+# INSTALL.md -- there is nothing to check in.
+.env
+
+# Scratch from driving a real Controller by hand: throwaway configs, logs and
+# a state directory with a CA key in it.
+.bystack-test/
+.bystack-test*.yaml

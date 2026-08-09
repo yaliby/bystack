@@ -107,11 +107,14 @@ replacing a running agent is still `install-agent.sh` on that host.
 
 ## Installing it
 
-Three ways in, and they differ only in what you already run.
+Three ways in, and they differ only in what you already run. Step by step, with
+the failure modes named, is [`INSTALL.md`](INSTALL.md).
 
 ```bash
 # 1. The container. The Controller manages the engine it is mounted against.
-docker compose -f packaging/docker-compose.yml up -d
+git clone https://github.com/yaliby/bystack.git && cd bystack
+echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
+docker compose up -d --build
 #    -> http://127.0.0.1:8000
 
 # 2. A wheel. Carries the agent binary and the dashboard; nothing else needed.

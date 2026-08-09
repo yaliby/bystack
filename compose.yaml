@@ -1,0 +1,102 @@
+# The Controller, on the machine it manages.
+#
+#     git clone https://github.com/yaliby/bystack.git && cd bystack
+#     echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
+#     docker compose up -d --build
+#
+# Then http://127.0.0.1:8000. The topology fills in within a second or two:
+# the Controller spawns the bundled agent against the socket below, and that
+# agent is the only process here that talks to Docker.
+#
+# At the repository root, and named `compose.yaml`, so that the command is
+# `docker compose up -d` from the directory you cloned into and nothing else.
+# The previous home -- `packaging/docker-compose.yml` -- meant every published
+# instruction carried a `-f` whose path was only correct from one directory,
+# and the first thing it did to an operator standing in their home directory
+# was fail with `no such file or directory`.
+
+services:
+  controller:
+    image: ghcr.io/yaliby/bystack:latest
+    # Present so that a clone with no published image still comes up: with
+    # both keys, compose builds when the tag is not already local. Nothing
+    # here needs to be built beforehand -- see `packaging/Dockerfile`, which
+    # assembles the agent, the dashboard and the Controller from the checkout.
+    build:
+      context: .
+      dockerfile: packaging/Dockerfile
+    restart: unless-stopped
+
+    ports:
+      # Loopback, explicitly. Nothing authenticates a browser to this API by
+      # design (ADR-0014): the bind *is* the authorization, and the verb set
+      # is what bounds the damage.
+      #
+      # `BYSTACK_BIND=0.0.0.0` in `.env` widens it, which is what you want when
+      # the Controller is a server you reach over the network rather than the
+      # laptop in front of you -- and it is a decision about your network, so
+      # it is spelled out in one place instead of being the default. The other
+      # answer, and the better one over an untrusted link, is to leave this
+      # alone and forward the port:
+      #
+      #     ssh -N -L 8000:127.0.0.1:8000 you@controller
+      - "${BYSTACK_BIND:-127.0.0.1}:8000:8000"
+      # The fleet listener: where agents on other machines dial in. Published
+      # unconditionally, unlike the port itself, which is off until asked in
+      # `packaging/bystack.container.yaml`. A published port with nothing bound
+      # behind it refuses connections, which is a small cost; the alternative
+      # was an operator having to edit this file *and* the config to add their
+      # second server, and one of those two edits is always the one they miss.
+      - "8443:8443"
+
+    volumes:
+      # Read-only, and it does not make this safe -- a Docker socket is
+      # root-equivalent whatever the mount flag says, because the API behind
+      # it can create a container with the host's filesystem in it. What `ro`
+      # does buy is that the agent's own refusals are not the only thing
+      # standing between a bug here and a write.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The image carries this exact file already. Mounting the copy from the
+      # checkout over it changes nothing on a default install and means that
+      # turning on the fleet listener is an edit to a file you can see, in the
+      # directory you are standing in, rather than a `-v` you have to invent.
+      - ./packaging/bystack.container.yaml:/etc/bystack/bystack.yaml:ro
+      # The CA private key, the enrolment registry and the audit log. Losing
+      # this means re-enrolling every host, so it is a named volume rather
+      # than an anonymous one: an anonymous volume survives `down` and is
+      # abandoned by the next `up`, which is the worst of both.
+      - bystack-state:/var/lib/bystack
+
+    # The gid that owns /var/run/docker.sock on the *host*. 999 is Debian and
+    # Ubuntu's; Fedora and Arch differ, and a rootless daemon differs again,
+    # so the install line writes the real one into `.env`:
+    #
+    #     echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
+    #
+    # This is the whole reason the image does not run as root: with the group,
+    # the agent can read the socket and nothing else on the system. Get it
+    # wrong and the Controller still starts -- it just comes up with an empty
+    # map, which is the failure this default exists to make rare.
+    group_add:
+      - "${DOCKER_GID:-999}"
+
+    healthcheck:
+      # `/healthz` answers with the graph's size and every provider's state,
+      # so a Controller whose agent has died reports unhealthy rather than
+      # merely up. No curl in the image -- python is the thing that is
+      # definitely there.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/healthz", timeout=5) as r:
+              sys.exit(0 if r.status == 200 else 1)
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  bystack-state:

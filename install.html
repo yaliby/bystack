@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#090d15" />
+<title>ByStack · התקנה</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Hebrew:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #090d15;
+    --bg-soft: #0f1622;
+    --surface: #131c2b;
+    --surface-2: #182236;
+    --border: #24314a;
+    --text: #e8eef7;
+    --muted: #94a3b8;
+    --accent: #2ec8ff;
+    --accent-2: #d070ff;
+    --good: #22c98d;
+    --amber: #ffcc5e;
+    --radius: 14px;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "IBM Plex Sans Hebrew", "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(46,200,255,.10), transparent 60%),
+      radial-gradient(900px 500px at 0% 0%, rgba(208,112,255,.08), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.7;
+    font-size: 17px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px 80px; }
+
+  /* Top bar */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-bottom: 40px; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 20px; letter-spacing: .3px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center; color: #04121c; font-weight: 800; font-family: var(--mono);
+    box-shadow: 0 6px 20px rgba(46,200,255,.25);
+  }
+  .lang { display: inline-flex; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 4px; gap: 4px; }
+  .lang button {
+    font-family: var(--sans); font-size: 14px; font-weight: 600; color: var(--muted);
+    background: transparent; border: 0; padding: 6px 14px; border-radius: 999px; cursor: pointer;
+    transition: .15s;
+  }
+  .lang button[aria-pressed="true"] { background: var(--accent); color: #04121c; }
+
+  /* Hero */
+  .hero h1 { font-size: clamp(30px, 6vw, 44px); line-height: 1.15; margin: 0 0 12px; letter-spacing: -.5px; }
+  .hero p.lede { font-size: 19px; color: var(--muted); margin: 0 0 20px; }
+  .pill-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 22px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; font-size: 14px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; color: var(--muted);
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  /* Two roles */
+  .roles { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 34px 0 10px; }
+  @media (max-width: 560px) { .roles { grid-template-columns: 1fr; } }
+  .role {
+    background: linear-gradient(180deg, var(--surface), var(--bg-soft));
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 20px;
+  }
+  .role h3 { margin: 0 0 6px; font-size: 18px; display: flex; align-items: center; gap: 10px; }
+  .role p { margin: 0; color: var(--muted); font-size: 15px; }
+  .role .tag { font-family: var(--mono); font-size: 12px; padding: 2px 8px; border-radius: 6px; }
+
+  /* Steps */
+  .step { position: relative; padding-top: 40px; margin-top: 28px; border-top: 1px solid var(--border); }
+  .step:first-of-type { border-top: 0; }
+  .step-no {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: 10px; font-family: var(--mono); font-weight: 700;
+    background: var(--accent); color: #04121c; margin-inline-end: 12px; vertical-align: middle;
+    box-shadow: 0 4px 14px rgba(46,200,255,.25);
+  }
+  .step h2 { display: inline; font-size: 24px; letter-spacing: -.3px; }
+  .step > p { color: var(--muted); margin: 14px 0 0; }
+
+  /* Code */
+  .code {
+    position: relative; background: #0b1220; border: 1px solid var(--border);
+    border-radius: 12px; margin: 16px 0; overflow: hidden;
+  }
+  .code pre {
+    margin: 0; padding: 16px 18px; overflow-x: auto; direction: ltr; text-align: left;
+    font-family: var(--mono); font-size: 14px; line-height: 1.6; color: #cfe3f5;
+  }
+  .code .copy {
+    position: absolute; top: 8px; inset-inline-end: 8px;
+    font-family: var(--sans); font-size: 12px; font-weight: 600; color: var(--muted);
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 10px; cursor: pointer; transition: .15s;
+  }
+  .code .copy:hover { color: var(--text); border-color: var(--accent); }
+  .code .copy.done { color: var(--good); border-color: var(--good); }
+  .or { text-align: center; color: var(--muted); font-size: 13px; margin: 8px 0; letter-spacing: 1px; text-transform: uppercase; }
+
+  .callout {
+    display: flex; gap: 12px; background: rgba(46,200,255,.07); border: 1px solid rgba(46,200,255,.25);
+    border-radius: 12px; padding: 14px 16px; margin: 18px 0; font-size: 15px; color: #cfe3f5;
+  }
+  .callout .ico { flex: none; font-size: 18px; line-height: 1.5; }
+
+  /* Good to know */
+  .know { display: grid; gap: 12px; margin-top: 16px; }
+  .know .item { display: flex; gap: 12px; align-items: flex-start; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .know .item b { color: var(--text); }
+  .know .item p { margin: 2px 0 0; color: var(--muted); font-size: 15px; }
+  .know .ico { flex: none; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-size: 16px; }
+
+  code.inline { font-family: var(--mono); font-size: .92em; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; direction: ltr; display: inline-block; }
+  a { color: var(--accent); }
+  footer { margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 14px; text-align: center; }
+
+  [data-lang] { display: none; }
+  html[lang="he"] [data-lang="he"] { display: revert; }
+  html[lang="en"] [data-lang="en"] { display: revert; }
+  /* keep code blocks (language-agnostic) visible in both */
+  [data-lang="both"] { display: revert !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand"><span class="logo">B</span> ByStack</div>
+    <div class="lang" role="group" aria-label="Language">
+      <button id="btn-he" aria-pressed="true" onclick="setLang('he')">עברית</button>
+      <button id="btn-en" aria-pressed="false" onclick="setLang('en')">English</button>
+    </div>
+  </div>
+
+  <!-- HERO -->
+  <section class="hero">
+    <h1>
+      <span data-lang="he">התקנת ByStack</span>
+      <span data-lang="en">Install ByStack</span>
+    </h1>
+    <p class="lede">
+      <span data-lang="he">מתקינים פעם אחת את המרכז, ואז מוסיפים כל שרת בפקודה אחת. זהו.</span>
+      <span data-lang="en">Install the control center once, then add each server with one command. That's it.</span>
+    </p>
+    <div class="pill-row">
+      <span class="pill"><span class="dot" style="background:var(--good)"></span><span data-lang="he">3 צעדים</span><span data-lang="en">3 steps</span></span>
+      <span class="pill"><span class="dot" style="background:var(--accent)"></span><span data-lang="he">בלי הגדרות מסובכות</span><span data-lang="en">No complex config</span></span>
+      <span class="pill"><span class="dot" style="background:var(--accent-2)"></span><span data-lang="he">בלי לפתוח פורטים בשרתים</span><span data-lang="en">No open ports on servers</span></span>
+    </div>
+  </section>
+
+  <!-- TWO ROLES -->
+  <div class="roles">
+    <div class="role">
+      <h3><span data-lang="he">המרכז (Controller)</span><span data-lang="en">The Controller</span>
+        <span class="tag" style="background:rgba(46,200,255,.12);color:var(--accent)">×1</span></h3>
+      <p>
+        <span data-lang="he">מתקינים פעם אחת. הוא מריץ את הדשבורד ומרכז את הכל.</span>
+        <span data-lang="en">Installed once. It runs the dashboard and ties everything together.</span>
+      </p>
+    </div>
+    <div class="role">
+      <h3><span data-lang="he">סוכן (Agent)</span><span data-lang="en">An Agent</span>
+        <span class="tag" style="background:rgba(208,112,255,.12);color:var(--accent-2)">×N</span></h3>
+      <p>
+        <span data-lang="he">עוזר זעיר שמוסיפים לכל שרת שרוצים לנהל.</span>
+        <span data-lang="en">A tiny helper you add to each server you want to manage.</span>
+      </p>
+    </div>
+  </div>
+
+  <!-- STEP 1 -->
+  <section class="step">
+    <span class="step-no">1</span>
+    <h2><span data-lang="he">מתקינים את המרכז</span><span data-lang="en">Install the Controller</span></h2>
+    <p>
+      <span data-lang="he">פעם אחת בלבד, על המכונה שתהיה מרכז הבקרה שלך.</span>
+      <span data-lang="en">Once only, on the machine you want as your control center.</span>
+    </p>
+
+    <p style="margin-top:18px;color:var(--text);font-weight:600">
+      <span data-lang="he">מדביקים את ארבע השורות, אחת אחרי השנייה:</span>
+      <span data-lang="en">Paste all four lines, in order:</span>
+    </p>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>git clone https://github.com/yaliby/bystack.git
+cd bystack
+echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" &gt; .env
+docker compose up -d --build</pre>
+    </div>
+
+    <div class="callout">
+      <span class="ico">⚠️</span>
+      <span>
+        <span data-lang="he">להריץ מתוך התיקייה ש‑<code>git clone</code> יצר — בגלל זה השורה השנייה היא <code>cd bystack</code>. הבנייה הראשונה לוקחת כמה דקות; אחריה זה שניות.</span>
+        <span data-lang="en">Run these from inside the directory <code>git clone</code> just made — that is what the second line is for. The first build takes a few minutes; after that it is seconds.</span>
+      </span>
+    </div>
+
+    <div class="callout">
+      <span class="ico">✅</span>
+      <span>
+        <span data-lang="he">זהו — הדשבורד כבר רץ. לבדיקה: <code>docker compose ps</code>.</span>
+        <span data-lang="en">Done — the dashboard is now running. Check it with <code>docker compose ps</code>.</span>
+      </span>
+    </div>
+  </section>
+
+  <!-- STEP 2 -->
+  <section class="step">
+    <span class="step-no">2</span>
+    <h2><span data-lang="he">פותחים את הדשבורד</span><span data-lang="en">Open the dashboard</span></h2>
+    <p style="color:var(--text);font-weight:600">
+      <span data-lang="he">אם התקנתם על המכונה שמולכם:</span>
+      <span data-lang="en">If you installed on the machine in front of you:</span>
+    </p>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>http://127.0.0.1:8000</pre>
+    </div>
+
+    <div class="or" data-lang="both">— <span data-lang="he" style="display:inline">או</span><span data-lang="en" style="display:inline">or</span> —</div>
+
+    <p style="color:var(--text);font-weight:600">
+      <span data-lang="he">אם התקנתם על שרת מרוחק שאתם מגיעים אליו ב‑SSH:</span>
+      <span data-lang="en">If you installed on a server you reach over SSH:</span>
+    </p>
+    <p>
+      <span data-lang="he">הדשבורד מאזין ב־loopback בכוונה — שום דבר לא מבקש סיסמה מהדפדפן, אז המרכז לא חושף את עצמו לרשת בלי שביקשתם. מריצים אצלכם במחשב:</span>
+      <span data-lang="en">The dashboard binds to loopback on purpose — nothing asks a browser for a password, so the Controller does not put itself on your network unasked. On your own machine, run:</span>
+    </p>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>ssh -N -L 8000:127.0.0.1:8000 you@your-server</pre>
+    </div>
+    <p>
+      <span data-lang="he">משאירים את זה רץ, ופותחים <code class="inline">http://127.0.0.1:8000</code>. לחלופין, אם אתם סומכים על כל מי שמגיע לשרת הזה — <code class="inline">echo "BYSTACK_BIND=0.0.0.0" &gt;&gt; .env</code> ואז <code class="inline">docker compose up -d</code>, ואז <code class="inline">http://&lt;server-ip&gt;:8000</code>. רק ברשת פרטית.</span>
+      <span data-lang="en">Leave it running and open <code class="inline">http://127.0.0.1:8000</code>. Or, if you trust every machine that can reach that server — <code class="inline">echo "BYSTACK_BIND=0.0.0.0" &gt;&gt; .env</code> then <code class="inline">docker compose up -d</code>, and open <code class="inline">http://&lt;server-ip&gt;:8000</code>. Private networks only.</span>
+    </p>
+    <p>
+      <span data-lang="he">כבר תראו שם את הקונטיינרים של אותה מכונה — המרכז מנהל את עצמו אוטומטית, אז אף פעם לא מוסיפים אותו כשרת.</span>
+      <span data-lang="en">Either way you'll already see that machine's containers on the map — the Controller manages itself, so you never add it as a server.</span>
+    </p>
+  </section>
+
+  <!-- STEP 3 -->
+  <section class="step">
+    <span class="step-no">3</span>
+    <h2><span data-lang="he">מוסיפים את השרתים</span><span data-lang="en">Add your servers</span></h2>
+    <p>
+      <span data-lang="he">אם יש לכם רק מכונה אחת — דלגו על הצעד הזה.</span>
+      <span data-lang="en">Skip this step if you only have one machine.</span>
+    </p>
+
+    <p style="margin-top:18px;color:var(--text);font-weight:600">
+      <span data-lang="he">פעם אחת: פותחים את המאזין לשרתים</span>
+      <span data-lang="en">Once: turn on the fleet listener</span>
+    </p>
+    <p>
+      <span data-lang="he">הסוכנים מתחברים אל המרכז בפורט 8443, והמאזין הזה כבוי עד שמבקשים. בקובץ <code class="inline">packaging/bystack.container.yaml</code> משנים שתי שורות תחת <code class="inline">agents:</code> — ומוסיפים ל‑<code class="inline">server_names</code> את הכתובת שהשרתים האחרים ישתמשו בה כדי להגיע לכאן:</span>
+      <span data-lang="en">Agents dial in to the Controller on port 8443, and that listener is off until asked. In <code class="inline">packaging/bystack.container.yaml</code>, change two lines under <code class="inline">agents:</code> — adding to <code class="inline">server_names</code> the address your other servers will use to reach this one:</span>
+    </p>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>agents:
+  enabled: true
+  server_names: ["localhost", "127.0.0.1", "::1", "10.0.0.5"]</pre>
+    </div>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>docker compose up -d</pre>
+    </div>
+
+    <p style="margin-top:18px;color:var(--text);font-weight:600">
+      <span data-lang="he">ואז, לכל שרת — פקודה אחת:</span>
+      <span data-lang="en">Then, for each server — one command:</span>
+    </p>
+
+    <div class="know" style="margin-top:14px">
+      <div class="item"><div class="ico" style="background:rgba(46,200,255,.12);color:var(--accent)">1</div>
+        <div><span data-lang="he">בדשבורד, לוחצים על <b>Add host</b>.</span><span data-lang="en">In the dashboard, click <b>Add host</b>.</span></div></div>
+      <div class="item"><div class="ico" style="background:rgba(46,200,255,.12);color:var(--accent)">2</div>
+        <div><span data-lang="he">מעתיקים את הפקודה שמופיעה (הטוקן שלכם כבר בתוכה).</span><span data-lang="en">Copy the command it shows (your token is already in it).</span></div></div>
+      <div class="item"><div class="ico" style="background:rgba(46,200,255,.12);color:var(--accent)">3</div>
+        <div><span data-lang="he">מדביקים ומריצים את הפקודה <b>על השרת שמוסיפים</b>.</span><span data-lang="en">Paste and run it <b>on the server you're adding</b>.</span></div></div>
+    </div>
+
+    <p style="margin-top:18px"><span data-lang="he">הפקודה נראית ככה:</span><span data-lang="en">The command looks like this:</span></p>
+    <div class="code" data-lang="both">
+      <pre>curl -fsSL https://.../install-agent.sh | sudo sh -s -- \
+  --controller ... --token ...</pre>
+    </div>
+
+    <div class="callout">
+      <span class="ico">🟢</span>
+      <span>
+        <span data-lang="he">תוך שנייה-שתיים השרת החדש מופיע על המפה. אם הוא מסומן כ־<b>pending</b>, פשוט לוחצים <b>Approve</b> — זו הדרך של הדשבורד לשאול "זה באמת השרת שלך?".</span>
+        <span data-lang="en">Within a second or two the new server appears on the map. If it shows as <b>pending</b>, just click <b>Approve</b> — that's the dashboard asking "is this really your server?".</span>
+      </span>
+    </div>
+    <p>
+      <span data-lang="he">חוזרים על צעד 3 לכל שרת. זהו.</span>
+      <span data-lang="en">Repeat Step 3 for every server. That's it.</span>
+    </p>
+  </section>
+
+  <!-- GOOD TO KNOW -->
+  <section class="step">
+    <h2 style="display:block;margin-bottom:6px"><span data-lang="he">כדאי לדעת</span><span data-lang="en">Good to know</span></h2>
+    <div class="know">
+      <div class="item">
+        <div class="ico" style="background:rgba(34,201,141,.12)">🔒</div>
+        <div>
+          <b><span data-lang="he">השרתים שלכם נשארים סגורים.</span><span data-lang="en">Your servers stay closed.</span></b>
+          <p><span data-lang="he">כל שרת פונה <b>החוצה</b> אל המרכז — לא פותחים עליו שום פורט.</span><span data-lang="en">Each server reaches <b>out</b> to the Controller — you open no ports on it.</span></p>
+        </div>
+      </div>
+      <div class="item">
+        <div class="ico" style="background:rgba(255,204,94,.12)">♻️</div>
+        <div>
+          <b><span data-lang="he">כלום לא נמחק.</span><span data-lang="en">Nothing gets deleted.</span></b>
+          <p><span data-lang="he">אפשר להפעיל, לעצור ולהפעיל מחדש קונטיינרים — אי אפשר למחוק או להרוס כלום.</span><span data-lang="en">You can start, stop and restart containers — you can't remove or destroy anything.</span></p>
+        </div>
+      </div>
+      <div class="item">
+        <div class="ico" style="background:rgba(208,112,255,.12)">🔑</div>
+        <div>
+          <b><span data-lang="he">אין login להגדיר.</span><span data-lang="en">No login to set up.</span></b>
+          <p><span data-lang="he">ByStack בנוי לרשת פרטית אחת שבבעלותכם. השאירו את הדשבורד ברשת הפנימית (או מאחורי דף התחברות משלכם).</span><span data-lang="en">ByStack is built for one private network you own. Keep the dashboard on your internal network (or behind your own login).</span></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- REMOVE -->
+  <section class="step">
+    <h2 style="display:block;margin-bottom:6px"><span data-lang="he">הסרת שרת בהמשך</span><span data-lang="en">Removing a server later</span></h2>
+    <p><span data-lang="he">מריצים על אותו שרת:</span><span data-lang="en">Run this on that server:</span></p>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>sudo sh install-agent.sh --uninstall</pre>
+    </div>
+  </section>
+
+  <footer>
+    <span data-lang="he">כל ההתקנה. מרכז אחד, ואז פקודה אחת לכל שרת.</span>
+    <span data-lang="en">That's the whole install. One Controller, then one command per server.</span>
+  </footer>
+
+</div>
+
+<script>
+  function setLang(l) {
+    document.documentElement.lang = l;
+    document.documentElement.dir = (l === 'he') ? 'rtl' : 'ltr';
+    document.getElementById('btn-he').setAttribute('aria-pressed', l === 'he');
+    document.getElementById('btn-en').setAttribute('aria-pressed', l === 'en');
+    try { localStorage.setItem('bystack-lang', l); } catch (e) {}
+  }
+  function copyCode(btn) {
+    const text = btn.parentElement.querySelector('pre').innerText;
+    navigator.clipboard.writeText(text).then(() => {
+      const old = btn.textContent;
+      btn.textContent = '✓ Copied'; btn.classList.add('done');
+      setTimeout(() => { btn.textContent = old; btn.classList.remove('done'); }, 1500);
+    });
+  }
+  // restore preference
+  try {
+    const saved = localStorage.getItem('bystack-lang');
+    if (saved) setLang(saved);
+  } catch (e) {}
+</script>
+</body>
+</html>
