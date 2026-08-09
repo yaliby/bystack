@@ -1,0 +1,30 @@
+# The image builds everything from source (`packaging/Dockerfile`), so anything
+# already built on the host is not an input -- it is a way for a stale artifact
+# to end up in a release. Excluded rather than merely unused.
+dist/
+frontend/dist/
+agent/target/
+**/node_modules/
+**/__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.tsbuildinfo
+
+# Not needed to build, and one of them is large and changes every commit.
+.git/
+.github/
+docs/
+.demo/
+.claude/
+
+# A real config names ports, hostnames and a state directory for one machine.
+# The image has its own (`packaging/bystack.container.yaml`).
+bystack.yaml
+backend/bystack.yaml
+
+# The CA private key.
+.local/
+state/

@@ -114,12 +114,18 @@ mkdir -p "$OUT"
 # invisible until it reaches a machine with a different libc -- so the check
 # runs where the binary was made, while a toolchain that can see into it is
 # still in scope.
+#
+# A missing `readelf` is a failure rather than a skip. Skipping would make this
+# a check that any future base image can retire by dropping binutils, and the
+# whole point is that nothing else in the pipeline would notice.
 assert_static='
-	if command -v readelf >/dev/null 2>&1; then
-		if readelf -l "$BIN" | grep -q INTERP; then
-			echo "build-agent.sh: $BIN wants a dynamic loader; it is not static" >&2
-			exit 1
-		fi
+	command -v readelf >/dev/null 2>&1 || {
+		echo "build-agent.sh: no readelf; cannot verify $BIN is static" >&2
+		exit 1
+	}
+	if readelf -l "$BIN" | grep -q INTERP; then
+		echo "build-agent.sh: $BIN wants a dynamic loader; it is not static" >&2
+		exit 1
 	fi
 '
 
