@@ -46,6 +46,11 @@ bystack = "bystack.main:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bystack"]
 
+# The agent binary and the dashboard, when they have been built. Both are
+# optional and the hook says which kind of wheel came out; see hatch_build.py.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
