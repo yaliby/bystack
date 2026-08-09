@@ -1,0 +1,111 @@
+# The agent, on a managed host.
+#
+#     install -m 0644 bystack-agent.service /etc/systemd/system/
+#     systemctl enable --now bystack-agent
+#
+# `scripts/install-agent.sh` does this, and everything around it. This file is
+# here to be read: an operator running a fleet is entitled to know exactly what
+# is being installed on their machines before it is.
+
+[Unit]
+Description=ByStack agent
+Documentation=https://github.com/yaliby/bystack
+# The agent checks the Docker socket before anything else and exits with a
+# message naming it if it cannot be read, so starting first would turn an
+# ordinary boot order into a failed unit and a restart.
+After=network-online.target docker.service
+Wants=network-online.target
+
+# Five rapid failures and systemd stops trying, which is the behaviour worth
+# having rather than the one that looks more robust. A Controller that is down
+# does not reach this: the agent stays running and reconnects on its own
+# backoff. Reaching here means an *exit*, and the agent only exits for reasons
+# no restart improves -- a revoked certificate, an unreadable Docker socket, a
+# host that never enrolled. Hammering those hides the diagnosis; giving up
+# leaves `systemctl status` reporting a start limit, which is a question with
+# an answer.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+# Before the environment file, so an operator who genuinely wants the
+# certificate somewhere else can still say so -- and has to change
+# StateDirectory= in the same edit, which is the point of spelling it with %S
+# rather than writing the path twice.
+Environment=BYSTACK_STATE_DIR=%S/bystack-agent
+EnvironmentFile=/etc/bystack/agent.env
+ExecStart=/usr/local/bin/bystack-agent
+Restart=always
+RestartSec=10
+
+# SIGTERM, which the agent handles and returns from (`agent/src/main.rs`,
+# `Shutdown`). The default of 90s is left alone deliberately: it is a ceiling
+# on a stop that goes wrong, not a duration anything waits for, and a stop
+# measured at 0.22s does not need it shortened to look good.
+KillSignal=SIGTERM
+
+# -- who it runs as ---------------------------------------------------------
+#
+# Its own account, in the `docker` group. That group is root-equivalent -- the
+# API behind that socket can start a container with the host's filesystem in it
+# -- so this is not a privilege boundary and is not offered as one. What it
+# buys is narrower and still worth having: everything below this line applies,
+# which it could not if the unit ran as root.
+User=bystack-agent
+Group=bystack-agent
+SupplementaryGroups=docker
+
+# /var/lib/bystack-agent, 0700, created before the first start and kept across
+# restarts. The client certificate and private key live here (ADR-0011); the
+# key is generated on this host and never leaves it, so losing this directory
+# means re-enrolling this one host and nothing else.
+StateDirectory=bystack-agent
+StateDirectoryMode=0700
+
+# -- what it is allowed to do -----------------------------------------------
+#
+# The agent observes one Docker socket and writes one certificate. Everything
+# else is closed off. Each line below is a thing it demonstrably does not need,
+# rather than a list copied from a hardening guide -- `systemd-analyze security
+# bystack-agent` is the way to check that claim, and the way to notice if a
+# future version starts needing one of them back.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+# Nothing here executes generated code: it is a static Rust binary with no JIT
+# and no plugin surface.
+MemoryDenyWriteExecute=yes
+# A unix socket to Docker, and TLS to the Controller. Nothing else -- no
+# netlink, no packet sockets.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# The measured budget is 20 MiB RSS against ~4 MiB in use (MIGRATION section
+# 6.4). This is not a tuning knob; it is a tripwire. An agent that has found a
+# way to use sixteen times its steady state has a leak, and being killed and
+# restarted with that in the journal is a better outcome than growing quietly
+# on a machine somebody bought for something else.
+MemoryMax=64M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

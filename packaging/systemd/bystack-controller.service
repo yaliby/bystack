@@ -1,0 +1,101 @@
+# The Controller, installed from a wheel.
+#
+#     python3 -m venv /opt/bystack
+#     /opt/bystack/bin/pip install bystack-<version>-py3-none-*.whl
+#     ln -s /opt/bystack/bin/bystack /usr/local/bin/bystack
+#     install -m 0644 bystack-controller.service /etc/systemd/system/
+#     systemctl enable --now bystack-controller
+#
+# The container image is the other way to run this, and is the easier one on a
+# machine that already runs containers. This is for a host where the Controller
+# should be an ordinary service -- and for the case the image cannot serve
+# without argument, which is a Controller that manages the engine it is
+# *hosted by*.
+
+[Unit]
+Description=ByStack Controller
+Documentation=https://github.com/yaliby/bystack
+# Not `Requires=`. A Controller with no local engine is an ordinary
+# deployment, not a fault: it says so on first run and every enrolled host is
+# unaffected (`runtime/localagent.py`, UNAVAILABLE).
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/bystack --config /etc/bystack/bystack.yaml
+Restart=always
+RestartSec=5
+
+# `serve()` installs its own SIGINT and SIGTERM handlers precisely so this
+# works (`backend/src/bystack/main.py`, `_stop_on_signal`). Do not let a
+# refactor hand the signals back to uvicorn: `Server.serve()` re-raises the
+# signal it caught, which terminates the process before the cleanup its caller
+# arranged -- and the visible symptom is `systemctl stop` leaving the local
+# agent's socket in the state directory. `bystack.conformance.local` holds it.
+KillSignal=SIGTERM
+# Long enough for a stop that goes wrong to still be reported as a stop rather
+# than a kill. The measured shutdown is well under a second, and includes
+# terminating the local agent and waiting for it.
+TimeoutStopSec=30
+
+# -- who it runs as ---------------------------------------------------------
+#
+# In the `docker` group only because the agent it *spawns* reads that socket
+# and inherits this account. The Controller opens no Docker socket itself and
+# never will (ARCHITECTURE section 1); remove the group and the fleet still
+# works, this machine simply stops appearing in its own topology.
+User=bystack
+Group=bystack
+SupplementaryGroups=docker
+
+# /var/lib/bystack, 0700. The CA private key, the enrolment registry and
+# `operations.jsonl` -- the one directory here worth backing up, because losing
+# the key means re-enrolling every host. `agents.state_dir` in the config must
+# name this path; it is not read from the environment.
+StateDirectory=bystack
+StateDirectoryMode=0700
+ConfigurationDirectory=bystack
+
+WorkingDirectory=%S/bystack
+
+# -- what it is allowed to do -----------------------------------------------
+#
+# Lighter than the agent's, and the difference is exactly one thing: this
+# process forks a child and supervises it. Everything that would interfere with
+# that is absent, and everything else that applies to the agent applies here.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# No MemoryDenyWriteExecute. CPython does not need W+X for anything this
+# process does, but a C extension in the dependency tree is entitled to, and a
+# control plane that stops starting after an unrelated `pip install` is a worse
+# failure than the one this would prevent. The agent gets it because a static
+# Rust binary with no plugin surface can promise it.
+#
+# No MemoryMax either, for the reason the agent has one: its footprint is a
+# measured constant, and this one is a function of how large the fleet's graph
+# is. A tripwire set on a number nobody has measured is an outage waiting for
+# a busy afternoon.
+
+[Install]
+WantedBy=multi-user.target
