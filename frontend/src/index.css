@@ -1144,6 +1144,14 @@ body {
   font-size: 10.5px;
 }
 
+/* Version skew. Deliberately not `--serious`: a mixed-version fleet is an
+   ordinary operating state (ADR-0008), and colouring it as a fault would train
+   an operator to ignore the colour that means one. Enough contrast to be
+   noticed on a scan, and nothing more. */
+.host__skew {
+  color: var(--ink-secondary);
+}
+
 .host__actions {
   margin-top: 10px;
 }

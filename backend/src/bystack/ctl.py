@@ -130,7 +130,7 @@ def cmd_status(args: argparse.Namespace, url: str) -> int:
         print(json.dumps({"health": health, "enrollment": terms}, indent=2))
         return 0
 
-    print(f"controller  {url}  ({health['status']})")
+    print(f"controller  {url}  {health['version']}  ({health['status']})")
     print(f"graph       {health['node_count']} node(s), {health['edge_count']} edge(s)")
     print(f"read only   {'yes' if health['read_only'] else 'no'}")
     local = terms["local_agent"]
@@ -165,23 +165,56 @@ def cmd_hosts(args: argparse.Namespace, url: str) -> int:
     # and a column that is too narrow does not truncate, it just destroys the
     # alignment of every row after the longest one.
     width = max(len("ENGINE ID"), *(len(agent["engine_id"]) for agent in agents))
-    print(f"{'ENGINE ID':<{width}} {'STATUS':<10} {'LINK':<12} {'VERSION':<9} CERTIFICATE")
+    current = call(url, "/healthz")["version"]
+    print(f"{'ENGINE ID':<{width}} {'STATUS':<10} {'LINK':<12} {'VERSION':<10} CERTIFICATE")
     for agent in agents:
         link = "connected" if agent["connected"] else "offline"
         if agent["local"]:
             link += " (local)"
+        version = agent["agent_version"] or "-"
         print(
             f"{agent['engine_id']:<{width}} {agent['status']:<10} {link:<12} "
-            f"{agent['agent_version'] or '-':<9} {_expiry(agent['certificate_expires_at'])}"
+            f"{version + ('*' if _behind(agent, current) else ''):<10} "
+            f"{_expiry(agent['certificate_expires_at'])}"
         )
-    # The one state that needs a person, said once rather than per row.
+    # The two things that need a person, each said once at the bottom rather
+    # than as a symbol in a column somebody has to interpret.
     pending = [agent for agent in agents if agent["status"] == "pending"]
     if pending:
         print()
         print(f"{len(pending)} awaiting approval. They contribute nothing until approved:")
         for agent in pending:
             print(f"  bystack-ctl approve {agent['engine_id']}")
+
+    behind = [agent for agent in agents if _behind(agent, current)]
+    if behind:
+        # A mixed-version fleet is a normal operating state under ADR-0008, so
+        # this is a report and not a warning. What it is not is invisible: the
+        # agent version was already on this route with nothing to compare it
+        # against, which made it a fact rather than an answer (ADR-0015).
+        print()
+        print(f"* {len(behind)} host(s) behind the Controller ({current}). Upgrading is:")
+        print("    sudo sh install-agent.sh --controller wss://… --token …   # on that host")
+        print("  Re-running the installer is the supported path; it is idempotent and")
+        print("  never touches the certificate.")
     return 0
+
+
+def _behind(agent: dict[str, Any], controller: str) -> bool:
+    """Whether this agent is running something other than the Controller's version.
+
+    String inequality, not a version comparison. Parsing semver here would mean
+    deciding what `0.2.0-rc1` is relative to `0.2.0` in a CLI that has no stake
+    in the answer, and every wrong guess is a host reported as current when it
+    is not. "Different from the Controller" is the question an operator is
+    actually asking, and it has no edge cases.
+
+    An agent that has never connected reports no version at all. That is
+    unknown rather than behind, and saying otherwise would put every offline
+    host in a list of things to go and fix.
+    """
+    version: str = agent["agent_version"]
+    return bool(version) and version != controller
 
 
 def cmd_token(args: argparse.Namespace, url: str) -> int:

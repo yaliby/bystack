@@ -21,6 +21,7 @@ function reached(partial: Partial<Health> = {}): HealthState {
     kind: 'reached',
     health: {
       status: 'ok',
+      version: '0.1.0',
       seq: 1,
       node_count: 0,
       edge_count: 0,

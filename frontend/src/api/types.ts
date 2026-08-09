@@ -82,6 +82,8 @@ export interface ProviderHealth {
 
 export interface Health {
   readonly status: 'ok' | 'degraded';
+  /** What the Controller is. Only meaningful next to an agent's own version. */
+  readonly version: string;
   readonly seq: number;
   readonly node_count: number;
   readonly edge_count: number;

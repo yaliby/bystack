@@ -25,6 +25,7 @@ import {
   fleetRows,
   localAgentNotice,
   revokeWarning,
+  versionSkew,
   type HostRow,
 } from '../model/hosts';
 import type { Fleet } from '../model/useFleet';
@@ -34,6 +35,8 @@ interface Props {
   readonly fleet: Fleet;
   /** Provider health the app already polls — how `stale` is told from `never`. */
   readonly providers: readonly ProviderHealth[];
+  /** What the Controller is running, so an agent's version means something. */
+  readonly controllerVersion: string | null;
   /** The host node's name in the graph, when discovery has produced one. */
   readonly resolveHostName: (engineId: string) => string | null;
   readonly onClose: () => void;
@@ -42,7 +45,13 @@ interface Props {
 /** Relative times go stale silently; this is what keeps them honest. */
 const TICK_MS = 30_000;
 
-export function HostsPanel({ fleet, providers, resolveHostName, onClose }: Props) {
+export function HostsPanel({
+  fleet,
+  providers,
+  controllerVersion,
+  resolveHostName,
+  onClose,
+}: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [token, setToken] = useState<JoinToken | null>(null);
   const [minting, setMinting] = useState(false);
@@ -122,6 +131,7 @@ export function HostsPanel({ fleet, providers, resolveHostName, onClose }: Props
             key={row.agent.engine_id}
             row={row}
             now={now}
+            controllerVersion={controllerVersion}
             busy={fleet.busy === row.agent.engine_id}
             confirming={confirming === row.agent.engine_id}
             onApprove={() => void fleet.approve(row.agent.engine_id)}
@@ -157,6 +167,7 @@ export function HostsPanel({ fleet, providers, resolveHostName, onClose }: Props
 function HostCard({
   row,
   now,
+  controllerVersion,
   busy,
   confirming,
   onApprove,
@@ -166,6 +177,7 @@ function HostCard({
 }: {
   row: HostRow;
   now: number;
+  controllerVersion: string | null;
   busy: boolean;
   confirming: boolean;
   onApprove: () => void;
@@ -203,6 +215,22 @@ function HostCard({
 
       <p className="host__meta">
         {agent.agent_version ? `agent ${agent.agent_version}` : 'version unknown'}
+        {versionSkew(agent, controllerVersion) ? (
+          /* A report, not a fault. A mixed-version fleet is an ordinary
+             operating state under ADR-0008, so this is styled as a note and
+             carries no button: upgrading is `install-agent.sh` on that host
+             (ADR-0015). What it replaces is a version printed next to nothing
+             to compare it against. */
+          <>
+            <span className="brand__sep">·</span>
+            <span
+              className="host__skew"
+              title={`This Controller is ${controllerVersion}. Re-run install-agent.sh on that host to upgrade it.`}
+            >
+              Controller is {controllerVersion}
+            </span>
+          </>
+        ) : null}
         <span className="brand__sep">·</span>
         {status === 'local'
           ? `connected ${describeSince(agent.enrolled_at, now) ?? 'just now'}`

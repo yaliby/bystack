@@ -165,6 +165,9 @@ export default function App() {
   // `/healthz` knows the sources even when none of them has produced a node
   // yet; the graph only knows them once discovery has succeeded.
   const providers = health.kind === 'reached' ? health.health.providers : [];
+  // `null` until the first health answer, which reads the same as an agent
+  // whose version we do not know: unknown, not behind (`versionSkew`).
+  const controllerVersion = health.kind === 'reached' ? health.health.version : null;
   const providerLabel =
     providers.length > 1
       ? `${providers.length} sources`
@@ -363,6 +366,7 @@ export default function App() {
           <HostsPanel
             fleet={fleet}
             providers={providers}
+            controllerVersion={controllerVersion}
             resolveHostName={resolveHostName}
             onClose={() => setHostsOpen(false)}
           />

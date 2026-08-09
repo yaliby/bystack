@@ -191,6 +191,29 @@ export function certificateNote(agent: EnrolledAgent, now: number): string | nul
   return `Its certificate expires ${describeDuration(remaining)} from now. Renewal happens over the agent’s own connection, so it has to come back before then.`;
 }
 
+/**
+ * Whether this host is running something other than the Controller's version.
+ *
+ * String inequality, not a semver comparison. Deciding what `0.2.0-rc1` is
+ * relative to `0.2.0` is a question this panel has no stake in, and every
+ * wrong guess shows a host as current when it is not. "Different from the
+ * Controller" is what an operator is actually asking, and it has no edge
+ * cases.
+ *
+ * An agent that has never connected reports no version at all — unknown, not
+ * behind. Saying otherwise would put every host that happens to be powered off
+ * into a list of things to go and fix. `null` for the Controller's version
+ * means the health poll has not answered yet, which is the same situation.
+ *
+ * A mixed-version fleet is an ordinary operating state (ADR-0008), so this is
+ * a *report*. It is not styled as a fault and there is no button beside it:
+ * upgrading is `install-agent.sh` on that host (ADR-0015).
+ */
+export function versionSkew(agent: EnrolledAgent, controller: string | null): boolean {
+  return Boolean(controller) && Boolean(agent.agent_version) &&
+    agent.agent_version !== controller;
+}
+
 export function hostLabel(engineId: string, name: string | null): string {
   if (name) return name;
   // Engine ids are 64 hex characters or a colon-delimited fingerprint, and

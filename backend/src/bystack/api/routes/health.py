@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from bystack import __version__
 from bystack.api.deps import Context
 from bystack.api.schemas import HealthOut, ProviderHealthOut
 from bystack.core.ports.provider import ProviderState
@@ -31,6 +32,7 @@ async def healthz(context: Context) -> HealthOut:
 
     return HealthOut(
         status="degraded" if degraded else "ok",
+        version=__version__,
         seq=snapshot.seq,
         node_count=len(snapshot.nodes),
         edge_count=len(snapshot.edges),

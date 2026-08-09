@@ -18,6 +18,7 @@ import {
   revokeWarning,
   sameFleet,
   tokenLife,
+  versionSkew,
 } from './hosts';
 
 const NOW = 1_800_000_000_000;
@@ -515,5 +516,33 @@ describe('a host that is enrolled AND managed locally', () => {
   it('suppresses the empty-machine notice, since this machine is managed', () => {
     const rows = fleetRows([both()], [], noNames, NOW);
     expect(localAgentNotice(terms(), rows)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('version skew', () => {
+  it('marks a host running something other than the Controller', () => {
+    expect(versionSkew(agent('a', { agent_version: '0.1.0' }), '0.2.0')).toBe(true);
+    expect(versionSkew(agent('a', { agent_version: '0.2.0' }), '0.2.0')).toBe(false);
+  });
+
+  it('does not call a host behind when nobody knows what it is running', () => {
+    // An agent that has never connected reports no version. Listing every
+    // powered-off host as something to go and fix is how a report becomes
+    // noise nobody reads.
+    expect(versionSkew(agent('a', { agent_version: '' }), '0.2.0')).toBe(false);
+  });
+
+  it('says nothing until the health poll has answered', () => {
+    // The same situation from the other side, and it happens on every load.
+    expect(versionSkew(agent('a', { agent_version: '0.1.0' }), null)).toBe(false);
+  });
+
+  it('compares as strings rather than guessing at semver', () => {
+    // Deciding what `0.2.0-rc1` is relative to `0.2.0` is a question this
+    // panel has no stake in, and a wrong guess shows a host as current when
+    // it is not.
+    expect(versionSkew(agent('a', { agent_version: '0.2.0-rc1' }), '0.2.0')).toBe(true);
   });
 });

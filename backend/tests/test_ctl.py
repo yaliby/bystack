@@ -37,6 +37,7 @@ def responder(routes: dict[str, Any]):
 
 HEALTH = {
     "status": "ok",
+    "version": "0.2.0",
     "seq": 4,
     "node_count": 7,
     "edge_count": 6,
@@ -121,7 +122,7 @@ def test_a_uuid_engine_id_does_not_destroy_the_table(
     rest of the table looking like a different table.
     """
     rows = [agent("f952ee52-b480-42d6-bf22-cae4fddb142c"), agent("AAAABBBBCCCC")]
-    monkeypatch.setattr(ctl, "call", responder({"/agents": rows}))
+    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
 
     ctl.cmd_hosts(args(), "http://x")
 
@@ -136,7 +137,7 @@ def test_a_pending_host_is_named_once_with_the_command_that_fixes_it(
     """Pending is the one state that needs a person. A list that reports it in
     a column and stops has left the reader to work out what to do about it."""
     rows = [agent("e1"), agent("e2", status="pending", connected=False)]
-    monkeypatch.setattr(ctl, "call", responder({"/agents": rows}))
+    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
 
     ctl.cmd_hosts(args(), "http://x")
 
@@ -153,7 +154,8 @@ def test_no_certificate_is_a_dash_and_never_the_epoch(
     Rendering that as a date in 1970 is a fabricated fact, and a fleet list is
     exactly where somebody would read it as one.
     """
-    monkeypatch.setattr(ctl, "call", responder({"/agents": [agent("e1", local=True)]}))
+    rows = [agent("e1", local=True)]
+    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
 
     ctl.cmd_hosts(args(), "http://x")
 
@@ -234,7 +236,7 @@ def test_json_is_the_whole_payload_and_nothing_else(
     """`--json` has to be pipeable, so the table's commentary must not leak
     into it — including the advice about pending hosts."""
     rows = [agent("e2", status="pending", connected=False)]
-    monkeypatch.setattr(ctl, "call", responder({"/agents": rows}))
+    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
 
     ctl.cmd_hosts(args(json=True), "http://x")
 
@@ -266,3 +268,31 @@ def test_a_missing_config_file_is_a_different_exit_code(
     path that will never exist."""
     assert ctl.main(["--config", str(tmp_path / "absent.yaml"), "status"]) == 2
     assert "not found" in capsys.readouterr().err
+
+
+def test_hosts_behind_the_controller_are_named_with_the_way_to_fix_them(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The agent version was on this route with nothing to compare it against,
+    which made it a fact rather than an answer (ADR-0015).
+
+    A report and not a warning: a mixed-version fleet is a normal operating
+    state under ADR-0008. What it must not be is invisible.
+    """
+    rows = [
+        agent("current", agent_version="0.2.0"),
+        agent("old", agent_version="0.1.0"),
+        agent("unseen", agent_version="", connected=False),
+    ]
+    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
+
+    ctl.cmd_hosts(args(), "http://x")
+
+    out = capsys.readouterr().out
+    assert "1 host(s) behind the Controller (0.2.0)" in out
+    assert "install-agent.sh" in out
+    # A host nobody has heard from is unknown, not behind. Listing every
+    # powered-off machine as something to go and fix is how a report becomes
+    # noise.
+    assert "0.1.0*" in out
+    assert "0.2.0*" not in out

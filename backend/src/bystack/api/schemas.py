@@ -143,6 +143,17 @@ class ProviderHealthOut(BaseModel):
 
 class HealthOut(BaseModel):
     status: Literal["ok", "degraded"]
+    version: str
+    """What this Controller is, so an agent's version means something.
+
+    Every agent reports its own at `Hello` and it has been carried on
+    `GET /agents` for a while, next to nothing to compare it against -- which
+    made it a fact rather than an answer. A mixed-version fleet is a normal
+    operating state under ADR-0008, so "which hosts are behind" is a question
+    an operator asks routinely and could not previously ask here at all
+    (ADR-0015).
+    """
+
     seq: int
     node_count: int
     edge_count: int

@@ -24,6 +24,7 @@ From the Controller/Agent pivot onward, each decision is its own file.
 | [0012](0012-operations-and-audit.md)      | Operations: lifecycle only, logical targets, no optimistic updates | Accepted |
 | [0013](0013-agent-in-rust.md)             | The Agent is written in Rust; supersedes 0010 | Accepted |
 | [0014](0014-no-user-identity.md)          | No user identity; the network is the boundary, and destructive verbs stay out | Accepted |
+| [0015](0015-agent-upgrade.md)             | Agent upgrade: the Controller reports skew, the host applies it | Accepted |
 
 A record is written when a decision is *hard to reverse* or when the reasoning
 will not be obvious to someone reading the code a year from now. Everything
