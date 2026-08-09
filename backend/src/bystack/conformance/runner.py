@@ -23,6 +23,7 @@ import sys
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -48,6 +49,12 @@ C2 = "d" * 64
 #: single-container fixture can make.
 LOOPING = "e" * 64
 SETTLED = "f" * 64
+
+#: The agent's ceiling on inspects per scan, mirroring
+#: `MAX_CRASH_LOOP_INSPECTS` in `agent/src/informer.rs`. Kept in step by
+#: `test_wire.py::test_the_constants_mirrored_across_languages_still_agree`
+#: rather than by this comment.
+MAX_CRASH_LOOP_INSPECTS = 32
 
 #: How long to wait for the graph to reflect something. Generous: a failing
 #: check should mean "the agent does not do this", never "the machine was
@@ -299,6 +306,60 @@ async def scenario_crash_loop_depth(h: Harness) -> None:
         f"inspected {sorted(i[:12] for i in inspected) or 'nothing'}",
     )
 
+    # Everything above holds for one restarting container, which every
+    # implementation gets right. The two checks below are about the bad
+    # deploy: "usually empty" is a claim about the median host, and the
+    # median host is not the one an operator is looking at.
+    for index in range(MAX_CRASH_LOOP_INSPECTS + 8):
+        # Unlabelled, so each is its own container node rather than forty
+        # replicas of one compose service collapsing into a single one.
+        flapping = make_container(
+            f"{index:02d}" + "b" * 62,
+            f"flap-{index}",
+            state="restarting",
+            project=None,
+            service=None,
+        )
+        flapping["Status"] = "Restarting (1) 1 second ago"
+        flapping["RestartCount"] = 5
+        h.engine.containers.append(flapping)
+
+    # Slow enough that thirty-two of them in a row would take 1.6s and
+    # thirty-two at once take one of them. Without this the scripted engine
+    # answers instantly and both shapes look identical.
+    h.engine.inspect_delay = 0.05
+    h.engine.recorded.calls.clear()
+    started = asyncio.get_running_loop().time()
+    await h.engine.emit("container")
+    arrived = await h.until(
+        lambda: sum(
+            1 for n in h.nodes_of(NodeKind.CONTAINER) if n.attrs.get("restart_count") == 5
+        )
+        >= MAX_CRASH_LOOP_INSPECTS - 1
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+    h.engine.inspect_delay = 0.0
+
+    capped = _inspected(h)
+    h.record(
+        "a host full of crash loops has a ceiling",
+        "without a cap the set is bounded only by how bad the deploy was; fifty "
+        "loops would put fifty inspects ahead of every frame, delaying the "
+        "containers that are healthy along with the ones that are not",
+        0 < len(capped) <= MAX_CRASH_LOOP_INSPECTS,
+        f"{len(capped)} inspect(s) for {MAX_CRASH_LOOP_INSPECTS + 9} looping "
+        f"container(s), cap {MAX_CRASH_LOOP_INSPECTS}",
+    )
+
+    h.record(
+        "and pays for them once, not once each",
+        "the inspects are the List's latency, so serialising them is the "
+        "informer's cost model inverted in exactly the situation being watched",
+        arrived and elapsed < MAX_CRASH_LOOP_INSPECTS * 0.05 / 2,
+        f"{elapsed:.2f}s for {len(capped)} inspect(s) at 50ms each "
+        f"({'serialised' if elapsed > 1.0 else 'overlapped'})",
+    )
+
 
 def _inspected(h: Harness) -> set[str]:
     """Container ids fetched via `GET /containers/{id}/json`.
@@ -463,6 +524,106 @@ async def scenario_logs(h: Harness) -> None:
     )
 
 
+async def _await_line(stream: Any, matches: Callable[[Any], bool]) -> Any | None:
+    """The next event satisfying ``matches``, or ``None`` within the budget.
+
+    ``None`` rather than a raised ``TimeoutError``, and that is not
+    politeness. An agent that opens a stream and then never sends anything is
+    precisely the failure these checks exist to catch, so it has to arrive as
+    a failed *check* -- with the name, the reason and the other checks still
+    running. Letting it propagate turns the most interesting result this
+    scenario can produce into a traceback that ends the whole run, which is
+    how it behaved when it was first written and mutation-tested.
+    """
+    deadline = asyncio.get_running_loop().time() + SETTLE
+    while asyncio.get_running_loop().time() < deadline:
+        remaining = deadline - asyncio.get_running_loop().time()
+        try:
+            event = await asyncio.wait_for(stream.next(), timeout=remaining)
+        except TimeoutError:
+            return None
+        if matches(event):
+            return event
+        if event.done:
+            # Terminal, and not what was asked for. Waiting past it would
+            # burn the whole budget on a stream that has already ended.
+            return None
+    return None
+
+
+async def scenario_live_logs(h: Harness) -> None:
+    """A live tail: backfill, then lines as they are written, then an end.
+
+    The one-shot read above proves the framing and the round trip. None of it
+    carries over to a subscription, which is a different frame, a different
+    lifetime and a different failure mode -- and the failure that matters is
+    silent: a stream that opens, delivers the backfill, and then never sends
+    another line looks exactly like a quiet container.
+    """
+    target = next(iter(h.nodes_of(NodeKind.CONTAINER)))
+    container_id = target.urn.segments[-1]
+    h.engine.logs[container_id] = [(False, "backfilled line")]
+
+    provider = h.collector.agent_provider(target.source, create=False)
+    if provider is None:
+        h.record("live logs", "the host must have a provider to read through", False)
+        return
+
+    async with provider.follow(container_id, 100) as stream:
+        first = await _await_line(stream, lambda e: bool(e.lines))
+        h.record(
+            "a live tail backfills before it follows",
+            "opening the panel on a container that died a minute ago must show why, "
+            "not an empty box waiting for a line that will never come",
+            first is not None
+            and any(line.text == "backfilled line" for line in first.lines),
+            f"{len(first.lines)} line(s) in the first chunk" if first else "nothing arrived",
+        )
+
+        # Written *after* the subscription is open, which is the half a
+        # one-shot read cannot do at all.
+        await h.until(lambda: container_id in h.engine.following)
+        h.engine.logs[container_id].append((True, "written while watching"))
+
+        event = await _await_line(
+            stream, lambda e: any(line.text == "written while watching" for line in e.lines)
+        )
+        appeared = event is not None and any(
+            line.stderr for line in event.lines if line.text == "written while watching"
+        )
+
+        h.record(
+            "and delivers what is written while watching",
+            "this is the entire feature; a stream that only ever sends the backfill "
+            "is a slower one-shot read that looks like a working live tail",
+            appeared,
+            "arrived, still tagged stderr" if appeared else "never arrived",
+        )
+
+        h.engine.end_log_stream(container_id)
+        ended = await _await_line(stream, lambda e: e.done) is not None
+
+        h.record(
+            "a log that ends says so",
+            "silence after a container exits is indistinguishable from silence "
+            "while it runs, and the operator needs to know which one they are watching",
+            ended,
+            "terminal chunk received" if ended else "the stream never ended",
+        )
+
+    # Leaving the context cancels. The agent must drop the connection to the
+    # daemon, or every panel an operator ever opened is still costing that
+    # host a `docker logs --follow`.
+    released = await h.until(lambda: container_id not in h.engine.following)
+    h.record(
+        "and closing the panel stops the follow on the host",
+        "a subscription nobody cancels is a follow running forever on someone "
+        "else's machine, pushing bytes down an uplink nobody is reading",
+        released,
+        "the daemon connection was dropped" if released else "still following",
+    )
+
+
 async def scenario_reconnect(h: Harness) -> None:
     """Kill the event stream and confirm the agent notices.
 
@@ -589,6 +750,7 @@ SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     # inspects has this agent made so far" as its baseline.
     ("crash loop depth", scenario_crash_loop_depth),
     ("logs", scenario_logs),
+    ("live logs", scenario_live_logs),
     ("reconnect", scenario_reconnect),
     ("budget", scenario_budget),
 ]

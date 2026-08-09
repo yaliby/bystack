@@ -10,7 +10,7 @@
  */
 
 import type { Logs } from '../model/useLogs';
-import { LOGGABLE_KINDS, canRefresh, noticeOf, stderrCount } from '../model/logs';
+import { LOGGABLE_KINDS, canRefresh, isLive, linesOf, noticeOf, stderrCount } from '../model/logs';
 
 interface Props {
   readonly logs: Logs;
@@ -23,6 +23,9 @@ export function LogsPanel({ logs, kind }: Props) {
 
   const notice = noticeOf(logs.state);
   const errors = stderrCount(logs.state);
+  const lines = linesOf(logs.state);
+  const live = isLive(logs.state);
+  const dropped = logs.state.kind === 'live' ? logs.state.dropped : 0;
 
   return (
     <section className="inspector__section">
@@ -38,6 +41,14 @@ export function LogsPanel({ logs, kind }: Props) {
           </span>
           Logs
         </button>
+        {/* Says whether anyone is still listening. A still panel otherwise
+            reads as "nothing is happening" when it may be "nothing is
+            connected", and those call for opposite reactions. */}
+        {logs.open && live ? (
+          <span className="logs__live" aria-label="Following live">
+            ● Live
+          </span>
+        ) : null}
         {logs.open && errors > 0 ? (
           <span className="logs__errors">{errors} on stderr</span>
         ) : null}
@@ -51,9 +62,18 @@ export function LogsPanel({ logs, kind }: Props) {
       {logs.open ? (
         <>
           {notice ? <p className={`logs__notice logs__notice--${notice.tone}`}>{notice.text}</p> : null}
-          {logs.state.kind === 'ready' && logs.state.logs.lines.length > 0 ? (
+          {/* Never silent about a gap. A log with lines removed that does not
+              say so is one an operator reads as continuous, and they will draw
+              a conclusion from two lines that were never adjacent. */}
+          {dropped > 0 ? (
+            <p className="logs__notice logs__notice--warning">
+              {dropped} line{dropped === 1 ? '' : 's'} dropped — output arrived faster
+              than it could be shown.
+            </p>
+          ) : null}
+          {lines.length > 0 ? (
             <ol className="logs">
-              {logs.state.logs.lines.map((line, index) => (
+              {lines.map((line, index) => (
                 <li
                   // Index, deliberately: a log is an ordered list of possibly
                   // identical lines with no identity of their own, and the
@@ -68,8 +88,10 @@ export function LogsPanel({ logs, kind }: Props) {
           ) : null}
           {/* The tail is bounded, and saying so is the difference between "this
               is all of it" and "this is the end of it". */}
-          {logs.state.kind === 'ready' && logs.state.logs.lines.length > 0 ? (
-            <p className="logs__foot muted">Last {logs.state.logs.lines.length} lines</p>
+          {lines.length > 0 ? (
+            <p className="logs__foot muted">
+              {live ? `${lines.length} lines, following` : `Last ${lines.length} lines`}
+            </p>
           ) : null}
         </>
       ) : null}

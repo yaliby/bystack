@@ -240,9 +240,10 @@ class AuditConfig(BaseModel):
     holding root-equivalent access to a fleet should not have to be configured
     into remembering what it was asked to do.
 
-    It is still not the whole gate. `actor` is the string "anonymous" until
-    something authenticates a browser to this API, so this answers "what was
-    attempted, and when" and not yet "by whom" -- see `docs/OPEN-WORK.md` §4.
+    It answers "what was attempted, and when", and deliberately not "by whom":
+    `actor` is the string "anonymous" permanently, because ADR-0014 decides
+    this platform does not identify its operator. The verbs it records cannot
+    destroy anything, which is the other half of that decision.
     """
 
     durable: bool = Field(
@@ -281,7 +282,17 @@ class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     """Loopback by default. This service holds root-equivalent access to every
     managed engine; binding it to the world on first run is not a default any
-    platform should ship."""
+    platform should ship.
+
+    **This bind is the whole of the browser-side authorization** (ADR-0014).
+    Nothing authenticates a browser to this API by design, so anyone who can
+    reach this port can start, stop, restart and kill containers on every
+    managed host. That is bounded on purpose -- `CommandKind` holds no verb
+    that destroys anything, and `read_only` is `True` until an operator opts
+    out -- but it is the reason changing this to `0.0.0.0` is a decision about
+    how much you trust the network, not a convenience. Put a reverse proxy
+    with authentication in front of it if the answer is "not much"; the
+    browser port was deliberately kept able to sit behind an ordinary one."""
 
     port: int = 8000
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
@@ -293,9 +304,31 @@ class Settings(BaseModel):
     api: ApiConfig = Field(default_factory=ApiConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     read_only: bool = Field(
-        default=True,
-        description="Refuse all mutating operations. Secure default; opt out deliberately.",
+        default=False,
+        description="Refuse all mutating operations. On makes this a viewer.",
     )
+    """Off by default, because this is a control plane and not a diagram.
+
+    It shipped `True` on the reasoning that a mutating default is never safe.
+    That reasoning assumed a verb set that could hurt you, and ADR-0014 closed
+    that door permanently: everything in `CommandKind` is a reversible
+    lifecycle transition, the API binds to loopback, and every attempt is
+    recorded durably. The worst a wrong click does is restart a container --
+    recoverable, audited, and visible on the canvas a second later.
+
+    Against that, the cost of the safe default was real and was paid on every
+    first run: a platform whose entire point is *"the live map is the control
+    surface"* came up refusing every action, with no error a new operator could
+    connect to a setting they had never read about. A default that makes the
+    product look broken is not a secure default, it is a support burden that
+    teaches people to flip flags they have not understood.
+
+    Set `read_only: true` to get the viewer back -- for a Controller pointed at
+    production from a laptop, or any host you want to watch and not touch. The
+    refusal is still enforced at one choke point (`CommandService`) and by each
+    agent on its own authority, so turning it on is a real guarantee and not a
+    UI preference.
+    """
     log_level: str = "INFO"
 
     @model_validator(mode="before")

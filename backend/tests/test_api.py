@@ -50,8 +50,10 @@ def test_health_reports_graph_size_and_read_only_default(client) -> None:
     assert body["status"] == "ok"
     assert body["node_count"] == 2
     assert body["edge_count"] == 1
-    # Secure default: mutation is opt-in, not opt-out.
-    assert body["read_only"] is True
+    # Reported at all because the UI draws its buttons from it. The default is
+    # now False (ADR-0014) -- the platform controls, and read-only is the
+    # opt-in for a Controller you want to watch and not touch.
+    assert body["read_only"] is False
 
 
 def test_graph_snapshot_carries_a_sequence_number(client) -> None:

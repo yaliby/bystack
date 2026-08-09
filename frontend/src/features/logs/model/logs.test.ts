@@ -10,7 +10,16 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ContainerLogs } from '../../../api/types';
-import { LOGGABLE_KINDS, canRefresh, noticeOf, stderrCount } from './logs';
+import {
+  LIVE_BUFFER,
+  LOGGABLE_KINDS,
+  appendLive,
+  canRefresh,
+  isLive,
+  noticeOf,
+  stderrCount,
+} from './logs';
+import type { LogsState } from './logs';
 
 const TARGET = 'bystack:container:e1/c1';
 
@@ -111,5 +120,92 @@ describe('canRefresh', () => {
   it('offers one after a failure, which is the case it is most wanted in', () => {
     expect(canRefresh({ kind: 'error', message: 'offline' })).toBe(true);
     expect(canRefresh({ kind: 'ready', logs: answer({ ok: false, reason: 'offline' }) })).toBe(true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// The live tail
+// ---------------------------------------------------------------------------
+
+function live(overrides: Partial<Extract<LogsState, { kind: 'live' }>> = {}): LogsState {
+  return { kind: 'live', lines: [], dropped: 0, ended: null, ...overrides };
+}
+
+describe('a live tail', () => {
+  it('says it is waiting rather than that the container is silent', () => {
+    // The whole reason `live` is a separate state. An open stream with no
+    // lines yet and a finished read with no lines are the same empty array
+    // and opposite facts: one is "nothing has happened *yet*", the other is
+    // "nothing happened". Rendering them alike tells an operator their
+    // container is quiet when it has been watched for half a second.
+    expect(noticeOf(live())).toEqual({ tone: 'muted', text: 'Waiting for output…' });
+    expect(noticeOf(live({ ended: { reason: null } }))).toEqual({
+      tone: 'muted',
+      text: 'This container wrote nothing.',
+    });
+  });
+
+  it('shows why a stream stopped, when it stopped for a reason', () => {
+    // A container that exited cleanly and an agent that lost its daemon both
+    // end the stream. Only one of them is the operator's problem.
+    expect(noticeOf(live({ ended: { reason: 'the host disconnected' } }))).toEqual({
+      tone: 'warning',
+      text: 'the host disconnected',
+    });
+  });
+
+  it('gets out of the way once there are lines to read', () => {
+    expect(noticeOf(live({ lines: [{ stderr: false, text: 'up' }] }))).toBeNull();
+  });
+
+  it('counts stderr the same way a one-shot read does', () => {
+    expect(
+      stderrCount(
+        live({
+          lines: [
+            { stderr: false, text: 'listening' },
+            { stderr: true, text: 'panic' },
+          ],
+        }),
+      ),
+    ).toBe(1);
+  });
+
+  it('offers no Refresh while it is following, and one once it is not', () => {
+    // Refresh means "get the newest lines", which is what an open stream is
+    // already doing. Offering it suggests the panel is stale when it is the
+    // opposite.
+    expect(canRefresh(live())).toBe(false);
+    expect(canRefresh(live({ ended: { reason: null } }))).toBe(true);
+  });
+
+  it('reports whether anyone is still listening', () => {
+    expect(isLive(live())).toBe(true);
+    expect(isLive(live({ ended: { reason: null } }))).toBe(false);
+    expect(isLive({ kind: 'idle' })).toBe(false);
+  });
+});
+
+describe('appendLive', () => {
+  it('keeps the newest lines when a container outruns the panel', () => {
+    // A live log is unbounded and the DOM is not. The container that most
+    // needs watching is the one writing fastest, so this bound is load-bearing
+    // rather than defensive — and it is the case no manual test reaches.
+    const previous = Array.from({ length: LIVE_BUFFER }, (_, i) => ({
+      stderr: false,
+      text: `old ${i}`,
+    }));
+
+    const result = appendLive(previous, [{ stderr: true, text: 'newest' }]);
+
+    expect(result).toHaveLength(LIVE_BUFFER);
+    expect(result[result.length - 1]).toEqual({ stderr: true, text: 'newest' });
+    expect(result[0].text).toBe('old 1');
+  });
+
+  it('appends in order below the bound', () => {
+    const result = appendLive([{ stderr: false, text: 'first' }], [{ stderr: false, text: 'second' }]);
+    expect(result.map((l) => l.text)).toEqual(['first', 'second']);
   });
 });

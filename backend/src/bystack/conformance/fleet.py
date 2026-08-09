@@ -12,20 +12,15 @@ is deliberately blind to everything ADR-0008 actually claims about a *fleet*:
 * image digests correlating across hosts *for free*, which is the one place
   the partition rule and the correlation rule pull in opposite directions;
 * one agent's disconnect degrading one host and nothing else (§2, MIGRATION §2);
-* commands reaching the host they were addressed to and no other (§9).
+* commands reaching the host they were addressed to and no other (§9);
+* log reads doing the same, over a path that shares none of the command
+  machinery -- and failing plausibly rather than loudly when they do not.
 
 Every one of those is a property of the fleet, not of an agent, so no
 single-agent run can observe it -- and each fails silently: the graph looks
 plausible, and it is describing the wrong machine.
 
 Three real agent binaries, three scripted engines, one Controller.
-
-**KNOWN GAP -- `docs/OPEN-WORK.md` §3.3.** Reading a container's log is a
-per-host request too, and it is not checked here: nothing rules out a logs
-request for host B's container being answered by host A's agent, which is
-exactly the class of bug the list above exists for. The engines already hold
-distinguishable containers, so the check is one scenario -- ask A's provider
-for B's container id and assert it is refused rather than answered.
 """
 
 from __future__ import annotations
@@ -636,6 +631,84 @@ async def scenario_logical_fanout(h: Harness) -> None:
     )
 
 
+async def scenario_logs_routing(h: Harness) -> None:
+    """A log read must be answered by the host that holds the container.
+
+    The same property as `scenario_command_routing` over a completely
+    different code path: logs are not a `CommandKind`, do not go through
+    `CommandService`, and are answered by a read-only Controller — so nothing
+    the command scenario proves carries over to them.
+
+    Getting this wrong is worse than an error. A misrouted command fails
+    loudly on a daemon that does not have the container; a misrouted log read
+    hands the operator another machine's output under the container they
+    clicked, which is a plausible answer to the wrong question and the hardest
+    kind of wrong to notice during an incident.
+    """
+    alpha, beta = h.hosts["alpha"], h.hosts["beta"]
+    assert alpha.engine is not None and beta.engine is not None
+
+    # Distinguishable per host, so an answer names the machine it came from
+    # rather than merely being the right shape.
+    for host in (alpha, beta):
+        assert host.engine is not None
+        for container in host.containers:
+            host.engine.logs[container["Id"]] = [
+                (False, f"serving from {host.name}"),
+                (True, f"{host.name}: upstream timed out"),
+            ]
+
+    target = next(iter(h.containers_on(beta)))
+    container_id = target.urn.segments[-1]
+
+    for host in h.hosts.values():
+        assert host.engine is not None
+        host.engine.recorded.calls.clear()
+
+    answer = await h.provider(beta).logs(container_id, 100)
+    text = " ".join(line.text for line in answer.lines)
+    asked = {
+        name: sum(1 for call in host.engine.recorded.calls if call.endswith("/logs"))
+        for name, host in h.hosts.items()
+        if host.engine is not None
+    }
+
+    h.record(
+        "a log read is answered by the host that holds the container",
+        "logs bypass CommandService entirely, so the routing the command scenario "
+        "pins says nothing about them",
+        answer.ok and "beta" in text and "alpha" not in text,
+        answer.reason or f"{len(answer.lines)} line(s): {text[:60]!r}",
+    )
+
+    h.record(
+        "and no other host's daemon is asked",
+        "a read that fans out costs bandwidth on every uplink in the fleet to "
+        "answer a question about one container",
+        asked.get("beta") == 1 and asked.get("alpha") == 0 and asked.get("gamma") == 0,
+        ", ".join(f"{name}={count}" for name, count in sorted(asked.items())),
+    )
+
+    # The partition rule, for reads. `PartitionWriter` stops an agent writing
+    # another host's entities; this is the same line drawn from the other
+    # direction -- one agent must not be usable as a window onto a machine it
+    # does not run on.
+    for host in h.hosts.values():
+        assert host.engine is not None
+        host.engine.recorded.calls.clear()
+
+    crossed = await h.provider(alpha).logs(container_id, 100)
+    beta_untouched = not any(call.endswith("/logs") for call in beta.engine.recorded.calls)
+
+    h.record(
+        "one host's agent cannot read another's container",
+        "an agent that answered for an id it does not own would make every "
+        "enrolled host a window onto every other one",
+        not crossed.ok and beta_untouched,
+        crossed.reason or f"answered with {len(crossed.lines)} line(s)",
+    )
+
+
 async def scenario_read_only_agent(h: Harness) -> None:
     """gamma's agent refuses regardless of what arrives on the wire.
 
@@ -729,6 +802,7 @@ SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("partial outage", scenario_partial_outage),
     ("no resurrection", scenario_no_resurrection),
     ("command routing", scenario_command_routing),
+    ("logs routing", scenario_logs_routing),
     ("logical fan-out", scenario_logical_fanout),
     ("read-only agent", scenario_read_only_agent),
 ]

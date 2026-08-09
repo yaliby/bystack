@@ -26,13 +26,16 @@ topology with a clear marker beats blanking the screen.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from bystack.agent.v1 import agent_pb2 as wire
 from bystack.core.graph.model import Node
 from bystack.core.identity import NodeKind
-from bystack.core.ports.agent import AgentSession
+from bystack.core.ports.agent import AgentDisconnected, AgentSession
 from bystack.core.ports.command import (
     CommandKind,
     CommandRejected,
@@ -43,10 +46,15 @@ from bystack.core.ports.command import (
 from bystack.core.ports.provider import GraphWriter, ProviderHealth, ProviderState
 from bystack.providers.agent.commands import (
     CAP_LOGS,
+    CAP_LOGS_STREAM,
+    MAX_LOG_TAIL,
     SUPPORTED,
     CommandChannel,
     LogsChannel,
     LogsResult,
+    LogsStream,
+    LogsSubscriptions,
+    LogsUnavailable,
     refuse_read_only,
 )
 from bystack.providers.agent.ingest import AgentIngest
@@ -90,6 +98,7 @@ class AgentProvider:
         "_session",
         "_channel",
         "_logs",
+        "_streams",
         "_state",
         "_detail",
         "_connected_at",
@@ -106,6 +115,7 @@ class AgentProvider:
         self._session: AgentSession | None = None
         self._channel = CommandChannel()
         self._logs = LogsChannel()
+        self._streams = LogsSubscriptions()
         self._state = ProviderState.STOPPED
         self._detail: str | None = None
         self._connected_at = 0.0
@@ -177,6 +187,7 @@ class AgentProvider:
                 "frames": self._frames,
                 "pending_commands": len(self._channel),
                 "pending_logs": len(self._logs),
+                "live_log_streams": len(self._streams),
                 "connected_for": int(time.time() - self._connected_at) if self.connected else 0,
             },
         )
@@ -200,6 +211,7 @@ class AgentProvider:
         self._session = session
         self._channel = CommandChannel()
         self._logs = LogsChannel()
+        self._streams = LogsSubscriptions()
         self._connected_at = time.time()
         self._set(ProviderState.STARTING, None)
 
@@ -214,6 +226,9 @@ class AgentProvider:
         # its full deadline for a reply that provably cannot arrive.
         self._channel.abandon(reason)
         self._logs.abandon(reason)
+        # Ends every live tail with a reason, so a browser watching a log gets
+        # "the host went away" rather than a stream that silently stops.
+        self._streams.abandon(reason)
         self._session = None
         # The membership cache describes a live agent's view. Keeping it
         # across a gap would let the reconnecting agent's first Delta be
@@ -264,6 +279,8 @@ class AgentProvider:
                 self._channel.resolve(envelope.command_result)
             case "logs_response":
                 self._logs.resolve(envelope.logs_response)
+            case "logs_chunk":
+                self._streams.deliver(envelope.logs_chunk)
             case other:
                 # Not an error. An agent from a later release may send frames
                 # this Controller predates, and mixed-version fleets are a
@@ -371,6 +388,61 @@ class AgentProvider:
                 f"cannot read container logs",
             )
         return await self._logs.fetch(session, container_id, tail, LOGS_TIMEOUT)
+
+    @asynccontextmanager
+    async def follow(
+        self, container_id: str, tail: int
+    ) -> AsyncIterator[LogsStream]:
+        """Open a live tail, and close it however the caller leaves.
+
+        A context manager rather than a pair of methods, because the failure
+        this is guarding against is an unclosed subscription: that is a
+        `docker logs --follow` running on someone's machine, pushing bytes
+        down an uplink nobody is reading, until the agent disconnects. An
+        operator navigating away, a browser crashing, an exception in the
+        route -- every one of those must cancel it, and `finally` is the only
+        construct that covers all three.
+
+        Refusals are raised rather than returned, unlike :meth:`logs`. The
+        caller here is a streaming response that has not started yet, so it
+        can still answer with a status code; once the first byte is sent it
+        cannot, which is exactly why the capability check happens before the
+        subscription rather than on the first chunk.
+        """
+        session = self._session
+        if session is None:
+            raise LogsUnavailable(f"the agent on {self._id} is not currently connected")
+        if CAP_LOGS_STREAM not in session.capabilities:
+            raise LogsUnavailable(
+                f"the agent on {self._id} (version {session.agent_version or 'unknown'}) "
+                f"cannot stream container logs"
+            )
+
+        stream = self._streams.open(container_id)
+        try:
+            await session.send(
+                wire.Envelope(
+                    logs_subscribe=wire.LogsSubscribe(
+                        request_id=stream.request_id,
+                        target_id=container_id,
+                        tail=min(max(tail, 1), MAX_LOG_TAIL),
+                    )
+                )
+            )
+            yield stream
+        finally:
+            self._streams.close(stream.request_id)
+            # Best effort, and deliberately not awaited on a dead session: the
+            # agent tears down every follower when the connection drops, so a
+            # cancel we could not send is one the disconnect already delivered.
+            live = self._session
+            if live is not None:
+                with contextlib.suppress(AgentDisconnected):
+                    await live.send(
+                        wire.Envelope(
+                            logs_cancel=wire.LogsCancel(request_id=stream.request_id)
+                        )
+                    )
 
     # -- internals ---------------------------------------------------------
 

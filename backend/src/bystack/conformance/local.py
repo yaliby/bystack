@@ -16,11 +16,10 @@ own wiring was broken, which is the only way this can fail.
 The scripted engine keeps the rule the whole suite keeps: **no test anywhere
 requires a Docker daemon or a network.**
 
-**KNOWN GAP -- `docs/OPEN-WORK.md` §3.3.** Reading a container's log is not
-checked here, so nothing proves it works on the zero-config path. This is the
-only suite that drives the unix-socket transport, and the frames it carries
-are the ones a first-run user has. The scenario is a copy of `runner.py`'s
-`scenario_logs`, ~15 lines.
+Both directions are checked, not just discovery: commands go out over this
+transport and log reads come back over it. The other two runs prove those
+against a WebSocket, which is a different carrier for the same frames -- and
+the zero-config path is the one a first-run user is on.
 """
 
 from __future__ import annotations
@@ -296,6 +295,42 @@ async def run(agent_binary: Path) -> int:
                 "reads, and it records refusals too",
                 len(recorded) == 1 and recorded[0].target == container_urn(engine_id, C1),
                 f"{len(recorded)} entr(y/ies), status {recorded[0].status if recorded else '-'}",
+            )
+        )
+
+        # -- and reads come back the same way -----------------------------
+
+        engine.logs[C1] = [
+            (False, "listening on :80"),
+            (True, "upstream timed out"),
+            (False, "shutting down"),
+        ]
+        answer = await provider.logs(C1, 100) if provider is not None else None
+        tagged = [(line.stderr, line.text) for line in answer.lines] if answer else []
+        checks.append(
+            Check(
+                "a log read crosses the local socket",
+                "the request/response correlation and Docker's stream framing are proven "
+                "over the WebSocket the other two runs use; this is the only suite that "
+                "carries them over the unix socket a first-run user actually has, and "
+                "'why did this container die' is the first thing they will ask",
+                answer is not None
+                and answer.ok
+                and (True, "upstream timed out") in tagged
+                and (False, "listening on :80") in tagged,
+                (answer.reason if answer is not None else "no provider")
+                or f"{len(tagged)} line(s), {sum(1 for stderr, _ in tagged if stderr)} on stderr",
+            )
+        )
+
+        tailed = await provider.logs(C1, 1) if provider is not None else None
+        checks.append(
+            Check(
+                "and the tail is bounded on this path too",
+                "an unbounded read is how a month-old log exhausts an agent, and the "
+                "local agent is the one sharing a machine with the Controller",
+                tailed is not None and tailed.ok and len(tailed.lines) < 3,
+                f"{len(tailed.lines) if tailed else '-'} line(s) for tail=1",
             )
         )
 

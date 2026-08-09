@@ -39,7 +39,11 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = [
     # both of those enable, taken directly and pinned to 0.24 for that reason.
     "__rustls-tls",
 ] }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# `sink` for the WebSocket write half; `alloc` for `join_all`, which is what
+# overlaps the crash-loop inspects in `informer.rs`. Both were already coming
+# in via tokio-tungstenite's own feature set -- named here so the build does
+# not silently depend on that unification surviving a dependency bump.
+futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 
 # Mutual TLS (ADR-0011). Manual roots rather than the platform trust store:
 # the agent pins *our* CA and nothing else, so a public CA that mis-issues for

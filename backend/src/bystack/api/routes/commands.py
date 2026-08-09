@@ -106,10 +106,11 @@ async def get_audit(
 
     Durable by default since the audit log moved to disk
     (`infra/audit/durable.py`), so this answers about previous runs of the
-    Controller and not only this one. What it still cannot answer is *who*:
-    nothing authenticates a browser to this API, so every entry reads
-    `anonymous` -- which is why no destructive operation exists yet. See
-    ADR-0012.
+    Controller and not only this one. What it deliberately does not answer is
+    *who*: ADR-0014 decides this platform has no user identity, so every entry
+    reads `anonymous` -- and that is also why no destructive operation exists
+    or will. The verbs it records are all reversible, which is what makes an
+    unattributed log a complete record rather than half of one.
     """
     return [AuditEntryOut.of(entry) for entry in service.audit.recent(limit)]
 

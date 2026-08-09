@@ -21,7 +21,7 @@ SLICE_VOLUME: Slice
 SLICE_IMAGE: Slice
 
 class Envelope(_message.Message):
-    __slots__ = ("seq", "hello", "hello_ack", "sync", "delta", "command", "command_result", "resync_request", "logs_request", "logs_response", "enroll_request", "enroll_response", "renewal_offer", "certificate_request", "certificate_issued")
+    __slots__ = ("seq", "hello", "hello_ack", "sync", "delta", "command", "command_result", "resync_request", "logs_request", "logs_response", "logs_subscribe", "logs_chunk", "logs_cancel", "enroll_request", "enroll_response", "renewal_offer", "certificate_request", "certificate_issued")
     SEQ_FIELD_NUMBER: _ClassVar[int]
     HELLO_FIELD_NUMBER: _ClassVar[int]
     HELLO_ACK_FIELD_NUMBER: _ClassVar[int]
@@ -32,6 +32,9 @@ class Envelope(_message.Message):
     RESYNC_REQUEST_FIELD_NUMBER: _ClassVar[int]
     LOGS_REQUEST_FIELD_NUMBER: _ClassVar[int]
     LOGS_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    LOGS_SUBSCRIBE_FIELD_NUMBER: _ClassVar[int]
+    LOGS_CHUNK_FIELD_NUMBER: _ClassVar[int]
+    LOGS_CANCEL_FIELD_NUMBER: _ClassVar[int]
     ENROLL_REQUEST_FIELD_NUMBER: _ClassVar[int]
     ENROLL_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     RENEWAL_OFFER_FIELD_NUMBER: _ClassVar[int]
@@ -47,12 +50,15 @@ class Envelope(_message.Message):
     resync_request: ResyncRequest
     logs_request: LogsRequest
     logs_response: LogsResponse
+    logs_subscribe: LogsSubscribe
+    logs_chunk: LogsChunk
+    logs_cancel: LogsCancel
     enroll_request: EnrollRequest
     enroll_response: EnrollResponse
     renewal_offer: RenewalOffer
     certificate_request: CertificateRequest
     certificate_issued: CertificateIssued
-    def __init__(self, seq: _Optional[int] = ..., hello: _Optional[_Union[Hello, _Mapping]] = ..., hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., sync: _Optional[_Union[Sync, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., command: _Optional[_Union[Command, _Mapping]] = ..., command_result: _Optional[_Union[CommandResult, _Mapping]] = ..., resync_request: _Optional[_Union[ResyncRequest, _Mapping]] = ..., logs_request: _Optional[_Union[LogsRequest, _Mapping]] = ..., logs_response: _Optional[_Union[LogsResponse, _Mapping]] = ..., enroll_request: _Optional[_Union[EnrollRequest, _Mapping]] = ..., enroll_response: _Optional[_Union[EnrollResponse, _Mapping]] = ..., renewal_offer: _Optional[_Union[RenewalOffer, _Mapping]] = ..., certificate_request: _Optional[_Union[CertificateRequest, _Mapping]] = ..., certificate_issued: _Optional[_Union[CertificateIssued, _Mapping]] = ...) -> None: ...
+    def __init__(self, seq: _Optional[int] = ..., hello: _Optional[_Union[Hello, _Mapping]] = ..., hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., sync: _Optional[_Union[Sync, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., command: _Optional[_Union[Command, _Mapping]] = ..., command_result: _Optional[_Union[CommandResult, _Mapping]] = ..., resync_request: _Optional[_Union[ResyncRequest, _Mapping]] = ..., logs_request: _Optional[_Union[LogsRequest, _Mapping]] = ..., logs_response: _Optional[_Union[LogsResponse, _Mapping]] = ..., logs_subscribe: _Optional[_Union[LogsSubscribe, _Mapping]] = ..., logs_chunk: _Optional[_Union[LogsChunk, _Mapping]] = ..., logs_cancel: _Optional[_Union[LogsCancel, _Mapping]] = ..., enroll_request: _Optional[_Union[EnrollRequest, _Mapping]] = ..., enroll_response: _Optional[_Union[EnrollResponse, _Mapping]] = ..., renewal_offer: _Optional[_Union[RenewalOffer, _Mapping]] = ..., certificate_request: _Optional[_Union[CertificateRequest, _Mapping]] = ..., certificate_issued: _Optional[_Union[CertificateIssued, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("agent_version", "engine_id", "engine", "read_only", "capabilities", "unix_time")
@@ -406,6 +412,34 @@ class LogsResponse(_message.Message):
     reason: str
     lines: _containers.RepeatedCompositeFieldContainer[LogLine]
     def __init__(self, request_id: _Optional[str] = ..., ok: _Optional[bool] = ..., reason: _Optional[str] = ..., lines: _Optional[_Iterable[_Union[LogLine, _Mapping]]] = ...) -> None: ...
+
+class LogsSubscribe(_message.Message):
+    __slots__ = ("request_id", "target_id", "tail")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    TARGET_ID_FIELD_NUMBER: _ClassVar[int]
+    TAIL_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    target_id: str
+    tail: int
+    def __init__(self, request_id: _Optional[str] = ..., target_id: _Optional[str] = ..., tail: _Optional[int] = ...) -> None: ...
+
+class LogsChunk(_message.Message):
+    __slots__ = ("request_id", "lines", "done", "reason")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    LINES_FIELD_NUMBER: _ClassVar[int]
+    DONE_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    lines: _containers.RepeatedCompositeFieldContainer[LogLine]
+    done: bool
+    reason: str
+    def __init__(self, request_id: _Optional[str] = ..., lines: _Optional[_Iterable[_Union[LogLine, _Mapping]]] = ..., done: _Optional[bool] = ..., reason: _Optional[str] = ...) -> None: ...
+
+class LogsCancel(_message.Message):
+    __slots__ = ("request_id",)
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    def __init__(self, request_id: _Optional[str] = ...) -> None: ...
 
 class LogLine(_message.Message):
     __slots__ = ("stderr", "text")

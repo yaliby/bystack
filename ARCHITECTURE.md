@@ -200,6 +200,15 @@ else. It cannot delete another host's containers from the graph, cannot forge
 another host's topology, and cannot see another host's data. That property was
 already in the code before the pivot; the pivot is what makes it load-bearing.
 
+**The same line, drawn from the read side.** `PartitionWriter` stops an agent
+*writing* another host's entities; a per-host request — a command, a log read
+— must equally not be a way to *ask* one agent about a machine it does not
+run. Both are routed by `node.source`, and `bystack.conformance.fleet` checks
+each by addressing host A's provider with host B's container id. Logs are the
+one that fails quietly if this is wrong: a misrouted command fails on a daemon
+that does not have the container, while a misrouted read hands the operator
+another machine's output under the container they clicked.
+
 **With exactly one seam.** Image identity is the content digest and is
 deliberately not engine-scoped — that is the free correlation in §4 — so an
 image URN is the one name two partitions legitimately both hold. The store
@@ -377,13 +386,28 @@ the two-layer identity in §4, and it belongs in the Controller for exactly the
 reason mapping does: only the Controller holds the whole graph.
 
 **Only reversible lifecycle transitions exist** — start, stop, restart, pause,
-unpause, kill. Nothing destroys state. That is a sequencing decision, not a
-difficulty: `remove` is one more HTTP call, but it is only defensible once the
-platform can answer *who deleted the database volume*. The audit log is
-durable now (`infra/audit/durable.py`, ADR-0012 §4a) and answers *what* and
-*when* across restarts; every entry is still attributed to `anonymous`, so it
-does not answer *who*. Destructive operations, durable audit and
-authentication arrive together, and one of the three is still missing.
+unpause, kill. Nothing destroys state, and that is now **permanent rather than
+pending**. `remove` is one more HTTP call, but it is only defensible once the
+platform can answer *who deleted the database volume* — and
+[ADR-0014](docs/adr/0014-no-user-identity.md) decides that question will not be
+answered. This is a single-operator LAN control plane; at one operator on their
+own network there is nobody to distinguish them from, so a login screen would
+answer "the one person with the password did", which is what having no login
+already says.
+
+The two halves hold each other up. With no authentication *and* no destructive
+verb, the worst case is "someone who could reach the port restarted a
+container" — recoverable, audited, and visible in the topology within a second.
+Add `prune` and the worst case becomes unrecoverable data loss with no
+attribution. Only one of those is acceptable without a login, which is why
+adding a destructive verb means superseding ADR-0014 first, not editing an
+enum.
+
+The audit log is durable (`infra/audit/durable.py`, ADR-0012 §4a) and answers
+*what was attempted, against what, when, and whether it worked* across
+restarts. Every entry is attributed to `anonymous`, deliberately and forever.
+That was always the half that matters during an incident; *who* is the question
+asked during a dispute between colleagues, and there are none.
 
 Read-only mode is enforced at **two** choke points now, deliberately:
 
@@ -580,5 +604,6 @@ Controller/Agent pivot onward are separate documents in
 | [0009](docs/adr/0009-agent-wire-protocol.md) | WebSocket + Protobuf, authoritative deltas, where mapping lives |
 | [0010](docs/adr/0010-agent-implementation-language.md) | The Agent is written in Go |
 | [0011](docs/adr/0011-agent-trust-and-enrollment.md) | mTLS, join tokens, Engine ID as agent identity |
-| [0013](docs/adr/0013-agent-in-rust.md) | The Agent is written in Rust; supersedes ADR-0010 |
 | [0012](docs/adr/0012-operations-and-audit.md) | Operations: lifecycle only, logical targets, no optimistic updates |
+| [0013](docs/adr/0013-agent-in-rust.md) | The Agent is written in Rust; supersedes ADR-0010 |
+| [0014](docs/adr/0014-no-user-identity.md) | No user identity; the network is the boundary, and destructive verbs stay out |

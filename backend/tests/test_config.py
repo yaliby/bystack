@@ -25,16 +25,28 @@ def test_zero_config_manages_nothing_and_listens_for_nobody() -> None:
 
 
 def test_secure_defaults() -> None:
+    """The defaults that are still load-bearing, and the one that stopped being.
+
+    `read_only` shipped `True` on the reasoning that a mutating default is
+    never safe. ADR-0014 retired that reasoning by closing the door it was
+    guarding: every verb in `CommandKind` is a reversible lifecycle
+    transition, permanently, so the worst a wrong click does is restart a
+    container. A control plane that refuses every action on first run is not
+    secure, it is broken-looking — and the two assertions below are what
+    actually keep it safe.
+    """
     settings = Settings.default()
 
-    # Mutation is opt-in.
-    assert settings.read_only is True
-    # This service holds root-equivalent access to every managed engine;
-    # binding it to the world on first run is not a shippable default.
+    # The reachability boundary, which is now the whole of the browser-side
+    # authorization (ADR-0014). This one must not move.
     assert settings.api.host == "127.0.0.1"
-    # Until mTLS lands the agent endpoint trusts whoever reaches it, and an
-    # unknown engine id is refused unless an operator says otherwise.
+    # An unknown engine id is refused unless an operator says otherwise.
+    # Auto-approve would make a join token the only thing between a stranger's
+    # machine and this fleet's graph.
     assert settings.agents.auto_approve is False
+    # And the control plane controls. Asserted rather than left implicit,
+    # because flipping it back would silently return the product to a viewer.
+    assert settings.read_only is False
 
 
 def test_a_hosts_block_is_a_hard_error_naming_the_migration(tmp_path: Path) -> None:

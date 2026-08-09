@@ -855,6 +855,34 @@ body {
   letter-spacing: 0.04em;
 }
 
+/* Present tense, and it has to read as such at a glance: this is the
+   difference between a container that is quiet and a panel that is no longer
+   listening. */
+.logs__live {
+  color: var(--ok, var(--accent));
+  letter-spacing: 0.04em;
+  animation: logs-pulse 2s ease-in-out infinite;
+}
+
+@keyframes logs-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Someone watching a log for a crash does not need it throbbing at them, and
+   for a vestibular disorder a permanent pulse is worse than useless. The dot
+   still carries the meaning without the motion. */
+@media (prefers-reduced-motion: reduce) {
+  .logs__live {
+    animation: none;
+  }
+}
+
 .logs__refresh {
   margin-left: auto;
   padding: 0;

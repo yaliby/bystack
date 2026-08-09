@@ -76,6 +76,18 @@ class ScriptedEngine:
         #: one is a visible failure rather than a coincidence that passes.
         self.logs: dict[str, list[tuple[bool, str]]] = {}
         self.recorded = Recorded()
+        #: Seconds an inspect takes to answer. Zero, except where a check is
+        #: about *how* the agent issues them: a real daemon answers a local
+        #: inspect in well under a millisecond, so thirty-two of them cost the
+        #: same whether they were issued one after another or all at once, and
+        #: a suite that never slows one down cannot tell those apart.
+        self.inspect_delay = 0.0
+        #: Container ids currently being followed. What lets a check assert
+        #: that a cancel actually reached the daemon rather than merely being
+        #: sent -- an agent that forgot to drop the connection leaves an entry
+        #: here forever, which is the leak the cap exists to bound.
+        self.following: set[str] = set()
+        self._ended_streams: set[str] = set()
 
         self._server: asyncio.AbstractServer | None = None
         self._event_streams: set[asyncio.StreamWriter] = set()
@@ -269,6 +281,10 @@ class ScriptedEngine:
         lines = self.logs.get(container_id, [])
         tail = int(query.get("tail", [str(len(lines))])[0] or len(lines))
 
+        if query.get("follow", ["0"])[0] in ("1", "true"):
+            await self._follow_logs(container_id, tail, writer)
+            return
+
         # Tailed per stream and then restored to write order, which is what
         # the daemon does -- and the reason the agent's `demultiplex` has to
         # tail the merged result a second time.
@@ -277,6 +293,58 @@ class ScriptedEngine:
             indexes = [i for i, (s, _) in enumerate(lines) if s is stream]
             kept.update(indexes[-tail:])
         await _raw(writer, 200, b"".join(_frame(*lines[i]) for i in sorted(kept)))
+
+    async def _follow_logs(
+        self, container_id: str, tail: int, writer: asyncio.StreamWriter
+    ) -> None:
+        """``GET /containers/{id}/logs?follow=1``: backfill, then keep going.
+
+        Chunked transfer, one HTTP chunk per batch, because that is what the
+        daemon does and because the agent's job is to reassemble frames that
+        do not line up with chunk boundaries. A fixture that sent the whole
+        thing at once would never exercise that.
+
+        Ends when `end_log_stream` is called for this container, which is how
+        a check drives "the container exited" without a container. Otherwise
+        it runs until the reader goes away -- and the reader going away is the
+        cancellation path worth testing, so nothing here times out on its own.
+        """
+        head = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/octet-stream\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+        )
+        writer.write(head)
+
+        sent = 0
+        backfill = self.logs.get(container_id, [])[-tail:] if tail else []
+        if backfill:
+            writer.write(_chunked(b"".join(_frame(s, t) for s, t in backfill)))
+            sent = len(self.logs.get(container_id, []))
+        await writer.drain()
+        self.following.add(container_id)
+
+        try:
+            while container_id not in self._ended_streams:
+                lines = self.logs.get(container_id, [])
+                if len(lines) > sent:
+                    fresh = lines[sent:]
+                    sent = len(lines)
+                    writer.write(_chunked(b"".join(_frame(s, t) for s, t in fresh)))
+                    await writer.drain()
+                await asyncio.sleep(0.05)
+            writer.write(b"0\r\n\r\n")  # the terminating chunk
+            await writer.drain()
+        except (ConnectionResetError, BrokenPipeError):
+            # The agent cancelled by dropping the connection, which is exactly
+            # what a `LogsCancel` is supposed to cause.
+            pass
+        finally:
+            self.following.discard(container_id)
+
+    def end_log_stream(self, container_id: str) -> None:
+        """Close a followed log, as a container exiting would."""
+        self._ended_streams.add(container_id)
 
     async def _inspect(self, container_id: str, writer: asyncio.StreamWriter) -> None:
         """``GET /containers/{id}/json``, carrying `RestartCount` and nothing else.
@@ -294,6 +362,8 @@ class ScriptedEngine:
         if container is None:
             await _status(writer, 404, {"message": f"No such container: {container_id}"})
             return
+        if self.inspect_delay:
+            await asyncio.sleep(self.inspect_delay)
         await _json(writer, {"Id": container_id, "RestartCount": container.get("RestartCount", 0)})
 
     async def _stream_events(
@@ -318,6 +388,11 @@ class ScriptedEngine:
         # closes it, or the agent goes away.
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.Event().wait()
+
+
+def _chunked(payload: bytes) -> bytes:
+    """One HTTP/1.1 chunk, which is how the daemon streams a followed log."""
+    return f"{len(payload):x}\r\n".encode() + payload + b"\r\n"
 
 
 def _frame(stderr: bool, text: str) -> bytes:

@@ -36,22 +36,31 @@ domain kernel did not move**: identity, graph, store, delta and the Docker
 mapper are untouched, which is the claim the migration was designed to make
 true and the reason the pivot cost a fortnight rather than a rewrite.
 
-| Working now | Being built | Not built yet |
-|---|---|---|
-| Docker discovery (List / Watch / Resync) | Packaging: static builds, image, systemd | User authentication and RBAC |
-| Canonical graph, two-layer identity | | Destructive operations (needs the above) |
-| Compose stacks, services, `depends_on` | | Durable graph history |
-| Incremental deltas over WebSocket | | Following a live log |
-| Interactive topology canvas | | Plugin system |
-| Container / service / stack operations | | |
-| Agent wire protocol + Controller ingest | | |
-| mTLS, join-token enrollment, auto-renewal | | |
-| The agent — Rust, 1.82 MiB, 3.9 MiB RSS | | |
-| Zero-config startup — a bundled local agent | | |
-| Hosts and the operations timeline, on the map | | |
-| **Container logs, in the node inspector** | | |
-| **Crash-loop depth (`RestartCount`)** | | |
-| **A durable operations log** | | |
+| Working now | Being built | Not built yet | Decided against |
+|---|---|---|---|
+| Docker discovery (List / Watch / Resync) | Packaging: static builds, image, systemd | Durable graph history | User authentication and RBAC ([ADR-0014](docs/adr/0014-no-user-identity.md)) |
+| Canonical graph, two-layer identity | | Plugin system | Destructive operations — `remove`, `prune`, volume deletion |
+| Compose stacks, services, `depends_on` | | | |
+| Incremental deltas over WebSocket | | | |
+| Interactive topology canvas | | | |
+| Container / service / stack operations | | | |
+| Agent wire protocol + Controller ingest | | | |
+| mTLS, join-token enrollment, auto-renewal | | | |
+| The agent — Rust, 1.82 MiB, 3.9 MiB RSS | | | |
+| Zero-config startup — a bundled local agent | | | |
+| Hosts and the operations timeline, on the map | | | |
+| Container logs — one-shot **and live** | | | |
+| Crash-loop depth (`RestartCount`) | | | |
+| A durable operations log | | | |
+
+The fourth column is not a backlog. ByStack is a **single-operator LAN control
+plane**: one Controller, on a network you own, managing your own machines.
+There is no second user to tell apart from the first, so a login would answer
+"the one person with the password did it" — which is what having no login
+already says. Because nothing authenticates, nothing destroys either: the
+worst a stranger on your LAN can do is restart a container, which is
+recoverable, audited, and visible on the canvas a second later. Those two
+decisions hold each other up, and reversing one means reversing both.
 
 Metrics providers are not on that list and never will be: collecting anything
 Prometheus already collects is a **non-goal**, not a missing feature
@@ -119,6 +128,7 @@ situations that otherwise look like the same empty canvas.
 - `GET  /api/v1/graph/node?urn=…` — one node
 - `GET  /api/v1/graph/node/edges?urn=…` — relationship tracing
 - `GET  /api/v1/graph/node/logs?urn=…&tail=…` — a container's recent output
+- `GET  /api/v1/graph/node/logs/stream?urn=…` — the same log, followed live (SSE)
 - `WS   /api/v1/stream` — snapshot, then incremental deltas
 - `WS   /api/v1/agents/connect` — where agents dial in (protobuf frames)
 - `POST /api/v1/commands` — run an operation
@@ -194,9 +204,13 @@ Three things about that are worth knowing before you rely on it:
   discovery observes the transition, a moment later. The UI says
   *"Applied · waiting for discovery to confirm"* during that window rather
   than pretending it already happened — see [ADR-0012](docs/adr/0012-operations-and-audit.md).
-- **Nothing here deletes anything.** Only reversible lifecycle transitions
-  exist. `remove` and `prune` wait on authentication — the audit trail is
-  durable now, but "who deleted this" still reads `anonymous`.
+- **Nothing here deletes anything, and nothing will.** Only reversible
+  lifecycle transitions exist. `remove` and `prune` are not pending work:
+  [ADR-0014](docs/adr/0014-no-user-identity.md) decides this is a
+  single-operator LAN control plane with no login, and a control plane with no
+  authentication has no business owning a verb that destroys data. Restarting
+  the wrong container is recoverable and audited; pruning the wrong volume is
+  neither. The two decisions hold each other up.
 
 **Activity** in the topbar is the timeline of everything that has been run,
 including what was refused and why — a read-only Controller declining to
@@ -207,11 +221,12 @@ canvas, and a target that has since been recreated under a new id says so
 rather than offering a click that does nothing.
 
 It survives a restart — the log is a JSON Lines file in `agents.state_dir`,
-bounded at 20,000 operations and compacted in place (ADR-0012 §4a). Every
-entry is still attributed to `anonymous`, and the panel says so, because a
-timeline read as an audit log would be trusted for exactly the question it
-cannot answer. That is the same reason nothing here deletes anything. The same
-data is at `GET /api/v1/commands/audit`.
+bounded at 20,000 operations and compacted in place (ADR-0012 §4a). Writes are
+fsynced per record but happen off the event loop, so a slow disk delays the
+operator and not every agent's connection (§4b). Every entry is attributed to
+`anonymous`, permanently and by design, and the panel says so — a timeline read
+as an audit log would otherwise be trusted for exactly the question it does not
+answer. The same data is at `GET /api/v1/commands/audit`.
 
 Set `audit.durable: false` for a Controller with nowhere to write; it falls
 back to a bounded in-memory ring rather than refusing to start, and says so at
@@ -350,7 +365,7 @@ cd backend
 ```
 
 This starts a **scripted Docker Engine** on a unix socket and a Controller,
-runs the agent between them, and drives twenty-six behaviours. It is
+runs the agent between them, and drives thirty-two behaviours. It is
 language-agnostic: any reimplementation is checked by the same command.
 
 Three of the checks exist because the failures are **invisible at runtime** —
@@ -373,10 +388,11 @@ hundred times more than it should or silently loses a change:
 
 Three real agents, three scripted engines, one Controller — because everything
 ADR-0008 actually claims is a property of the *fleet*, and a single-agent run
-is structurally blind to all of it. Twenty-seven checks covering partition
+is structurally blind to all of it. Thirty checks covering partition
 isolation, engine-scoped logical identity, cross-host image correlation, a
 partial outage degrading one host and no other, no resurrection across a
-reconnect, command routing, and read-only enforced at both choke points.
+reconnect, command routing, log reads routed the same way, and read-only
+enforced at both choke points.
 
 One host in the fixture carries a pre-25.0 colon-delimited engine id and two
 share an image digest, so the two cases where an identity is spelled more than
@@ -606,6 +622,15 @@ Each of these cost real debugging time and is defended by a test:
   anything for. `bystack.conformance` asserts *which* ids were inspected, not
   how many, because an agent that inspects everything answers correctly and
   costs a hundred times more.
+- **"Usually empty" is a claim about the median host, and the median host is
+  not the one being watched.** The set above is bounded by how bad the deploy
+  was, so it is also capped at 32 and issued as one batch of overlapping round
+  trips rather than a serial loop. Fifty crash-looping containers used to mean
+  fifty sequential inspects *ahead of every frame*, delaying the containers
+  that were fine along with the ones that were not — the informer's whole cost
+  model inverted, in exactly the situation an operator is staring at it.
+  Conformance slows the scripted inspect to 50 ms so the two shapes are
+  distinguishable at all: 0.36 s batched against 2.41 s serial.
 - **Hashing a counter is only wrong when the counter is a clock.** `Status`
   advances on wall time and must not be hashed; `RestartCount` advances on an
   actual restart and must be, or a crash loop is reported once and never
@@ -618,6 +643,20 @@ Each of these cost real debugging time and is defended by a test:
   show an operator why a container is failing on the grounds that the platform
   is in its safe mode — exactly backwards. Its own frame, answered regardless
   of `read_only` on both sides.
+- **A live tail needs its backpressure answered in three places, not one.**
+  A container in a hot loop outruns a browser, and whichever component absorbs
+  that is the one that breaks. So: the agent batches per HTTP chunk and blocks
+  on a full queue, which stops it reading the daemon; the Controller keeps a
+  bounded queue per subscription and drops the *oldest* lines; the browser
+  holds a fixed buffer. Dropping oldest is the right loss for a live tail —
+  somebody watching output scroll wants the newest lines — and every drop is
+  counted and shown, because a gap the UI does not mark is a log an operator
+  reads as continuous.
+- **A subscription nobody cancels is a `docker logs --follow` running forever
+  on someone else's machine.** So the Controller's side is a context manager,
+  cancelling on any exit including the browser simply going away, and
+  conformance asserts the agent actually drops its connection to the daemon —
+  not merely that a cancel frame was sent.
 - **Ask an agent's `Hello` what it can do; never its version.** A capability
   absent from the set is the same answer for "too old to know the frame" and
   "compiled out of this build", and the caller's decision is identical.

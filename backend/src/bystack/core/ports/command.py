@@ -40,16 +40,25 @@ from bystack.core.identity import URN
 class CommandKind(StrEnum):
     """Operations the platform can request.
 
-    Deliberately restricted to **reversible lifecycle transitions**. Nothing
+    Restricted to **reversible lifecycle transitions**, permanently. Nothing
     here destroys state: no ``remove``, no ``prune``, no volume deletion, no
     image cleanup. That is not an oversight and not a difficulty -- they are
-    each one HTTP call away. It is a sequencing decision: destructive
-    operations need durable audit and RBAC to answer "who deleted the
-    database volume". **The audit is durable now** (`infra/audit/durable.py`);
-    the "who" is not, because nothing authenticates a browser to this API and
-    every entry is attributed to `anonymous`. A durable record of "anonymous
-    deleted the database volume" is a better artifact than none and is still
-    not an answer. They arrive together or not at all. See ADR-0012.
+    each one HTTP call away.
+
+    **This is settled, not pending.** ADR-0012 made destructive verbs
+    conditional on the platform being able to answer "who deleted the database
+    volume"; **ADR-0014 decided that question will not be answered** -- this is
+    a single-operator LAN control plane with no user identity by design, so the
+    condition is never met and the conclusion is permanent. The trade is
+    deliberate and in this direction: giving up deletion in exchange for not
+    needing to know who is deleting.
+
+    It is also what keeps that safe. With no authentication and no destructive
+    verb, the worst case is "someone who could reach the port restarted a
+    container" -- recoverable, audited, and visible in the topology. Add
+    ``prune`` and the worst case is unrecoverable data loss with no
+    attribution. Adding one here is not a small change to this enum; it
+    requires superseding ADR-0014 first.
     """
 
     START = "start"
@@ -156,9 +165,15 @@ class CommandRequest:
     actor: str = "anonymous"
     """Who asked.
 
-    ``anonymous`` until authentication lands -- and recorded as such rather
-    than omitted, because an audit trail that silently attributes everything
-    to nobody is worse than one that says plainly that it does not yet know.
+    ``anonymous``, and **permanently** so: ADR-0014 decides this platform does
+    not identify its operator, because at one operator on their own network
+    there is nobody to distinguish them from. Recorded rather than omitted,
+    because a field that plainly says "not known" is a truer audit record than
+    a field that is silently absent -- or worse, one the client got to fill in.
+
+    Not settable by the client, and that is defended by a test: an
+    attacker-chosen name beside a real operation is worse than no attribution,
+    because it looks like evidence.
     """
 
 
@@ -287,13 +302,29 @@ class AuditLog(Protocol):
     disk. This port is the seam that made adding the second a change to the
     composition root and nothing else -- and that will make a table a change
     to one module when Postgres lands.
+
+    **The writes are async, and that is a property of the port rather than of
+    one implementation.** The in-memory ring has nothing to await and could
+    have stayed sync; making only the durable one a coroutine would put the
+    choice of implementation into the shape of every caller, which is the
+    opposite of what a port is for. It is also the honest signature: any
+    implementation worth having beyond these two -- a file, a table, a remote
+    collector -- has I/O in it, and a sync `record` forces every one of them
+    to do that I/O on the event loop or silently drop it into a background
+    task nobody awaits.
     """
 
-    def record(self, entry: AuditEntry) -> None:
-        """Append. Never blocks, never fails a command by failing itself."""
+    async def record(self, entry: AuditEntry) -> None:
+        """Append. Never fails a command by failing itself.
+
+        May await, and must not block the event loop while it does: this runs
+        inside :meth:`~bystack.runtime.commands.CommandService.execute`, on
+        the thread that also drives every agent's WebSocket pump and every
+        browser's delta stream.
+        """
         ...
 
-    def finalize(self, entry_id: str, entry: AuditEntry) -> None:
+    async def finalize(self, entry_id: str, entry: AuditEntry) -> None:
         """Replace a previously recorded entry with its completed form."""
         ...
 

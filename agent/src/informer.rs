@@ -41,6 +41,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use futures_util::future::join_all;
+
 use tokio::sync::mpsc;
 
 use crate::docker::{Engine, EngineError};
@@ -117,13 +119,19 @@ pub const ALL_SLICES: [Slice; 4] =
 /// exactly the set for which the number means anything: a container that has
 /// never restarted is correctly zero without being asked.
 ///
-/// **KNOWN GAP — `docs/OPEN-WORK.md` §3.2.** "Bounded" here is statistical,
-/// not enforced: there is no cap, and the round trips are serialised. A host
-/// with fifty containers in a crash loop pays fifty sequential inspects
-/// before any frame is sent, delaying the containers that are healthy along
-/// with the ones that are not — the informer's cost model inverted, in the
-/// situation an operator is actually watching. The fix is a hard cap plus a
-/// `JoinSet`, and it is two lines of policy rather than a redesign.
+/// **Capped, and overlapped.** "Bounded" used to be a claim about the median
+/// host rather than a property of the code: the inspects were serialised and
+/// there was no ceiling, so fifty containers in a crash loop — a bad deploy,
+/// an OOMing node — meant fifty sequential round trips ahead of *every* frame,
+/// delaying the containers that are healthy along with the ones that are not.
+/// That inverts the informer's cost model in precisely the situation an
+/// operator is watching. Now at most [`MAX_CRASH_LOOP_INSPECTS`] are asked
+/// about, and they are asked all at once.
+///
+/// `join_all` rather than a `JoinSet`: the runtime is deliberately
+/// current-thread, so spawning buys no parallelism here — the win is having
+/// the round trips in flight together, which a joined set of futures gives
+/// without requiring `Engine` to be cloneable or the futures to be `'static`.
 ///
 /// A failed inspect is swallowed rather than failing the scan, and silently:
 /// the container may have been removed between the List and this call — the
@@ -131,8 +139,18 @@ pub const ALL_SLICES: [Slice; 4] =
 /// crash loop is not a reason to lose the topology it belongs to, nor to
 /// print a line per scan for as long as the loop lasts.
 async fn deepen_crash_loops(engine: &Engine, listed: &mut [Container]) {
-    for container in listed.iter_mut().filter(|c| c.state == RESTARTING) {
-        if let Ok(count) = engine.restart_count(&container.id).await {
+    let looping: Vec<&mut Container> = listed
+        .iter_mut()
+        .filter(|c| c.state == RESTARTING)
+        .take(MAX_CRASH_LOOP_INSPECTS)
+        .collect();
+    if looping.is_empty() {
+        return;
+    }
+
+    let counts = join_all(looping.iter().map(|c| engine.restart_count(&c.id))).await;
+    for (container, count) in looping.into_iter().zip(counts) {
+        if let Ok(count) = count {
             container.restart_count = count;
         }
     }
@@ -141,6 +159,17 @@ async fn deepen_crash_loops(engine: &Engine, listed: &mut [Container]) {
 /// Docker's state for a container the engine is restarting under a policy.
 /// The one state for which an inspect is worth a round trip.
 const RESTARTING: &str = "restarting";
+
+/// How many crash loops one scan will measure the depth of.
+///
+/// A ceiling on the work, not on the truth: containers past it keep
+/// `restart_count` at zero, which is what the field already means for
+/// everything that is not looping, and the graph stays honest either way. The
+/// alternative — paying for every one of them — is the case this whole
+/// function was written to avoid, and a host with more than thirty-two
+/// containers crash-looping at once has a problem the exact depth of the
+/// thirty-third does nothing to diagnose.
+const MAX_CRASH_LOOP_INSPECTS: usize = 32;
 
 /// List one slice and diff it, producing the frame to send.
 ///

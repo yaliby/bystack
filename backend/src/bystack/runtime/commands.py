@@ -236,7 +236,7 @@ class CommandService:
             # restart did not happen because the platform is read-only" is
             # the single most useful line the log can contain during the
             # post-mortem of an outage that a restart would have ended.
-            self._audit.record(
+            await self._audit.record(
                 AuditEntry(
                     id=command_id,
                     at=requested_at,
@@ -260,7 +260,7 @@ class CommandService:
             status=CommandStatus.IN_FLIGHT,
             reason=request.reason,
         )
-        self._audit.record(pending)
+        await self._audit.record(pending)
 
         outcomes = await self._dispatch(request, targets)
         duration_ms = int((time.perf_counter() - started) * 1000)
@@ -275,7 +275,7 @@ class CommandService:
             outcomes=outcomes,
         )
 
-        self._audit.finalize(
+        await self._audit.finalize(
             command_id,
             AuditEntry(
                 id=command_id,

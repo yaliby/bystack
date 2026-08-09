@@ -14,11 +14,13 @@
  * looking for. So `rejected` is a first-class outcome with its own words, not
  * an error state.
  *
- * **Every actor is `anonymous`** (ADR-0012). Stated in the panel rather than
- * papered over. The log is durable now, which makes this the *only* thing
- * between it and being an audit log — and a timeline that omitted it would be
- * trusted for the one question it cannot answer. It is the same reason no
- * destructive operation exists yet.
+ * **Every actor is `anonymous`, permanently** (ADR-0012, decided by
+ * ADR-0014). Stated in the panel rather than papered over: the log is durable,
+ * which makes attribution the *only* thing between it and being an audit log,
+ * and a timeline that omitted the caveat would be trusted for the one question
+ * it does not answer. It is the same reason no destructive operation exists —
+ * the verbs here are all reversible, which is what makes an unattributed log a
+ * complete record of them rather than half of one.
  */
 
 import type { AuditEntry, CommandStatus, Urn } from '../../../api/types';

@@ -268,7 +268,7 @@ New, and non-optional:
   scenarios were translated to rather than re-derived, as §5 asks.
 - ✅ **`python -m bystack.conformance.local <binary>`** — the Controller
   managing its own machine, with no CA, no token, no approval and no open port
-  anywhere (§4). Twelve checks, driving the real supervisor and the real
+  anywhere (§4). Fourteen checks, driving the real supervisor and the real
   listener: that the socket is 0600 in a 0700 directory, that the graph fills
   with the same URNs any other host produces, that nothing is written to the
   enrollment registry, that a command reaches the engine and lands on the
@@ -374,10 +374,20 @@ Each step leaves the tree working.
    listener is bound, so nothing else could tell a panel that the command it
    is handing out has nothing to dial. The install command itself is still
    composed by the Controller and pasted verbatim.*
-5. ~~**Commands**, both sides, read-only enforced in both.~~ Controller side
-   done — `providers/agent/commands.py` holds the `command_id` correlation
-   map, and `AgentProvider` refuses dispatch to an agent that advertised
-   `read_only` at `Hello`. The agent half lands with step 3.
+5. ✅ **Commands**, both sides, read-only enforced in both. Controller side:
+   `providers/agent/commands.py` holds the `command_id` correlation map (over
+   `ParkedRequests`, shared with the logs channel), and `AgentProvider`
+   refuses dispatch to an agent that advertised `read_only` at `Hello`. Agent
+   side landed with step 3 — `docker.rs::act`, and `session.rs` refusing on
+   its own authority regardless of what the Controller sent.
+
+   Both choke points are driven end to end by `bystack.conformance.fleet`: a
+   command round-trips through the right agent and touches no other host, and
+   gamma's read-only agent refuses a command sent past the Controller with
+   zero actions reaching its socket.
+
+   *This step carried no ✅ for a while because its two halves landed under
+   different steps, which made it read as half-open when it was not.*
 6. ✅ **Deleted the transports, the client, and the informer.** Gone:
    `infra/transports/` (SSH tunnel, local socket, registry), `core/ports/
    transport.py`, `providers/docker/{client,informer,provider}.py`, and

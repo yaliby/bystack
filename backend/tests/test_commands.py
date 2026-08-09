@@ -521,12 +521,12 @@ async def test_a_failure_records_which_target_failed() -> None:
     assert DB_1.segments[-1][:12] in (entry.detail or "")
 
 
-def test_the_audit_log_is_bounded_and_newest_first() -> None:
+async def test_the_audit_log_is_bounded_and_newest_first() -> None:
     """Retention is not optional. An unbounded operation log is a leak that
     only appears on the busiest installation."""
     log = InMemoryAuditLog(capacity=3)
     for index in range(5):
-        log.record(
+        await log.record(
             AuditEntry(
                 id=str(index), at=float(index), actor="a", kind=CommandKind.STOP, target=WEB_1
             )
@@ -536,12 +536,12 @@ def test_the_audit_log_is_bounded_and_newest_first() -> None:
     assert [entry.id for entry in log.recent()] == ["4", "3", "2"]
 
 
-def test_finalizing_an_evicted_entry_is_a_no_op() -> None:
+async def test_finalizing_an_evicted_entry_is_a_no_op() -> None:
     log = InMemoryAuditLog(capacity=1)
-    log.record(AuditEntry(id="old", at=0, actor="a", kind=CommandKind.STOP, target=WEB_1))
-    log.record(AuditEntry(id="new", at=1, actor="a", kind=CommandKind.STOP, target=WEB_1))
+    await log.record(AuditEntry(id="old", at=0, actor="a", kind=CommandKind.STOP, target=WEB_1))
+    await log.record(AuditEntry(id="new", at=1, actor="a", kind=CommandKind.STOP, target=WEB_1))
 
-    log.finalize(
+    await log.finalize(
         "old",
         AuditEntry(
             id="old", at=0, actor="a", kind=CommandKind.STOP, target=WEB_1,
@@ -576,7 +576,9 @@ def _seed_payload():
 
 
 def test_post_command_is_forbidden_in_read_only_mode() -> None:
-    app = create_app(Settings())  # read_only defaults to True
+    # Opt *in* to read-only since ADR-0014 flipped the default: the guarantee
+    # is what is under test, not which way the flag points out of the box.
+    app = create_app(Settings(read_only=True))
     with TestClient(app) as client:
         response = client.post(
             f"{API_PREFIX}/commands", json={"kind": "restart", "target": str(WEB_1)}

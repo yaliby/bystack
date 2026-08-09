@@ -8,7 +8,7 @@
 //! One long-lived bidirectional stream carries everything. Telemetry flows up
 //! and commands flow down over the same connection, framed as protobuf.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-use crate::docker::{ActionResult, Engine};
+use crate::docker::{ActionResult, Engine, LogLine};
 use crate::informer::{self, State, ALL_SLICES};
 use crate::trust::{self, Credentials};
 use crate::wire::{self, envelope::Payload, Slice};
@@ -75,7 +75,10 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
         // arrives on the wire; telling the Controller lets the UI disable the
         // actions rather than offer them and watch every one bounce.
         read_only: config.read_only,
-        capabilities: vec!["commands".into(), "resync".into(), "renewal".into(), "logs".into()],
+        capabilities: vec![
+            "commands".into(), "resync".into(), "renewal".into(),
+            "logs".into(), "logs-stream".into(),
+        ],
         // Our clock, so the Controller can name a skew as a skew. Certificate
         // validation is time-sensitive and a badly wrong clock otherwise
         // surfaces as a generic TLS error that sends whoever is debugging it
@@ -174,6 +177,24 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
     //: neither -- the two only become useful together.
     let mut pending_key: Option<String> = None;
 
+    //: Live log subscriptions, by `request_id`, each holding the task that is
+    //: following one container. Bound to this connection: a reconnect starts
+    //: with none, because a subscription is a thing the Controller is holding
+    //: open on behalf of a browser, and neither of them survived either.
+    //:
+    //: Dropping this map aborts every follower, which is what makes a dropped
+    //: connection stop `docker logs --follow` on the host rather than leaving
+    //: it reading a file nobody will ever look at.
+    let mut followers: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+
+    //: Chunks from those tasks, on their way to the sink. They cannot write to
+    //: it directly -- the select loop below owns it -- so they funnel here and
+    //: the loop forwards. The bound is what stops a container in a hot loop
+    //: from queueing unbounded memory in this process: a full channel makes
+    //: the follower wait, which makes it stop reading the daemon, which is
+    //: backpressure arriving where it can actually be applied.
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<LogsChunk>(CHUNK_QUEUE);
+
     loop {
         tokio::select! {
             // Events from the daemon, coalesced into a set of dirty slices.
@@ -204,6 +225,36 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
                 if sink.send(WsMessage::Ping(Vec::new())).await.is_err() {
                     watcher.abort();
                     return Ended::Disconnected("controller stopped answering".into());
+                }
+            }
+
+            // Lines from a live log follower, on their way up.
+            //
+            // Ahead of the Controller's frames in this select only by
+            // position, which `tokio::select!` does not honour anyway -- it
+            // polls in random order, and that is the right behaviour here: a
+            // container writing continuously must not be able to starve the
+            // arm that would deliver the cancel stopping it.
+            Some(chunk) = chunk_rx.recv() => {
+                if chunk.done {
+                    // The follower is finished either way; drop the handle so
+                    // a long-lived connection does not accumulate one per
+                    // container an operator has ever glanced at.
+                    followers.remove(&chunk.request_id);
+                }
+                let frame = wire::LogsChunk {
+                    request_id: chunk.request_id,
+                    lines: chunk.lines.into_iter()
+                        .map(|l| wire::LogLine { stderr: l.stderr, text: l.text })
+                        .collect(),
+                    done: chunk.done,
+                    reason: chunk.reason,
+                };
+                if sink.send(WsMessage::Binary(
+                    send(Payload::LogsChunk(frame), &mut seq)
+                )).await.is_err() {
+                    watcher.abort();
+                    return Ended::Disconnected("controller closed during a log stream".into());
                 }
             }
 
@@ -252,6 +303,37 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
                         )).await.is_err() {
                             watcher.abort();
                             return Ended::Disconnected("controller closed during a logs read".into());
+                        }
+                    }
+                    // Open a live tail. Not gated on `read_only` either, and
+                    // for the same reason `LogsRequest` is not.
+                    Some(Payload::LogsSubscribe(request)) => {
+                        if let Some(refusal) = subscribe_logs(
+                            engine, &mut followers, &chunk_tx, request,
+                        ) {
+                            let frame = wire::LogsChunk {
+                                request_id: refusal.request_id,
+                                lines: Vec::new(),
+                                done: true,
+                                reason: refusal.reason,
+                            };
+                            if sink.send(WsMessage::Binary(
+                                send(Payload::LogsChunk(frame), &mut seq)
+                            )).await.is_err() {
+                                watcher.abort();
+                                return Ended::Disconnected(
+                                    "controller closed during a log subscribe".into()
+                                );
+                            }
+                        }
+                    }
+                    // The last reader went away. Aborting the task drops the
+                    // HTTP response mid-stream, which closes the connection to
+                    // the daemon and ends the follow -- so an abandoned panel
+                    // stops costing this host anything.
+                    Some(Payload::LogsCancel(cancel)) => {
+                        if let Some(handle) = followers.remove(&cancel.request_id) {
+                            handle.abort();
                         }
                     }
                     Some(Payload::ResyncRequest(request)) => {
@@ -550,6 +632,130 @@ async fn execute(
             unchanged: false,
         },
     }
+}
+
+/// Chunks travelling from a follower task to the select loop that owns the
+/// sink. The wire type's own shape, minus the protobuf, so `docker.rs` stays
+/// unaware there is a wire at all.
+struct LogsChunk {
+    request_id: String,
+    lines: Vec<LogLine>,
+    done: bool,
+    reason: String,
+}
+
+/// How many chunks may be queued between the followers and the sink.
+///
+/// Small on purpose. This is a buffer, not a spool: if the Controller is
+/// slower than a container's output, the right outcome is that the follower
+/// blocks and stops reading the daemon, not that this process grows a backlog
+/// on a host whose memory budget is measured.
+const CHUNK_QUEUE: usize = 64;
+
+/// Live tails one agent will run at once.
+///
+/// Each is an open connection to the daemon and a `docker logs --follow`, so
+/// this is a bound on what a Controller can ask one host to spend. Generous
+/// against any real operator -- nobody watches nine containers at once -- and
+/// finite against a Controller with a subscription leak, which is the failure
+/// this exists for.
+const MAX_LOG_FOLLOWERS: usize = 8;
+
+/// What to answer when a subscription is refused before it starts.
+struct Refusal {
+    request_id: String,
+    reason: String,
+}
+
+/// Start following one container's log, or say why not.
+///
+/// Returns `Some` when the subscription was refused, in which case the caller
+/// sends a `done` chunk carrying the reason. A refusal must be *answered*
+/// rather than dropped: the Controller is holding a browser's stream open
+/// waiting for a first chunk, and silence would be indistinguishable from a
+/// container that has simply not written anything yet.
+fn subscribe_logs(
+    engine: &Engine,
+    followers: &mut HashMap<String, tokio::task::JoinHandle<()>>,
+    chunks: &mpsc::Sender<LogsChunk>,
+    request: wire::LogsSubscribe,
+) -> Option<Refusal> {
+    // The same id validation the lifecycle path uses, for the same reason:
+    // the target goes into a URL against an API that runs as root, and a
+    // container id is hexadecimal.
+    if request.target_id.is_empty()
+        || !request.target_id.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return Some(Refusal {
+            request_id: request.request_id,
+            reason: "malformed container id".into(),
+        });
+    }
+    if followers.contains_key(&request.request_id) {
+        // A duplicate id would leak the first follower: the map would forget
+        // it and nothing could ever cancel it.
+        return Some(Refusal {
+            request_id: request.request_id,
+            reason: "already subscribed".into(),
+        });
+    }
+    if followers.len() >= MAX_LOG_FOLLOWERS {
+        return Some(Refusal {
+            request_id: request.request_id,
+            reason: format!("this agent is already following {MAX_LOG_FOLLOWERS} logs"),
+        });
+    }
+
+    let engine = engine.clone();
+    let chunks = chunks.clone();
+    let request_id = request.request_id.clone();
+    let target = request.target_id;
+    let tail = request.tail;
+
+    let handle = tokio::spawn(async move {
+        let (line_tx, mut line_rx) = mpsc::channel::<Vec<LogLine>>(CHUNK_QUEUE);
+
+        // Forwarding is its own task so the follow and the send can proceed
+        // together. It ends by itself: `follow_logs` owns `line_tx`, so the
+        // channel closes when the follow returns *or* when this whole task is
+        // aborted -- which is what makes a cancel tear down both halves.
+        let forwarder = {
+            let chunks = chunks.clone();
+            let request_id = request_id.clone();
+            tokio::spawn(async move {
+                while let Some(lines) = line_rx.recv().await {
+                    let chunk = LogsChunk {
+                        request_id: request_id.clone(),
+                        lines,
+                        done: false,
+                        reason: String::new(),
+                    };
+                    if chunks.send(chunk).await.is_err() {
+                        return;
+                    }
+                }
+            })
+        };
+
+        let outcome = engine.follow_logs(&target, tail, line_tx).await;
+        // Awaited before `done` is sent, so every line the daemon produced is
+        // on the wire ahead of the frame saying there will be no more.
+        let _ = forwarder.await;
+
+        let reason = match outcome {
+            Ok(()) => String::new(),
+            Err(e) => e.to_string(),
+        };
+        let _ = chunks.send(LogsChunk {
+            request_id,
+            lines: Vec::new(),
+            done: true,
+            reason,
+        }).await;
+    });
+
+    followers.insert(request.request_id, handle);
+    None
 }
 
 /// Answer a logs read, or say why not.

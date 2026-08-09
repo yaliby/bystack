@@ -187,8 +187,11 @@ class CommandIn(BaseModel):
 
     # `actor` is deliberately absent. Accepting one from the client would put
     # an attacker-chosen name in the audit log next to a real operation,
-    # which is worse than no attribution at all: it looks like evidence. The
-    # field appears when authentication does, populated from the session.
+    # which is worse than no attribution at all: it looks like evidence.
+    #
+    # It stays absent. ADR-0014 decides there is no session for it to be
+    # populated from -- one operator, one LAN, no user model -- so every entry
+    # reads `anonymous` and says plainly that this platform does not know.
 
 
 class TargetOutcomeOut(BaseModel):

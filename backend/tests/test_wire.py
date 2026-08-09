@@ -14,6 +14,13 @@ rather than review:
    nothing breaks, nothing warns — the attribute is simply always `None` in
    the UI, on every agent-backed host, forever. `docs/MIGRATION.md` §5 asks
    for exactly this check.
+
+3. **A number the Controller believes drifts from the one the agent
+   enforces.** Neither side imports the other, so a handful of constants are
+   written down twice. Lower `MAX_LOG_LINES` in the agent and the route goes
+   on advertising a bound it no longer has, accepting a request the agent
+   quietly truncates. This repo's rule is that cross-language duplication
+   gets a guard rather than a comment; the third test is that guard.
 """
 
 from __future__ import annotations
@@ -27,7 +34,8 @@ from typing import Any
 import pytest
 
 from bystack.agent.v1 import agent_pb2 as wire
-from bystack.providers.agent import ingest
+from bystack.conformance import runner
+from bystack.providers.agent import commands, ingest
 
 BACKEND = Path(__file__).resolve().parent.parent
 GENERATOR = BACKEND / "scripts" / "generate_proto.py"
@@ -75,6 +83,39 @@ def test_every_docker_field_the_mapper_reads_is_carried_on_the_wire() -> None:
         f"mapper.py reads Docker fields the agent never sends: {sorted(missing)}. "
         f"Add them to proto/bystack/agent/v1/agent.proto and to providers/agent/ingest.py."
     )
+
+
+def test_the_constants_mirrored_across_languages_still_agree() -> None:
+    """Every number this tree writes down twice, checked against the copy.
+
+    The agent is the authority in both cases and deliberately so: it is the
+    side holding the memory budget and the round-trip cost, and it must not
+    trust a number the Controller sent it. The Python copies exist so the
+    refusal happens before a frame crosses the network and so the OpenAPI
+    schema can state the bound — which is worth having exactly as long as it
+    is the same number.
+
+    A regex over the Rust source rather than a generated header: two integers
+    do not justify a build step, and this is the same shape as
+    `_keys_read_by_mapper` above.
+    """
+    assert _rust_const("docker.rs", "MAX_LOG_LINES") == commands.MAX_LOG_TAIL, (
+        "the agent's log clamp and the Controller's differ; the route would "
+        "accept a tail the agent silently truncates"
+    )
+    inspects = _rust_const("informer.rs", "MAX_CRASH_LOOP_INSPECTS")
+    assert inspects == runner.MAX_CRASH_LOOP_INSPECTS, (
+        "the agent's inspect ceiling moved; the conformance check that asserts "
+        "it would be asserting the old number"
+    )
+
+
+def _rust_const(filename: str, name: str) -> int:
+    """The integer literal bound to ``name`` in one of the agent's sources."""
+    source = (BACKEND.parent / "agent" / "src" / filename).read_text()
+    found = re.search(rf"\b{name}\s*:\s*\w+\s*=\s*(\d[\d_]*)", source)
+    assert found is not None, f"{name} is no longer defined in agent/src/{filename}"
+    return int(found.group(1).replace("_", ""))
 
 
 def _keys_read_by_mapper() -> set[str]:

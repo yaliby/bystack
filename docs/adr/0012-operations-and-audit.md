@@ -119,6 +119,35 @@ are different answers and only one of them is acceptable here: a full disk
 must not stop an operator restarting the service that filled it. Both the
 per-record write and the fallback are logged at ERROR, so the gap is findable.
 
+### 4b. The write is fsynced, and it is not on the event loop
+
+Every record is fsynced before `record` returns, because the entry this cannot
+afford to lose is the one written immediately before a command that then hung
+the process — buffering loses exactly that one. But `CommandService.execute`
+is a coroutine, so doing it inline stopped every agent's pump and every
+browser's delta stream for the duration, twice per command. Measured at
+0.01 ms on tmpfs, 0.78 ms on NVMe, and tens of milliseconds on a spinning
+disk, a busy host or network storage.
+
+So `AuditLog.record` and `finalize` are **async**, and the durable
+implementation awaits `asyncio.to_thread` around the file work. Async on the
+*port*, not just the one implementation: a `record` whose sync-ness depended
+on which log the composition root chose would put that choice into the shape
+of every caller, and every implementation worth having beyond these two has
+I/O in it.
+
+Deliberately **not** a write-behind queue. That needs a flush on shutdown, an
+ordering guarantee and a test for a crash mid-queue, and it buys latency
+nobody here is short of by trading away durability-at-return, which is the
+whole point. One lock serialises the writes so the file's order is the order
+the operations happened in, and compaction is handed a snapshot taken on the
+event loop — a worker thread must never iterate a mapping `record` can still
+add to.
+
+The defect was invisible to the test suite by construction: `tmp_path` is
+tmpfs. `test_audit.py` now slows `os.fsync` on purpose and asserts the longest
+gap between two turns of the event loop, which is the only way to see it.
+
 ### 5. Audit is written before dispatch, and includes refusals
 
 The entry is recorded when the command is authorized and finalized when it
@@ -132,7 +161,14 @@ post-mortem of an outage a restart would have ended.
 
 The client cannot supply the actor. An attacker-chosen name sitting next to a
 real operation is worse than no attribution, because it looks like evidence.
-The field appears when authentication does, populated from the session.
+
+This clause originally ended "the field appears when authentication does,
+populated from the session." **[ADR-0014](0014-no-user-identity.md) decided
+authentication does not arrive**: at one operator on their own network there
+is nobody to distinguish them from. `actor` is therefore `"anonymous"`
+permanently, and the destructive verbs §1 held back are held back permanently
+rather than pending — the condition they were waiting on is never met, which
+is the whole reason it is safe to have no authentication at all.
 
 ### 6. Provider capability is a protocol, not a flag
 
@@ -167,9 +203,14 @@ to be honest before the click rather than after a slow timeout.
 - The UI has a visible lag between a command succeeding and the topology
   reflecting it. This is deliberate, labelled, and the price of never
   displaying an unverified state.
-- ~~The audit trail does not survive a restart.~~ It does, as of §4a. What
-  remains missing is attribution: every entry reads `anonymous`, and that —
-  not durability — is now the constraint holding §4.
+- ~~The audit trail does not survive a restart.~~ It does, as of §4a.
+- ~~What remains missing is attribution, and that is now the constraint
+  holding §1's destructive verbs.~~ Attribution is not missing, it is
+  **declined**: [ADR-0014](0014-no-user-identity.md) decides this platform has
+  no user identity, so every entry reads `anonymous` permanently and the verbs
+  §1 held back are held back permanently. The constraint did not get resolved;
+  it got made unconditional, which is what makes the log complete for the set
+  of reversible verbs it actually records.
 - The audit log is a file on the Controller's disk, so it is one more thing
   in `agents.state_dir` worth backing up, and one more thing that grows.
   Bounded at 20,000 operations (~8 MB) by default.

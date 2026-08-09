@@ -9,10 +9,11 @@ the same stream, out of order, and the caller is an `await` in an HTTP request
 that must not hang forever. So each dispatch parks a future in a map keyed by
 its own id, and the receive loop resolves it.
 
-Three things must be true or this leaks, and each is handled explicitly below:
-the future is always removed, a disconnect fails every waiter rather than
-leaving them parked, and an answer to a question we do not remember asking is
-discarded loudly rather than raising in the receive loop.
+Three things must be true or this leaks, and each is handled once, in
+:class:`ParkedRequests`: the future is always removed, a disconnect fails
+every waiter rather than leaving them parked, and an answer to a question we
+do not remember asking is discarded loudly rather than raising in the receive
+loop.
 
 Two channels live here, and the second is deliberately *not* a command.
 :class:`LogsChannel` carries reads: `CommandKind` is the closed set of
@@ -20,14 +21,26 @@ mutations a read-only Controller refuses, and refusing to show an operator why
 a container is failing because the platform is in its safe mode would be
 exactly backwards. Logs are their own frame, the agent answers them regardless
 of `read_only`, and nothing about them goes through `CommandService`.
+
+**What the two share and what they do not.** The parked future is shared,
+because it is the part with the bug in it -- three invariants that must hold
+identically in both, and previously did only because sixty lines had been
+copied accurately. Everything above it is kept separate, because the two
+genuinely differ in what a failure *means*: a command that times out may
+already have mutated the host, so its outcome is `REJECTED` and carries a
+warning against retrying, while a log read that times out changed nothing and
+is simply a refusal an operator can act on by asking again. Folding that into
+a base class with a type parameter would turn a real difference into a pair of
+overridden hooks and hide it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from bystack.agent.v1 import agent_pb2 as wire
@@ -60,6 +73,24 @@ ARG_SIGNAL: Final = "signal"
 #: out with no diagnosis rather than refuse with one.
 CAP_LOGS: Final = "logs"
 
+#: The capability for a *live* tail (`LogsSubscribe`). Separate from
+#: `CAP_LOGS`, not implied by it: an agent that predates streaming answers
+#: one-shot reads perfectly well, and the UI falls back to those rather than
+#: waiting forever for a chunk that is never coming.
+CAP_LOGS_STREAM: Final = "logs-stream"
+
+#: Lines a single live subscription will hold for a reader that is behind.
+#:
+#: The one place backpressure has to be decided, so it is decided here and
+#: named. A browser on a slow link watching a container in a hot loop cannot
+#: be allowed to grow this process's memory, and it cannot be allowed to slow
+#: the agent's WebSocket pump either -- that pump carries every other host's
+#: topology. So the queue is bounded and **the oldest lines are dropped**,
+#: which is the right loss for a live tail: an operator watching output scroll
+#: wants the newest lines, and a tail that stalled to preserve history nobody
+#: asked for would be the wrong feature. The drop is reported, not silent.
+STREAM_QUEUE: Final = 500
+
 #: The most lines an operator may ask for.
 #:
 #: Mirrors `MAX_LOG_LINES` in `agent/src/docker.rs`, which is where the real
@@ -68,33 +99,121 @@ CAP_LOGS: Final = "logs"
 #: intentional and the agent's copy is authoritative: it is the side holding
 #: the memory budget, and it must not trust a number we sent it.
 #:
-#: **KNOWN GAP — `docs/OPEN-WORK.md` §3.4.** The two are kept in step by this
-#: comment and nothing else. This repo already decided that cross-language
-#: drift gets a guard (`test_wire.py`'s mapper/wire check); this pair has not
-#: got one yet, and the failure is silent: the route would go on accepting a
+#: Kept in step by a guard rather than by this comment:
+#: `test_wire.py::test_the_constants_mirrored_across_languages_still_agree`
+#: reads the literal out of the Rust source. Without it the drift is silent --
+#: the route goes on advertising a bound it no longer has and accepting a
 #: number the agent quietly truncates.
 MAX_LOG_TAIL: Final = 2000
 
-#: What a caller gets who does not say. A screenful of scrollback and change,
-#: which is what "why did this container die" actually needs.
+#: What a caller gets who does not say, and what the UI takes: the client
+#: omits `tail` rather than keeping a third copy of this number in TypeScript.
+#: A screenful of scrollback and change, which is what "why did this container
+#: die" actually needs.
 DEFAULT_LOG_TAIL: Final = 200
+
+
+class ParkedRequests[T]:
+    """Futures waiting for an answer over one agent connection.
+
+    The correlation map itself, and nothing about what is being correlated.
+    Both channels are built on it because all three of the ways this leaks are
+    properties of the map rather than of the payload, and a copy of them is a
+    copy of the bug they prevent:
+
+    - the future is dropped on **every** path out of :meth:`request`, including
+      the caller's own cancellation;
+    - :meth:`abandon` fails every waiter when the connection drops, so nobody
+      sits out a deadline for an answer that provably cannot arrive;
+    - :meth:`resolve` never raises, because it is called from the receive loop
+      and tearing down a healthy connection over a late answer would turn a
+      cosmetic problem into an outage.
+
+    Bound to a connection, not to a provider: a reconnect gets a fresh map,
+    which is correct. An answer arriving on a *new* connection for a request
+    made on the old one is not a late answer, it is an answer to a question
+    the previous stream is no longer around to have asked -- and for a command
+    that means reporting the outcome of an operation whose target may have
+    been rebuilt in between.
+    """
+
+    __slots__ = ("_what", "_pending")
+
+    def __init__(self, what: str) -> None:
+        #: What these are, for the one log line that names them. The channels
+        #: differ in what an unknown id *means* -- an agent bug for a command,
+        #: an ordinary late answer for a log read -- so the word is worth
+        #: keeping in the message.
+        self._what = what
+        self._pending: dict[str, asyncio.Future[T]] = {}
+
+    def __len__(self) -> int:
+        return len(self._pending)
+
+    async def request(
+        self, session: AgentSession, request_id: str, envelope: wire.Envelope, deadline: float
+    ) -> T:
+        """Park a future, send the frame, and wait for the answer.
+
+        Raises :class:`AgentDisconnected` if the host goes away and
+        ``TimeoutError`` if the deadline passes. Both are left to the caller
+        rather than mapped here: what a failure *means* is the part the two
+        channels do not share.
+
+        ``deadline`` is how long to wait here, applied in addition to any the
+        caller already has. The duplication is deliberate: without it a
+        disconnect between send and reply would park a future that only the
+        outer deadline could free, and the entry would sit in the map until
+        then holding a reference to the caller's task.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[T] = loop.create_future()
+        self._pending[request_id] = future
+        try:
+            await session.send(envelope)
+            async with asyncio.timeout(deadline):
+                return await future
+        finally:
+            # Unconditional. Every path out of here -- answer, disconnect,
+            # timeout, cancellation of the caller's request -- must drop the
+            # entry, or a fleet under churn accumulates futures nobody will
+            # ever resolve.
+            self._pending.pop(request_id, None)
+
+    def resolve(self, request_id: str, answer: T) -> None:
+        """Hand an answer to whoever is waiting for it. Never raises."""
+        future = self._pending.get(request_id)
+        if future is None:
+            log.debug("%s for unknown request %s; ignoring", self._what, request_id)
+            return
+        if not future.done():
+            future.set_result(answer)
+
+    def abandon(self, reason: str) -> None:
+        """Fail every waiter. Called when the connection drops.
+
+        Without this, a disconnect leaves each in-flight request waiting out
+        its full deadline for an answer that provably cannot arrive -- the
+        operator watching a spinner for thirty seconds after the host has
+        already gone.
+        """
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(AgentDisconnected(reason))
+        self._pending.clear()
 
 
 class CommandChannel:
     """Outstanding commands for one agent connection.
 
-    Bound to a connection, not to a provider: a reconnect gets a fresh
-    channel, which is correct. A result arriving on a *new* connection for a
-    command dispatched on the old one is not a late answer, it is an answer to
-    a question the previous stream is no longer around to have asked, and
-    resolving it would report the outcome of an operation whose target may
-    have been rebuilt in between.
+    Owns the envelope and the outcome mapping; the parked future is
+    :class:`ParkedRequests`.
     """
 
     __slots__ = ("_pending",)
 
     def __init__(self) -> None:
-        self._pending: dict[str, asyncio.Future[wire.CommandResult]] = {}
+        self._pending: ParkedRequests[wire.CommandResult] = ParkedRequests("result")
 
     def __len__(self) -> int:
         return len(self._pending)
@@ -104,26 +223,19 @@ class CommandChannel:
     ) -> TargetOutcome:
         """Send one command and wait for its result.
 
-        ``deadline`` is how long to wait here, applied in addition to the
-        command service's own. The duplication is deliberate: without it a
-        disconnect between send and reply would park a future that only the
-        outer deadline could free, and the entry would sit in the map until
-        then holding a reference to the caller's task.
-
-        Named ``deadline`` rather than ``timeout`` to keep it distinct from
-        ``request.timeout``, which is a completely different number -- the
-        grace period we hand to Docker for a graceful stop, on the far side of
-        the agent.
+        ``deadline`` is named that rather than ``timeout`` to keep it distinct
+        from ``request.timeout``, which is a completely different number --
+        the grace period we hand to Docker for a graceful stop, on the far
+        side of the agent.
         """
         command_id = uuid.uuid4().hex[:16]
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[wire.CommandResult] = loop.create_future()
-        self._pending[command_id] = future
-
         try:
-            await session.send(_command_envelope(command_id, request, target))
-            async with asyncio.timeout(deadline):
-                result = await future
+            result = await self._pending.request(
+                session,
+                command_id,
+                _command_envelope(command_id, request, target),
+                deadline,
+            )
         except AgentDisconnected as exc:
             # The host went away mid-command. Rejected rather than failed: we
             # do not know whether it ran, and reporting failure would invite a
@@ -136,42 +248,15 @@ class CommandChannel:
                 f"the agent did not answer within {deadline:.0f}s; "
                 f"the operation may still complete",
             )
-        finally:
-            # Unconditional. Every path out of here -- success, disconnect,
-            # timeout, cancellation of the caller's request -- must drop the
-            # entry, or a fleet under churn accumulates futures nobody will
-            # ever resolve.
-            self._pending.pop(command_id, None)
-
         return _outcome(target, result)
 
     def resolve(self, result: wire.CommandResult) -> None:
-        """Hand a result to whoever is waiting for it.
-
-        Called from the receive loop, so it must never raise: an unknown
-        `command_id` is an agent bug or a late answer after a timeout, and
-        tearing down a healthy connection over it would turn a cosmetic
-        problem into an outage.
-        """
-        future = self._pending.get(result.command_id)
-        if future is None:
-            log.debug("result for unknown command %s; ignoring", result.command_id)
-            return
-        if not future.done():
-            future.set_result(result)
+        """Hand a result to whoever is waiting for it."""
+        self._pending.resolve(result.command_id, result)
 
     def abandon(self, reason: str) -> None:
-        """Fail every waiter. Called when the connection drops.
-
-        Without this, a disconnect leaves each in-flight command waiting out
-        its full deadline for an answer that provably cannot arrive -- the
-        operator watching a spinner for thirty seconds after the host has
-        already gone.
-        """
-        for future in list(self._pending.values()):
-            if not future.done():
-                future.set_exception(AgentDisconnected(reason))
-        self._pending.clear()
+        """Fail every waiter. Called when the connection drops."""
+        self._pending.abandon(reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,24 +291,18 @@ class LogsResult:
 class LogsChannel:
     """Outstanding log reads for one agent connection.
 
-    The same shape as :class:`CommandChannel` and for the same three reasons,
-    which is why it is a sibling rather than a generalisation of it: the two
-    differ in what a failure *means*. A command that times out may still have
-    mutated the host, so its outcome is `REJECTED` and carries a warning
-    against retrying. A log read that times out changed nothing, so it is
-    simply a refusal an operator can act on by asking again.
-
-    **KNOWN GAP — `docs/OPEN-WORK.md` §3.6.** The duplication was deliberate
-    and is still ~60 copied lines: fix the leaked-future bug in one of these
-    and the other keeps it. If you extract anything, extract only the parked
-    future — the envelope construction and the outcome mapping are the parts
-    that legitimately differ.
+    A sibling of :class:`CommandChannel` rather than a subclass of it, over
+    the same :class:`ParkedRequests`. The two differ in exactly the places
+    that are left here: a command that times out may still have mutated the
+    host, so its outcome is `REJECTED` and carries a warning against retrying,
+    while a log read that times out changed nothing and is simply a refusal an
+    operator can act on by asking again.
     """
 
     __slots__ = ("_pending",)
 
     def __init__(self) -> None:
-        self._pending: dict[str, asyncio.Future[wire.LogsResponse]] = {}
+        self._pending: ParkedRequests[wire.LogsResponse] = ParkedRequests("logs")
 
     def __len__(self) -> int:
         return len(self._pending)
@@ -238,33 +317,23 @@ class LogsChannel:
         not know the URN scheme and must not learn it.
         """
         request_id = uuid.uuid4().hex[:16]
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[wire.LogsResponse] = loop.create_future()
-        self._pending[request_id] = future
-
         try:
-            await session.send(
+            response = await self._pending.request(
+                session,
+                request_id,
                 wire.Envelope(
                     logs_request=wire.LogsRequest(
                         request_id=request_id,
                         target_id=container_id,
                         tail=min(max(tail, 1), MAX_LOG_TAIL),
                     )
-                )
+                ),
+                deadline,
             )
-            async with asyncio.timeout(deadline):
-                response = await future
         except AgentDisconnected as exc:
             return LogsResult(False, str(exc))
         except TimeoutError:
-            return LogsResult(
-                False, f"the agent did not answer within {deadline:.0f}s"
-            )
-        finally:
-            # Unconditional, exactly as above. Every path out of here --
-            # answer, disconnect, timeout, or the operator navigating away and
-            # cancelling the request -- must drop the entry.
-            self._pending.pop(request_id, None)
+            return LogsResult(False, f"the agent did not answer within {deadline:.0f}s")
 
         if not response.ok:
             # The engine's own words, carried through unchanged. An operator
@@ -278,26 +347,171 @@ class LogsChannel:
         )
 
     def resolve(self, response: wire.LogsResponse) -> None:
-        """Hand an answer to whoever is waiting for it.
-
-        Called from the receive loop, so it must never raise: an unknown
-        `request_id` is a late answer after a timeout, and tearing down a
-        healthy connection over it would turn a cosmetic problem into an
-        outage.
-        """
-        future = self._pending.get(response.request_id)
-        if future is None:
-            log.debug("logs for unknown request %s; ignoring", response.request_id)
-            return
-        if not future.done():
-            future.set_result(response)
+        """Hand an answer to whoever is waiting for it."""
+        self._pending.resolve(response.request_id, response)
 
     def abandon(self, reason: str) -> None:
         """Fail every waiter. Called when the connection drops."""
-        for future in list(self._pending.values()):
-            if not future.done():
-                future.set_exception(AgentDisconnected(reason))
-        self._pending.clear()
+        self._pending.abandon(reason)
+
+
+@dataclass(frozen=True, slots=True)
+class LogsEvent:
+    """One thing that happened on a live tail.
+
+    Either lines, or the end. `done` with a `reason` is a failure; `done`
+    without one is the log ending normally -- the container exited, or the
+    engine closed the stream. The operator needs those distinguished: silence
+    after a crash and silence after a clean stop look identical otherwise.
+    """
+
+    lines: tuple[LogLine, ...] = ()
+    done: bool = False
+    reason: str | None = None
+    dropped: int = 0
+    """Lines discarded because this reader could not keep up.
+
+    Reported rather than hidden. A gap in a log that the UI does not mark is a
+    log an operator will read as continuous, and they will draw a conclusion
+    from two adjacent lines that were never adjacent.
+    """
+
+
+class LogsUnavailable(Exception):
+    """A live tail could not be opened, with a reason worth showing.
+
+    Raised rather than returned because the caller is a streaming response
+    that has not begun: it can still answer with a status code and a body. Once
+    the first chunk is on the wire that option is gone, which is why every
+    reason this can fail is checked before the subscription is made.
+    """
+
+
+class LogsStream:
+    """One live subscription, from the Controller's side.
+
+    An `asyncio.Queue` with a bound and a drop policy, plus the id the agent
+    knows it by. Deliberately *not* a `ParkedRequests` entry: that class is
+    built for one answer to one question, and everything about it -- the
+    future, the deadline, the unconditional removal in `finally` -- is wrong
+    for a thing that produces many answers over an unbounded time.
+    """
+
+    __slots__ = ("request_id", "container_id", "_queue", "_dropped", "_closed")
+
+    def __init__(self, request_id: str, container_id: str) -> None:
+        self.request_id = request_id
+        self.container_id = container_id
+        self._queue: asyncio.Queue[LogsEvent] = asyncio.Queue(maxsize=STREAM_QUEUE)
+        self._dropped = 0
+        self._closed = False
+
+    def offer(self, event: LogsEvent) -> None:
+        """Hand an event to the reader. Never blocks, never raises.
+
+        Called from the receive loop, which must not be slowed by a browser on
+        a bad connection -- it is the same loop carrying every other host's
+        deltas. When the queue is full the *oldest* line is dropped and the
+        count travels with the next event, so the UI can say "42 lines
+        dropped" instead of quietly showing a discontinuous log.
+
+        The terminal event is never dropped. A reader that missed it would
+        wait forever for a stream that has already ended.
+        """
+        if self._closed:
+            return
+        if event.done:
+            self._closed = True
+            # Make room by force: this one has to land.
+            while self._queue.full():
+                _discard(self._queue)
+                self._dropped += 1
+
+        if self._queue.full():
+            _discard(self._queue)
+            self._dropped += 1
+
+        # The count rides out on the next event of any kind, terminal
+        # included: a stream that ended having lost lines must say so, or the
+        # operator reads the last thing they saw as the last thing written.
+        if self._dropped:
+            event = replace(event, dropped=self._dropped)
+            self._dropped = 0
+
+        self._queue.put_nowait(event)
+
+    async def next(self) -> LogsEvent:
+        """The next event, waiting if there is none yet."""
+        return await self._queue.get()
+
+    def close(self, reason: str) -> None:
+        """End the stream from this side. Idempotent."""
+        if not self._closed:
+            self.offer(LogsEvent(done=True, reason=reason))
+
+
+def _discard(queue: asyncio.Queue[LogsEvent]) -> None:
+    """Drop the oldest event. A no-op on an empty queue, which cannot happen
+    from the call sites above but is not worth an exception if it ever does."""
+    with contextlib.suppress(asyncio.QueueEmpty):
+        queue.get_nowait()
+
+
+class LogsSubscriptions:
+    """Live tails open on one agent connection.
+
+    The streaming counterpart of :class:`ParkedRequests`, and a separate class
+    for the reason above: same problem shape, different lifetime. What it does
+    share is the property that matters -- everything here is bound to one
+    connection, and `abandon` ends every stream when that connection drops, so
+    no reader is left waiting on a host that has gone away.
+    """
+
+    __slots__ = ("_streams",)
+
+    def __init__(self) -> None:
+        self._streams: dict[str, LogsStream] = {}
+
+    def __len__(self) -> int:
+        return len(self._streams)
+
+    def open(self, container_id: str) -> LogsStream:
+        request_id = uuid.uuid4().hex[:16]
+        stream = LogsStream(request_id, container_id)
+        self._streams[request_id] = stream
+        return stream
+
+    def close(self, request_id: str) -> None:
+        self._streams.pop(request_id, None)
+
+    def deliver(self, chunk: wire.LogsChunk) -> None:
+        """Route one chunk to its reader. Called from the receive loop.
+
+        Never raises: an unknown `request_id` is an in-flight chunk arriving
+        after a cancel, which is ordinary, and tearing down a healthy
+        connection over it would turn a race into an outage.
+        """
+        stream = self._streams.get(chunk.request_id)
+        if stream is None:
+            log.debug("log chunk for unknown subscription %s; ignoring", chunk.request_id)
+            return
+        stream.offer(
+            LogsEvent(
+                lines=tuple(
+                    LogLine(stderr=line.stderr, text=line.text) for line in chunk.lines
+                ),
+                done=chunk.done,
+                reason=chunk.reason or None,
+            )
+        )
+        if chunk.done:
+            self._streams.pop(chunk.request_id, None)
+
+    def abandon(self, reason: str) -> None:
+        """End every stream. Called when the connection drops."""
+        for stream in list(self._streams.values()):
+            stream.close(reason)
+        self._streams.clear()
 
 
 def _command_envelope(

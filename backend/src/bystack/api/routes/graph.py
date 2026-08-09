@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
+
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
 from bystack.api.deps import Collectors, Store
 from bystack.api.schemas import ContainerLogsOut, EdgeOut, NodeOut, SnapshotOut
 from bystack.core.identity import URN, NodeKind, URNError
-from bystack.providers.agent.commands import DEFAULT_LOG_TAIL, MAX_LOG_TAIL
+from bystack.providers.agent.commands import (
+    DEFAULT_LOG_TAIL,
+    MAX_LOG_TAIL,
+    LogsUnavailable,
+)
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -118,6 +126,111 @@ async def get_node_logs(
         )
 
     return ContainerLogsOut.of(str(parsed), await provider.logs(container_id, tail))
+
+
+@router.get(
+    "/node/logs/stream",
+    summary="A container's log, live",
+    response_class=StreamingResponse,
+)
+async def stream_node_logs(
+    store: Store,
+    collector: Collectors,
+    urn: str = Query(description="Container URN"),
+    tail: int = Query(
+        default=DEFAULT_LOG_TAIL,
+        ge=1,
+        le=MAX_LOG_TAIL,
+        description="Backfill before the live tail begins.",
+    ),
+) -> StreamingResponse:
+    """Follow one container's output until the caller goes away.
+
+    **Server-sent events, not a WebSocket.** The data goes one way, the
+    browser gets reconnection for free, and it is an ordinary GET that any
+    reverse proxy in front of the browser port already understands -- which
+    is a property ADR-0011 deliberately preserved for this listener. A
+    WebSocket would buy a channel back that nothing needs: cancellation is the
+    connection closing, which is exactly what SSE gives.
+
+    **A read, like its one-shot sibling.** Not a `CommandKind`, not routed
+    through `CommandService`, and answered in full by a read-only Controller.
+    Read-only exists so that looking is always allowed.
+
+    Three event types, because the client has to tell them apart: `lines`
+    carries output, `end` says the log is over and why, and `error` is a
+    refusal after the stream began. Everything that can be refused *before*
+    it begins is checked below and answered with a status code, because a
+    404 the browser can act on beats a 200 whose first event is an apology.
+    """
+    parsed = _parse_urn(urn)
+    if parsed.kind != NodeKind.CONTAINER or len(parsed.segments) != 2:
+        raise HTTPException(status_code=400, detail=f"not a container URN: {urn}")
+    if store.node(parsed) is None:
+        raise HTTPException(status_code=404, detail=f"no such node: {urn}")
+
+    engine_id, container_id = parsed.segments
+    provider = collector.agent_provider(engine_id, create=False)
+    if provider is None:
+        raise HTTPException(
+            status_code=404, detail=f"host {engine_id} is not managed by an agent"
+        )
+
+    try:
+        # Entered here rather than inside the generator so a refusal is still
+        # a status code. Once `StreamingResponse` has begun, the headers are
+        # gone and the only way left to say "no" is an event nobody may be
+        # reading yet.
+        subscription = provider.follow(container_id, tail)
+        stream = await subscription.__aenter__()
+    except LogsUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    async def events() -> AsyncIterator[str]:
+        try:
+            while True:
+                event = await stream.next()
+                if event.lines or event.dropped:
+                    yield _sse(
+                        "lines",
+                        {
+                            "lines": [
+                                {"stderr": line.stderr, "text": line.text}
+                                for line in event.lines
+                            ],
+                            "dropped": event.dropped,
+                        },
+                    )
+                if event.done:
+                    yield _sse("end", {"reason": event.reason})
+                    return
+        finally:
+            # Runs when the browser disconnects too: Starlette closes the
+            # generator, which is what cancels the subscription and stops
+            # `docker logs --follow` on the managed host. That is the whole
+            # reason `follow` is a context manager.
+            await subscription.__aexit__(None, None, None)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            # Proxies buffer by default, and a buffered live log is not one.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _sse(event: str, data: object) -> str:
+    """One server-sent event.
+
+    `json.dumps` rather than string building because a log line contains
+    whatever the process wrote, including newlines -- and a raw newline inside
+    an SSE `data:` field ends the field. Encoding it as JSON makes that
+    impossible by construction rather than by remembering to escape.
+    """
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
 
 
 def _parse_urn(raw: str) -> URN:

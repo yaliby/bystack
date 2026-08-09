@@ -19,7 +19,7 @@ shape and the same order, and differs only in how far back it can see.
 
 from __future__ import annotations
 
-from collections import deque
+from itertools import islice
 from typing import Final
 
 from bystack.core.ports.command import AuditEntry
@@ -32,28 +32,36 @@ DEFAULT_CAPACITY: Final = 2000
 
 
 class InMemoryAuditLog:
-    """Bounded, newest-first :class:`~bystack.core.ports.command.AuditLog`."""
+    """Bounded, newest-first :class:`~bystack.core.ports.command.AuditLog`.
 
-    __slots__ = ("_entries", "_index")
+    One insertion-ordered ``dict`` keyed by operation id, which is a ring, an
+    index and an eviction policy at once: assigning an existing key keeps its
+    position, so `finalize` is an assignment, and the oldest entry is
+    ``next(iter(...))``. The deque-plus-side-index this replaces had to keep
+    the two in step by hand, and made `finalize` scan from the oldest end for
+    an id that is almost always the newest.
+    """
+
+    __slots__ = ("_capacity", "_entries")
 
     def __init__(self, capacity: int = DEFAULT_CAPACITY) -> None:
         if capacity < 1:
             raise ValueError("audit capacity must be positive")
-        self._entries: deque[AuditEntry] = deque(maxlen=capacity)
-        # id -> entry, so `finalize` does not scan. Kept in step with the
-        # deque's own eviction below rather than allowed to grow beside it --
-        # a side index that outlives its ring is the leak this class exists
-        # to avoid.
-        self._index: dict[str, AuditEntry] = {}
+        self._capacity = capacity
+        self._entries: dict[str, AuditEntry] = {}
 
-    def record(self, entry: AuditEntry) -> None:
-        if len(self._entries) == self._entries.maxlen:
-            evicted = self._entries[0]
-            self._index.pop(evicted.id, None)
-        self._entries.append(entry)
-        self._index[entry.id] = entry
+    async def record(self, entry: AuditEntry) -> None:
+        """Nothing to await, and a coroutine anyway.
 
-    def finalize(self, entry_id: str, entry: AuditEntry) -> None:
+        The signature belongs to the port, not to this implementation: a
+        `record` whose sync-ness depended on which log the composition root
+        chose would put that choice into the shape of every caller. See
+        `core/ports/command.AuditLog`.
+        """
+        self._evict_if_full(entry)
+        self._entries[entry.id] = entry
+
+    async def finalize(self, entry_id: str, entry: AuditEntry) -> None:
         """Replace an in-flight entry with its completed form.
 
         A no-op if the entry has already been evicted -- which is possible
@@ -62,20 +70,26 @@ class InMemoryAuditLog:
         thousand concurrent operations is an acceptable trade against
         unbounded growth.
         """
-        if entry_id not in self._index:
+        if entry_id not in self._entries:
             return
-        for position, existing in enumerate(self._entries):
-            if existing.id == entry_id:
-                self._entries[position] = entry
-                self._index[entry_id] = entry
-                return
+        self._entries[entry_id] = entry
 
     def recent(self, limit: int = 100) -> tuple[AuditEntry, ...]:
         if limit <= 0:
             return ()
         # Newest first: an operator reading an audit log is asking "what just
         # happened", never "what happened first".
-        return tuple(self._entries)[-limit:][::-1]
+        return tuple(islice(reversed(self._entries.values()), limit))
 
     def __len__(self) -> int:
         return len(self._entries)
+
+    def _evict_if_full(self, entry: AuditEntry) -> None:
+        """Drop the oldest, and only for an id that is genuinely new.
+
+        Re-recording an id we already hold does not grow the mapping, so
+        evicting on one would drop an unrelated operation off the end of the
+        timeline for nothing.
+        """
+        if entry.id not in self._entries and len(self._entries) >= self._capacity:
+            del self._entries[next(iter(self._entries))]

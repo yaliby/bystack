@@ -52,6 +52,9 @@ message Envelope {
     ResyncRequest resync_request = 22;
     LogsRequest logs_request = 23;
     LogsResponse logs_response = 24;
+    LogsSubscribe logs_subscribe = 25;
+    LogsChunk logs_chunk = 26;
+    LogsCancel logs_cancel = 27;
 
     EnrollRequest enroll_request = 30;
     EnrollResponse enroll_response = 31;
@@ -496,6 +499,57 @@ message LogsResponse {
   string reason = 3;
 
   repeated LogLine lines = 4;
+}
+
+// Open a live tail. The streaming sibling of `LogsRequest`.
+//
+// Kept as its own message rather than a `follow` flag on `LogsRequest`,
+// because the two have different lifetimes and different failure modes. A
+// `LogsRequest` is one question with one answer; a subscription is a thing
+// that exists until somebody ends it, and conflating them would make
+// `LogsResponse` mean "your answer" or "the first of many" depending on a
+// bool nobody can see at the point they handle it.
+//
+// Still not a `CommandKind`, for the reason `LogsRequest` is not: reads are
+// answered by a read-only Controller and a read-only agent. Refusing to show
+// an operator a failing container because the platform is in its safe mode is
+// exactly backwards.
+message LogsSubscribe {
+  // Correlates every chunk that follows, and is what `LogsCancel` names.
+  string request_id = 1;
+
+  // Docker's own id. The agent does not know the URN scheme.
+  string target_id = 2;
+
+  // Backfill before the live tail begins, so opening the panel on a container
+  // that failed a minute ago shows why rather than an empty box waiting for a
+  // line that will never come. Clamped exactly as `LogsRequest.tail` is.
+  uint32 tail = 3;
+}
+
+// Lines from a live subscription. Many per `LogsSubscribe`.
+message LogsChunk {
+  string request_id = 1;
+
+  repeated LogLine lines = 2;
+
+  // Set once, on the last chunk. The container exited, the engine closed the
+  // stream, or the agent gave up -- and the operator needs to know the silence
+  // is the end rather than a quiet minute.
+  bool done = 3;
+
+  // Populated when `done` is set by a failure rather than by the log ending
+  // normally. The engine's own words where there are any.
+  string reason = 4;
+}
+
+// End a subscription. Sent by the Controller when the last reader goes away.
+//
+// Unsubscribing matters more here than it would for a request/response pair:
+// a forgotten subscription is a `docker logs --follow` running forever on
+// someone's machine, pushing bytes down an uplink nobody is reading.
+message LogsCancel {
+  string request_id = 1;
 }
 
 message LogLine {

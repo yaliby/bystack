@@ -56,6 +56,12 @@ pub enum ActionResult {
     Failed,
 }
 
+/// Cloneable, and cheaply: it is a socket path and nothing else. No pool, no
+/// shared connection, no state to keep consistent between copies -- every
+/// request already opens its own connection (see `request`). A log
+/// subscription needs an owned `Engine` to hand to a spawned task, and this is
+/// the whole of what that costs.
+#[derive(Clone)]
 pub struct Engine {
     socket: PathBuf,
 }
@@ -158,6 +164,100 @@ impl Engine {
             return Err(EngineError::Status(status, engine_message(&body, status)));
         }
         Ok(demultiplex(&body, tail as usize))
+    }
+
+    /// Follow a container's log, sending each batch of lines to `sink`.
+    ///
+    /// The streaming sibling of [`Engine::logs`], and the same demultiplexing
+    /// on a stream that never ends rather than a body that does. `tail` is the
+    /// backfill the daemon sends before the live tail begins, so opening a
+    /// panel on a container that died a minute ago shows why.
+    ///
+    /// **Batching is deliberate and is the backpressure story.** A container
+    /// in a hot loop can write thousands of lines a second, and one frame per
+    /// line would put that rate on the Controller's WebSocket and on the
+    /// browser. Everything decoded from one HTTP chunk is sent as one batch;
+    /// the daemon's own chunking is the natural rate limit, and a chatty
+    /// container costs frames proportional to its *output*, not to its line
+    /// count.
+    ///
+    /// Returns when the daemon closes the stream -- the container exited, or
+    /// was removed. That is a normal end and not an error: the caller reports
+    /// it as `done` so the operator knows the silence is the end.
+    ///
+    /// Cancellation is the caller's job, by dropping the future. Every await
+    /// here is cancel-safe in the only sense that matters: nothing outside
+    /// this function is left half-written, because the only thing it mutates
+    /// is `sink`.
+    pub async fn follow_logs(
+        &self,
+        container_id: &str,
+        tail: u32,
+        sink: mpsc::Sender<Vec<LogLine>>,
+    ) -> Result<(), EngineError> {
+        let tail = tail.clamp(1, MAX_LOG_LINES);
+        let path = format!(
+            "/containers/{}/logs?stdout=1&stderr=1&timestamps=1&follow=1&tail={tail}",
+            urlencode(container_id)
+        );
+
+        let stream = UnixStream::connect(&self.socket).await.map_err(EngineError::Connect)?;
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(|e| EngineError::Http(e.to_string()))?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(&path)
+            .header("Host", HOST)
+            .body(Empty::<Bytes>::new())
+            .map_err(|e| EngineError::Http(e.to_string()))?;
+
+        let mut response = sender
+            .send_request(request)
+            .await
+            .map_err(|e| EngineError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let mut body = Vec::new();
+            while let Some(frame) = response.frame().await {
+                let Ok(frame) = frame else { break };
+                if let Some(chunk) = frame.data_ref() {
+                    body.extend_from_slice(chunk);
+                }
+            }
+            return Err(EngineError::Status(
+                status,
+                engine_message(&Bytes::from(body), status),
+            ));
+        }
+
+        // Docker's 8-byte frame header can be split across HTTP chunks, and a
+        // line can span two of them. `pending` holds whatever is not yet a
+        // whole log frame, exactly as the event stream holds a partial line.
+        let mut pending = Vec::<u8>::new();
+        while let Some(frame) = response.frame().await {
+            let frame = frame.map_err(|e| EngineError::Http(e.to_string()))?;
+            let Some(chunk) = frame.data_ref() else { continue };
+            pending.extend_from_slice(chunk);
+
+            // `usize::MAX` because tailing is the daemon's job on the backfill
+            // and meaningless on the live portion -- every line that arrives
+            // here is one the operator asked to see.
+            let (lines, consumed) = demultiplex_prefix(&pending, usize::MAX);
+            if consumed > 0 {
+                pending.drain(..consumed);
+            }
+            if !lines.is_empty() && sink.send(lines).await.is_err() {
+                return Ok(()); // nobody is reading any more
+            }
+        }
+
+        Ok(())
     }
 
     // -- event stream -----------------------------------------------------
@@ -367,6 +467,54 @@ pub fn demultiplex(body: &[u8], tail: usize) -> Vec<LogLine> {
     lines
 }
 
+/// Demultiplex only what is *complete*, and say how much that was.
+///
+/// The streaming sibling of [`demultiplex`], and a sibling rather than a
+/// generalisation because the two disagree about exactly one case, in
+/// opposite and correct directions: **a truncated final frame.**
+///
+/// [`demultiplex`] has the whole body, so a short final frame is all there
+/// will ever be and showing its bytes beats discarding them. Here another
+/// chunk is almost certainly a few milliseconds away, so the same bytes are
+/// an incomplete frame to hold onto — emitting them would split one log line
+/// across two, permanently, every time a line straddled a chunk boundary.
+///
+/// Returns the lines and the number of bytes the caller may drop. Whatever is
+/// left is a partial frame and must be kept.
+pub fn demultiplex_prefix(body: &[u8], tail: usize) -> (Vec<LogLine>, usize) {
+    let mut lines = Vec::new();
+    let mut consumed = 0usize;
+
+    if framed(body) {
+        let mut at = 0usize;
+        while at + 8 <= body.len() {
+            let stderr = body[at] == 2;
+            let length =
+                u32::from_be_bytes([body[at + 4], body[at + 5], body[at + 6], body[at + 7]])
+                    as usize;
+            let start = at + 8;
+            let Some(end) = start.checked_add(length) else { break };
+            if end > body.len() {
+                // The payload has not all arrived. Stop here and keep it.
+                break;
+            }
+            push_lines(&mut lines, &body[start..end], stderr);
+            at = end;
+            consumed = at;
+        }
+    } else if let Some(newline) = body.iter().rposition(|b| *b == b'\n') {
+        // A TTY container: no framing at all, just bytes. The last newline is
+        // the only place a line is known to have ended.
+        push_lines(&mut lines, &body[..=newline], false);
+        consumed = newline + 1;
+    }
+
+    if lines.len() > tail {
+        lines.drain(..lines.len() - tail);
+    }
+    (lines, consumed)
+}
+
 fn framed(body: &[u8]) -> bool {
     body.len() >= 8 && body[0] <= 2 && body[1] == 0 && body[2] == 0 && body[3] == 0
 }
@@ -391,6 +539,54 @@ mod log_tests {
         out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         out.extend_from_slice(payload.as_bytes());
         out
+    }
+
+    #[test]
+    fn a_partial_frame_is_held_back_rather_than_split() {
+        // The bug this function exists to prevent. A log line straddling two
+        // HTTP chunks must arrive once and whole; emitting the first half
+        // would break every line that crossed a chunk boundary, which on a
+        // busy container is a steady fraction of them.
+        let whole = frame(1, "first line\n");
+        let mut partial = whole.clone();
+        partial.extend(frame(2, "second line\n"));
+        let cut = whole.len() + 12; // mid-payload of the second frame
+
+        let (lines, consumed) = demultiplex_prefix(&partial[..cut], usize::MAX);
+
+        assert_eq!(lines.len(), 1, "only the complete frame is emitted");
+        assert_eq!(lines[0].text, "first line");
+        assert_eq!(consumed, whole.len(), "the partial frame is left in the buffer");
+    }
+
+    #[test]
+    fn the_held_back_bytes_complete_on_the_next_chunk() {
+        let mut body = frame(1, "first line\n");
+        body.extend(frame(2, "second line\n"));
+        let cut = body.len() - 5;
+
+        let (first, consumed) = demultiplex_prefix(&body[..cut], usize::MAX);
+        // What a caller does: drop what was consumed, keep the rest, append.
+        let mut pending = body[consumed..cut].to_vec();
+        pending.extend_from_slice(&body[cut..]);
+        let (second, _) = demultiplex_prefix(&pending, usize::MAX);
+
+        let texts: Vec<&str> = first.iter().chain(second.iter()).map(|l| &*l.text).collect();
+        assert_eq!(texts, ["first line", "second line"]);
+        assert!(second.iter().any(|l| l.stderr), "the stream tag survives the split");
+    }
+
+    #[test]
+    fn a_tty_stream_consumes_only_through_the_last_newline() {
+        // No framing at all, so the only place a line is known to have ended
+        // is a newline. A trailing partial line waits for the rest.
+        let body = b"complete line\nhalf a li";
+
+        let (lines, consumed) = demultiplex_prefix(body, usize::MAX);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "complete line");
+        assert_eq!(consumed, 14);
     }
 
     #[test]

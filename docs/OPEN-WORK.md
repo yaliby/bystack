@@ -5,6 +5,10 @@ than admired. [MIGRATION](MIGRATION.md) is the record of the agent pivot and
 is essentially closed; this is what is left after it, with the decisions that
 have already been made attached to each item so they are not re-litigated.
 
+**One thing is actually open: §5, packaging.** §2 and §3 are closed work kept
+for its reasoning, §4 is a decision *not* to build something, and §6–§7 are
+standing notes. If you are looking for the next task, it is §5.
+
 **Do not trust this file over the tree.** Every claim below was true at the
 commit that last touched it. Section 1 is how you check in ninety seconds.
 
@@ -21,13 +25,13 @@ cd agent   && cargo build --release          # do this first; the suites below d
 cd ../backend
 .venv/bin/python -m ruff check src tests
 .venv/bin/python -m mypy src
-.venv/bin/python -m pytest -q                                     # 289 passed
-.venv/bin/python -m bystack.conformance       ../agent/target/release/bystack-agent   # 26/26
-.venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent   # 27/27
-.venv/bin/python -m bystack.conformance.local ../agent/target/release/bystack-agent   # 12/12
+.venv/bin/python -m pytest -q                                     # 293 passed
+.venv/bin/python -m bystack.conformance       ../agent/target/release/bystack-agent   # 32/32
+.venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent   # 30/30
+.venv/bin/python -m bystack.conformance.local ../agent/target/release/bystack-agent   # 14/14
 
-cd ../agent    && cargo clippy --release --all-targets -- -D warnings && cargo test --release  # 31 passed
-cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 148 passed
+cd ../agent    && cargo clippy --release --all-targets -- -D warnings && cargo test --release  # 34 passed
+cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 156 passed
 ```
 
 Agent binary: **1.82 MiB** against a 12 MiB budget, RSS **~3.95 MiB** against
@@ -71,10 +75,20 @@ Decisions that are settled — **do not reopen**:
   Controller refuses; refusing to show an operator why a container is failing
   because the platform is in its safe mode is exactly backwards. Both sides
   answer regardless of `read_only`, and `test_agent_logs.py` pins it.
-- **One shot, not a stream.** `tail` is clamped by the daemon, by the agent
-  (`MAX_LOG_LINES = 2000`) and by the route's schema. Follow/streaming is a
-  separate feature with a different backpressure problem; do not shape this as
-  its first half.
+- ~~**One shot, not a stream.**~~ **Both, now.** The one-shot read survives as
+  the API and the fallback; opening the panel uses the *live* path
+  (`LogsSubscribe`/`LogsChunk`/`LogsCancel`, SSE at
+  `GET /graph/node/logs/stream`). `tail` is still clamped by the daemon, the
+  agent (`MAX_LOG_LINES = 2000`) and the route's schema — the first two kept
+  in step by a guard, see §3.4 — and is now the *backfill* before the tail
+  begins. The UI does not send it at all.
+
+  The backpressure question the one-shot design deferred got answered rather
+  than avoided, and in three places because it has to be: the agent batches per
+  HTTP chunk and blocks on a full queue (which stops it reading the daemon),
+  the Controller keeps a bounded queue per subscription and **drops oldest**,
+  and the browser holds `LIVE_BUFFER` lines. Every drop is counted and shown —
+  a gap the UI does not mark is a log an operator reads as continuous.
 - **The stream tag is kept per line.** `stderr` is most of the diagnostic
   value. Do not flatten it into one blob on the way through.
 - **A disconnected host is answered, not 404'd.** The reason travels in the
@@ -94,7 +108,9 @@ Decisions that are settled — **do not reopen**:
   inspect; inspecting everything would turn one request per List into one per
   container, which is the cost the informer's whole design avoids.
   `bystack.conformance` asserts *which ids* were inspected rather than how
-  many, because an agent that inspects everything answers correctly.
+  many, because an agent that inspects everything answers correctly. The set
+  is also **capped at 32 and issued concurrently** — see §3.2, which is where
+  "bounded, usually empty" stopped being a claim and became a property.
 - **It is hashed, deliberately.** `restarting` is the same state on the second
   failure and the four-hundredth, so a count outside the hash is a loop
   reported once and never again. It advances on an *event*, unlike `Status`
@@ -103,190 +119,173 @@ Decisions that are settled — **do not reopen**:
 - Surfaced as an ordinary attribute row, like `exit_code`. If you want it on
   the card itself, that is a `theme.ts`/`render.ts` change and a new decision.
 
-### Durable audit — closed. **RBAC is not** — see §4
+### Durable audit — closed. **RBAC is not coming** — see §4
 
 `infra/audit/durable.py`, on by default, JSON Lines in `agents.state_dir`,
-bounded by count and compacted write-and-rename. ADR-0012 §4a is the record.
+bounded by count and compacted write-and-rename. ADR-0012 §4a is the record,
+and §4b is the write path (fsynced, off the event loop — see §3.1).
 
 The in-memory ring survives as the fallback for a Controller with nowhere to
 write, because "cannot persist" and "will not start" are different answers and
 only one of them is acceptable for a control plane.
 
----
-
-## 3. Known gaps in the three features above
-
-**Start here.** These are defects and missing verification in the work that
-just landed, not roadmap items. They are ranked: the first three are worth
-doing before anything new, the last three are hygiene you can pick up when you
-are next in the file.
-
-Every one of them names the exact site and the cheapest fix that closes it.
-Nothing here is a redesign.
-
-### 3.1 The audit log `fsync`s on the event loop — **fix this first**
-
-**What.** `DurableAuditLog._append` does a blocking write + `os.fsync` and is
-called from `CommandService.execute`, which is a coroutine. Two records per
-command, so two fsyncs, on the thread that also runs every agent's WebSocket
-pump and every browser's delta stream.
-
-**Why it matters.** Measured: **0.01 ms on tmpfs, 0.78 ms on NVMe/btrfs.** On
-a spinning disk, a busy host or network storage it is 10–40 ms — per command,
-with the whole Controller stopped. And the test suite cannot see it, because
-`tmp_path` is tmpfs: this is a defect that is green by construction.
-
-**Where.** `backend/src/bystack/infra/audit/durable.py`, `_append`.
-
-**The efficient fix.** Do not build a write-behind queue; it needs a flush on
-shutdown, an ordering guarantee and a test for a crash mid-queue, and buys
-nothing here. Make `record`/`finalize` `async` and `await asyncio.to_thread(...)`
-around the file work, or keep them sync and hand the write to a single
-serialised worker task. The port (`core/ports/command.AuditLog`) is sync
-today, so making it async is a three-caller change in `runtime/commands.py`.
-
-**How you know it worked.** Add a check that records N entries against a path
-whose write is artificially slow (monkeypatch `os.fsync` to `time.sleep`) and
-asserts the event loop stayed responsive — e.g. a concurrent
-`asyncio.sleep(0)` counter keeps advancing. Then revert the fix and watch it
-fail, per §6.
-
-### 3.2 The crash-loop inspect is sequential and uncapped
-
-**What.** `deepen_crash_loops` awaits one `GET /containers/{id}/json` per
-restarting container, in a loop, inside the List path.
-
-**Why it matters.** The design claims the set is "bounded, usually empty".
-Statistically true; there is no hard bound. A host where 50 containers are
-crash-looping — a bad deploy, an OOMing node — pays 50 **serialised** unix
-round trips before any frame is sent, delaying the containers that are fine
-along with the ones that are not. That is the informer's whole cost model
-inverted, in exactly the situation an operator is watching.
-
-**Where.** `agent/src/informer.rs`, `deepen_crash_loops`.
-
-**The efficient fix.** Two lines of policy, not a redesign: a hard cap
-(inspect at most N, say 32, and leave the rest at zero — the graph is honest
-either way), and `futures::future::join_all` over the capped set so the round
-trips overlap. `futures` is not yet a dependency; `tokio::task::JoinSet` is
-already available and does the same job.
-
-**How you know it worked.** Extend `scenario_crash_loop_depth` in
-`conformance/runner.py` — it already asserts *which ids* were inspected, so
-add a host with more restarting containers than the cap and assert the count
-stops there.
-
-### 3.3 `.fleet` and `.local` conformance do not cover logs or `restart_count`
-
-**What.** 27/27 and 12/12 are unchanged by this work. Only the single-agent
-suite exercises either feature.
-
-**Why it matters.** `.fleet` exists *because* a single-agent run is blind to
-everything ADR-0008 claims about a fleet — and "a logs request routed to the
-wrong host's agent" is precisely that class of bug. Nothing currently rules it
-out. `.local` is the only suite that drives the real supervisor over a unix
-socket, so nothing proves logs work on the zero-config path at all.
-
-**Where.** `backend/src/bystack/conformance/fleet.py` and `local.py`.
-
-**The efficient fix.** `fleet.py` already has three engines with distinct
-container sets. One check: put a distinguishable line in host B's container,
-ask host A's provider for host B's container id, and assert it is refused
-rather than answered. `local.py`: one check that a logs read over the unix
-socket returns the scripted lines — the plumbing is identical to the
-single-agent scenario, so it is a copy of ~15 lines.
-
-### 3.4 Three constants are mirrored across languages with no guard
-
-**What.** `MAX_LOG_TAIL = 2000` (Python) mirrors `MAX_LOG_LINES = 2000`
-(Rust); `DEFAULT_LOG_TAIL = 200` mirrors `TAIL = 200` in the frontend. All
-three are kept in step by a comment.
-
-**Why it matters.** If the agent lowers its clamp, the route's schema goes on
-accepting a number the agent silently truncates, and the UI goes on saying
-"Last 200 lines" over 50. This repo already decided that cross-language drift
-gets a guard rather than a comment — that is what
-`test_wire.py::test_every_docker_field_the_mapper_reads_is_carried_on_the_wire`
-is.
-
-**Where.** `providers/agent/commands.py:70`, `agent/src/docker.rs:320`,
-`frontend/src/features/logs/model/useLogs.ts:31`.
-
-**The efficient fix.** One test in `test_wire.py`, beside the existing drift
-guard: read `agent/src/docker.rs` and assert the `MAX_LOG_LINES` literal
-equals `MAX_LOG_TAIL`. It is a regex over a file, which is exactly what
-`_keys_read_by_mapper` already does. The frontend constant is better solved by
-deleting it — let the client omit `tail` and take the Controller's default.
-
-### 3.5 `DurableAuditLog.finalize` is O(retain) in the common case
-
-**What.** It scans the deque from the oldest end to find an id that is almost
-always the newest, because the entry being finalized is the one just
-dispatched. Measured **0.50 ms** with the ring full.
-
-**Why it matters.** Not much, today: a few commands a minute. It is here
-because the shape was inherited from `memory.py`, where the ring is 2,000 —
-and raising retention to 20,000 made it 10× worse without anyone deciding to.
-
-**Where.** `backend/src/bystack/infra/audit/durable.py`, `finalize`.
-
-**The efficient fix.** `_index` already maps id → entry. Make it map id →
-position, or hold the entries in a `dict` and derive `recent()` from
-`reversed(dict)` — Python dicts are insertion-ordered, and eviction is
-`next(iter(...))`. The second removes the scan from `memory.py` too.
-
-### 3.6 `LogsChannel` is a near-verbatim copy of `CommandChannel`
-
-**What.** ~60 lines duplicated in `providers/agent/commands.py`.
-
-**Why it matters.** The duplication was deliberate — the two genuinely differ
-in what a failure *means*, and the shared docstring says so — but nothing
-stops one being fixed and the other not. The bug class the class exists to
-prevent (a leaked future) would then exist in exactly one of them.
-
-**The efficient fix.** Do not generalise into a base class with a type
-parameter; the differences are in the failure mapping and would end up as
-hooks. Extract only the parked-future mechanics — `dispatch/resolve/abandon`
-over a `Future[T]` — and let each channel keep its own envelope construction
-and its own outcome mapping. If that reads worse than the duplication, leave
-it and add a comment saying the copy was measured and kept.
+`actor` reads `anonymous` and always will. That is ADR-0014 rather than an
+unfinished edge, and it is why nothing in `CommandKind` destroys anything.
 
 ---
 
-## 4. Authentication, and the destructive operations behind it
+## 3. The gaps in those three features — all closed
 
-**This is the largest open item that is not packaging, and it is a design
-question before it is a coding one.**
+They were six, ranked, and they are done. Kept here rather than deleted for
+the same reason §2 is: the next person will be tempted by the options that
+were rejected, and two of these were defects that were **green by
+construction** — which is the part worth remembering.
 
-`CommandKind` has no `remove`, `prune`, volume deletion or image cleanup, and
-its docstring says why: a destructive operation is only defensible once the
-platform can answer *who deleted the database volume*. That needed three
-things. Two are now done — the audit is durable, and it records refusals and
-attempts as well as completions. The third is missing entirely:
+Every fix was validated the way §7 requires: revert it, watch the new check
+fail, put it back. The numbers below are from those runs.
 
-**Nothing authenticates a browser to this API.** There is no login, no
-session, no token, no user model. `CommandRequest.actor` defaults to the
-literal string `"anonymous"` and the client is explicitly forbidden from
-setting it (`test_the_client_cannot_choose_who_the_audit_log_blames` — an
-attacker-chosen name beside a real operation is worse than none, because it
-looks like evidence). The API binds to loopback by default, and that is the
-whole of the current answer.
+### 3.1 The audit log fsynced on the event loop — fixed
 
-So the work is not "add RBAC to the command service". It is, in order:
+`AuditLog.record` and `finalize` are now `async`, and `DurableAuditLog` awaits
+`asyncio.to_thread` around the file work. ADR-0012 **§4b** is the record.
 
-1. **Decide the identity model.** Local accounts? OIDC? A reverse proxy that
-   asserts a header, which is what most homelab deployments already have in
-   front of everything else? These have very different consequences for the
-   two-listener split in ADR-0011 and for the "may sit behind an ordinary
-   reverse proxy" property the browser port was given.
-2. **Write the ADR before the code.** Every comparable decision in this tree
-   has one, and this one changes the shape of the API surface permanently.
-3. Then `actor` becomes real, RBAC has something to be a function of, and
-   `CommandKind` can grow — in that order, and not before.
+- **Async on the port, not just the implementation.** The in-memory ring has
+  nothing to await and is a coroutine anyway: a `record` whose sync-ness
+  depended on which log the composition root chose would put that choice into
+  the shape of every caller.
+- **Still fsynced per record.** Durability at the moment of return is the
+  property; only the thread changed. A write-behind queue was rejected — it
+  needs a flush on shutdown, an ordering guarantee and a crash-mid-queue test,
+  and buys latency nobody was short of.
+- **One lock**, so concurrent writers land in order, and **compaction takes
+  its snapshot on the loop** — a worker must not iterate a mapping `record`
+  can still add to. Both have their own check; both were mutation-tested.
+- The check that matters: `test_a_slow_disk_does_not_stop_the_event_loop`
+  monkeypatches `os.fsync` to sleep and asserts the longest gap between two
+  turns of the loop. Reverted, it reports a **253 ms** stall. This is the
+  shape to copy for anything else `tmp_path` hides — tmpfs fsync is 0.01 ms,
+  so the suite could not otherwise see this at all.
 
-Do not add a destructive verb to unblock a demo. Adding one before the "who"
-exists is the single sequencing mistake this codebase has been careful to
-avoid, and it is the one that cannot be quietly walked back.
+### 3.2 The crash-loop inspect was sequential and uncapped — fixed
+
+`agent/src/informer.rs`: at most `MAX_CRASH_LOOP_INSPECTS` (32), issued
+through `join_all` so the round trips overlap.
+
+- **`join_all`, not a `JoinSet`.** OPEN-WORK previously suggested the latter on
+  the grounds that `futures` was not a dependency — but `futures-util` already
+  was, for the WebSocket sink. `join_all` needs no spawn, no `'static` bound
+  and no `Clone` on `Engine`, none of which a deliberately current-thread
+  runtime should be made to grow. The `alloc` feature is now named explicitly
+  in `Cargo.toml` rather than arriving through tokio-tungstenite's unification.
+- **The cap is on the work, not the truth.** Containers past it keep
+  `restart_count` at zero, which is what the field already means for anything
+  not looping.
+- Conformance grew two checks. Asserting the cap needed a fixture with more
+  crash loops than the cap; asserting the *overlap* needed
+  `ScriptedEngine.inspect_delay`, because a scripted inspect answers instantly
+  and both shapes look identical at that speed. At 50 ms: **0.36 s batched,
+  2.41 s serial**, with the old code inspecting all 41.
+
+### 3.3 `.fleet` and `.local` now cover logs
+
+- **`.fleet`** has `scenario_logs_routing`: each host's containers get
+  distinguishable lines, a read through beta's provider must return beta's
+  text and touch **only** beta's daemon, and asking *alpha's* provider for
+  beta's container id must be refused. That last one is the partition rule
+  drawn from the read side — `PartitionWriter` stops an agent writing another
+  host's entities; nothing had stopped one being used as a window onto them.
+- **`.local`** now reads a log over the unix socket and checks the tail is
+  bounded there too. It is the only suite that drives the real supervisor, and
+  the zero-config path is the one a first-run user is on.
+- A misrouted log read is worse than a misrouted command: the command fails
+  loudly on a daemon that does not have the container, while the read hands
+  the operator another machine's output under the container they clicked.
+
+### 3.4 The mirrored constants have a guard — fixed
+
+`test_wire.py::test_the_constants_mirrored_across_languages_still_agree` reads
+the literal out of the Rust source, exactly as `_keys_read_by_mapper` does. It
+covers `MAX_LOG_LINES` / `MAX_LOG_TAIL` and, now, `MAX_CRASH_LOOP_INSPECTS`
+against the copy `conformance/runner.py` asserts with. **Add the next
+cross-language number to that test, not to a comment.**
+
+The frontend's copy was deleted rather than guarded: `useLogs.ts` omits `tail`
+and takes the Controller's default, which is the side that owns the bound and
+already publishes it in the OpenAPI schema. The panel's footer counts the
+lines that arrived, so it was never repeating the constant anyway.
+
+### 3.5 `finalize` is O(1) — fixed
+
+Both audit logs are now one insertion-ordered `dict` keyed by operation id,
+which is a ring, an index and an eviction policy at once: re-assigning a key
+keeps its position, so `finalize` is an assignment, and the oldest entry is
+`next(iter(...))`. `recent` is `islice` over `reversed(...)`, so answering
+costs the limit rather than the whole retention. The deque-plus-side-index it
+replaces had to be kept in step by hand.
+
+### 3.6 The channels share their parked future — fixed
+
+`ParkedRequests[T]` in `providers/agent/commands.py` holds the correlation map
+and the three invariants that leak if broken; `CommandChannel` and
+`LogsChannel` keep their own envelope construction and outcome mapping,
+because what a failure *means* is where they genuinely differ.
+
+Not a base class with a type parameter — that would have turned the real
+difference into a pair of overridden hooks. The check that this was worth
+doing: deleting the `finally` that drops the future now fails **three** tests
+across **both** channels, which is precisely the coupling that was missing.
+
+---
+
+## 4. Authentication — **decided against**. See ADR-0014
+
+This was the largest open item that is not packaging, and it was a design
+question before it was a coding one. The design question has been answered:
+**there is no user identity model, and there will not be one at this scale.**
+[ADR-0014](adr/0014-no-user-identity.md) is the record; this is the summary.
+
+The question underneath the three candidate shapes (local accounts, OIDC, a
+trusted proxy header) was never "which is best" — it was *who is this for*.
+The answer is one operator, one Controller, on a LAN they own, managing their
+own machines. There is no second user to distinguish from the first, so a
+login screen answers "the one person with the password did it", which is what
+the absence of a login screen already says. Every candidate was priced against
+that and none earned its cost.
+
+**Two consequences, and they are the decision rather than side-effects:**
+
+1. **`actor` is `"anonymous"` permanently.** Not a placeholder. It records
+   that this platform does not know who asked and has decided not to find out,
+   which is true and therefore a better audit record than an invented name.
+   The client still cannot set it — an attacker-chosen name beside a real
+   operation looks like evidence, and that test stays.
+2. **`CommandKind` stays reversible-lifecycle-only permanently.** ADR-0012
+   made destructive verbs conditional on answering *who*; that condition is
+   now never met, so the conclusion is settled rather than pending. **Do not
+   add `remove`, `prune` or volume deletion.** Doing so requires superseding
+   ADR-0014 first, and the whole of §4's old warning still applies: it is the
+   one sequencing mistake this codebase has avoided and cannot be quietly
+   walked back.
+
+The second is what makes the first safe, and the pairing is the load-bearing
+part. No auth **and** no destructive verb means the worst case is "someone who
+could reach the port restarted a container" — recoverable, audited, visible in
+the topology within a second. No auth **with** `prune` means unrecoverable
+data loss with no attribution. Only one of those is acceptable, so the two
+decisions travel together or not at all.
+
+**The boundary that does exist**, and it is not nothing: `api.host` is
+`127.0.0.1` by default, the agent listener is mTLS with an internal CA and
+per-host approval (ADR-0011), the local agent socket is 0600 in a 0700
+directory, and `read_only: true` is the default for every mutation. The one
+thing an operator must understand is that setting `api.host` to `0.0.0.0`
+puts the whole control surface on the LAN with no second gate — which is the
+deployment ADR-0014 assumes and the reason it is not the default.
+
+**What would reopen this:** a second operator whose actions must be told
+apart, the Controller reachable from an untrusted network, or a destructive
+operation becoming genuinely necessary. Those change the deployment, which is
+what ADR-0014 is scoped to — a feature request does not.
 
 ---
 
@@ -363,14 +362,27 @@ Two things the packaging will now have to place that it would not have before:
   `.proto`, the agent, and `ingest.py`'s translation back into Docker's
   vocabulary. `test_wire.py::test_every_docker_field_the_mapper_reads_is_
   carried_on_the_wire` is what stops you forgetting the third.
+- **A number written down in two languages gets a guard, not a comment.** Add
+  it to `test_wire.py::test_the_constants_mirrored_across_languages_still_agree`,
+  which reads the literal out of the Rust source. Two are guarded today; the
+  third is one line.
+- **`AuditLog.record` and `finalize` are coroutines.** Not an accident of the
+  durable implementation — see ADR-0012 §4b. Anything doing I/O on the event
+  loop inside `CommandService.execute` stops every agent pump and every
+  browser stream, and `tmp_path` is tmpfs so the suite will not tell you.
 - **No test anywhere may require a Docker daemon or a network.**
 - **No test may write outside `tmp_path` either.** `conftest.py`'s autouse
   `_state_dir_is_disposable` redirects the default state directory; without it
   every test that builds an app from a bare `Settings()` mints a CA and
   appends to an audit log in the home directory of whoever ran the suite.
 - **A check that cannot fail is decoration.** Every check added in this round
-  was validated by reverting the fix and watching it fail. Do the same — and
-  delete `__pycache__` between mutation runs, or you will spend twenty minutes
+  was validated by reverting the fix and watching it fail. One of them passed
+  under mutation on the first attempt and had to be rewritten to open the race
+  it claimed to cover, which is the whole reason the rule exists. Sometimes
+  seeing the failure means slowing something down on purpose — an fsync, an
+  inspect, a serialization — because the real thing is too fast for the defect
+  to show. Do the same, and delete `__pycache__` between mutation runs, or you
+  will spend twenty minutes
   debugging bytecode.
 - **`PartitionWriter` never gets a `source` argument.** It is what stops a
   compromised agent writing to another host's partition.
