@@ -276,8 +276,11 @@ decisions travel together or not at all.
 
 **The boundary that does exist**, and it is not nothing: `api.host` is
 `127.0.0.1` by default, the agent listener is mTLS with an internal CA and
-per-host approval (ADR-0011), the local agent socket is 0600 in a 0700
-directory, and `read_only: true` is the default for every mutation. The one
+per-host approval (ADR-0011), and the local agent socket is 0600 in a 0700
+directory. `read_only` is **not** part of that boundary any more — ADR-0014
+flipped it to `false`, on the grounds that the verb set is what bounds the
+damage and a control plane that refuses every action on first run is a
+support burden rather than a secure default. The one
 thing an operator must understand is that setting `api.host` to `0.0.0.0`
 puts the whole control surface on the LAN with no second gate — which is the
 deployment ADR-0014 assumes and the reason it is not the default.

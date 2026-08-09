@@ -151,8 +151,11 @@ error naming this document. `Settings.load()` already refuses to fall back to
 defaults on a malformed file, for exactly this reason — a config that quietly
 degraded to "manage nothing" is indistinguishable from an empty cluster.
 
-Preserved unchanged: `read_only` defaulting to `true`, and the API binding to
-loopback by default. The agent listener is a *separate* port from the UI: one
+Preserved unchanged: the API binding to loopback by default. (`read_only` also
+defaulted to `true` across the pivot; it was flipped to `false` afterwards by
+[ADR-0014](adr/0014-no-user-identity.md), which is a decision about the product
+rather than about this migration.) The agent listener is a *separate* port from
+the UI: one
 is browser-facing and may sit behind a normal reverse proxy, the other
 requires client certificates.
 

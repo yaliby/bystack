@@ -179,13 +179,15 @@ agent talks to a socket, so the conformance harness gives it one.
 
 ## Operating it
 
-Discovery is read-only and always on. Operations are opt-in:
+Discovery is read-only and always on. Operations work out of the box, because
+the live map is the control surface and a map that refuses every action is a
+diagram ([ADR-0014](docs/adr/0014-no-user-identity.md)):
 
 ```yaml
-read_only: false      # the default is true, deliberately
+read_only: true       # the default is false; set this to get a viewer back
 ```
 
-With that set, a container, service or stack can be started, stopped,
+Left alone, a container, service or stack can be started, stopped,
 restarted, paused, resumed or killed — from the inspector panel, or directly:
 
 ```bash
@@ -471,7 +473,7 @@ agents:
   auto_approve: false         # a valid join token still needs operator approval
   resync_interval: 900        # 15m — the event stream is local now
 
-read_only: true               # secure default; mutation is opt-in
+read_only: false              # the default; `true` makes this a viewer
 api:
   host: 127.0.0.1
   port: 8000

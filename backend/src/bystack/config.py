@@ -287,12 +287,14 @@ class ApiConfig(BaseModel):
     **This bind is the whole of the browser-side authorization** (ADR-0014).
     Nothing authenticates a browser to this API by design, so anyone who can
     reach this port can start, stop, restart and kill containers on every
-    managed host. That is bounded on purpose -- `CommandKind` holds no verb
-    that destroys anything, and `read_only` is `True` until an operator opts
-    out -- but it is the reason changing this to `0.0.0.0` is a decision about
-    how much you trust the network, not a convenience. Put a reverse proxy
-    with authentication in front of it if the answer is "not much"; the
-    browser port was deliberately kept able to sit behind an ordinary one."""
+    managed host -- and since ADR-0014 they can do it out of the box, because
+    `read_only` now defaults to `False`. What bounds the damage is the verb set
+    rather than the flag: `CommandKind` holds nothing that destroys anything,
+    so the worst case is a container restarting. That is the reason changing
+    this to `0.0.0.0` is a decision about how much you trust the network, not a
+    convenience. Put a reverse proxy with authentication in front of it if the
+    answer is "not much"; the browser port was deliberately kept able to sit
+    behind an ordinary one."""
 
     port: int = 8000
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])

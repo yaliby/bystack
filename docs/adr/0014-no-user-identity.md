@@ -97,7 +97,7 @@ table, and the controls are already built:
 | Browser API | `api.host` is `127.0.0.1` by default. Reaching it from another machine is an explicit, deliberate configuration change. |
 | Agent listener | Mutual TLS against an internal CA, single-use join tokens carrying the CA's fingerprint, and per-host operator approval ([ADR-0011](0011-agent-trust-and-enrollment.md)). Unchanged and still the strong boundary. |
 | Local agent socket | `0600` in a `0700` directory. The file mode *is* the authentication, and `bystack.conformance.local` checks it. |
-| Every mutation | `read_only: true` by default. The platform refuses to change anything until an operator opts out in configuration. |
+| Every mutation | Confined to `CommandKind`, which is reversible lifecycle transitions and nothing else, and recorded durably with the attempt as well as the outcome. **`read_only` is `false` by default** — this ADR is what made that safe, and the two are the same decision (see *Consequences*). |
 
 **The one thing an operator must understand:** setting `api.host` to
 `0.0.0.0` so the UI is reachable from another machine means anyone who can
@@ -114,6 +114,25 @@ this ADR keeps that property available without requiring it.
 **Removed from the roadmap:** login, sessions, tokens, a user model, RBAC, and
 the destructive verbs that were waiting behind them. `docs/OPEN-WORK.md` §4 is
 closed rather than carried.
+
+**Flipped:** `read_only` now defaults to `false`. It shipped `true` on the
+reasoning that a mutating default is never safe — which assumed a verb set that
+could hurt you, and this ADR closes that door permanently. Everything in
+`CommandKind` is a reversible lifecycle transition, the API binds to loopback,
+and every attempt is recorded durably, so the worst a wrong click does is
+restart a container: recoverable, audited, and visible on the canvas a second
+later. Against that, the safe default was paid on every first run — a platform
+whose whole claim is *"the live map is the control surface"* came up refusing
+every action, with no error a new operator could connect to a setting they had
+never read about. A default that makes the product look broken is not a secure
+default.
+
+This is the same decision as the one above and not a convenience laid on top of
+it: no identity is acceptable **because** no verb is destructive, and a
+mutating default is acceptable for exactly the same reason. Setting
+`read_only: true` still gets the viewer back, enforced at `CommandService` and
+again by each agent on its own authority. If a destructive verb is ever added,
+this flips back before it lands.
 
 **Kept:** the audit log stays durable and stays the record of what was
 attempted. Its value never depended on the `actor` field, which was
