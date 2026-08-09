@@ -42,6 +42,9 @@ dev = [
 
 [project.scripts]
 bystack = "bystack.main:main"
+# The operator's four decisions without a browser (ADR-0011's REST surface).
+# No new dependency: it is `urllib` and `argparse`.
+bystack-ctl = "bystack.ctl:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bystack"]

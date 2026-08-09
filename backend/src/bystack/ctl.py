@@ -1,0 +1,312 @@
+"""`bystack-ctl` — the operator's four decisions, without a browser.
+
+    bystack-ctl status                 # is this Controller healthy, and what does it see
+    bystack-ctl hosts                  # the fleet
+    bystack-ctl token                  # mint a join token, print the install command
+    bystack-ctl approve <engine-id>
+    bystack-ctl revoke <engine-id>
+
+ADR-0011 put the operator surface on four REST routes and MIGRATION §6.4 said
+a CLI over them was packaging work. This is it, and it is deliberately nothing
+more: every command here is one request to one route, and there is no state,
+no cache and no second opinion about anything. The dashboard drives the same
+routes; neither is the source of truth, because the Controller is.
+
+**Why it exists when there is already a dashboard.** The dashboard is on
+loopback by default, which means the person adding a host over ssh cannot
+reach it without forwarding a port. And the two things an operator most wants
+to automate -- mint a token, approve what comes back -- are exactly the two
+that are painful to do by clicking.
+
+**`urllib`, not `httpx`.** The runtime `httpx` dependency was deleted when the
+agentless path went (MIGRATION §6), because the Controller stopped making
+outbound HTTP calls. Putting an HTTP client back into every installation for a
+program most people run twice would undo that for a convenience, and the
+standard library is entirely adequate for five JSON requests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from typing import Any
+from urllib.parse import urljoin
+
+from bystack import __version__
+from bystack.api.app import API_PREFIX
+from bystack.config import Settings
+
+#: Where the Controller is, when nobody says. The API's own default bind.
+DEFAULT_URL = "http://127.0.0.1:8000"
+
+#: Long enough for a Controller that is busy, short enough that a wrong address
+#: is an error rather than a hang. Nothing here is a long-running request:
+#: minting a token is a signature and listing agents is a dictionary.
+TIMEOUT = 10.0
+
+
+class Failed(Exception):
+    """Something the operator needs to read, not a traceback."""
+
+
+def base_url(args: argparse.Namespace) -> str:
+    """Where to talk to, from the flag, the environment, or the config file.
+
+    Reading the *Controller's own* config is the interesting one and is why
+    `--config` exists: an operator on the Controller's host already has a file
+    naming the port, and asking them to repeat it in a flag is asking them to
+    keep two copies of one fact in step.
+
+    A configured `0.0.0.0` becomes loopback, because that is a bind address
+    rather than a destination -- "everywhere" is not somewhere to connect to,
+    and a CLI that dialled it would fail in a way that reads like the
+    Controller is down.
+    """
+    # Named with types rather than read straight off the namespace: argparse
+    # hands back `Any`, and this function's whole job is to return one string.
+    flag: str | None = args.url
+    config: str | None = args.config
+    if flag:
+        return flag
+    if config:
+        settings = Settings.load(config)
+        host = settings.api.host
+        if host in ("0.0.0.0", "::", ""):
+            host = "127.0.0.1"
+        return f"http://{host}:{settings.api.port}"
+    return os.environ.get("BYSTACK_URL", DEFAULT_URL)
+
+
+def call(url: str, path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
+    """One request, and an error a person can act on.
+
+    Every failure mode here has a different answer, so they are told apart
+    rather than collapsed into "request failed": a refused connection means the
+    Controller is not running or is somewhere else, a 404 on an agent means the
+    engine id is wrong, and a 4xx from the API carries a `detail` that was
+    written to be read.
+    """
+    request = urllib.request.Request(
+        urljoin(url, f"{API_PREFIX}{path}"),
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"content-type": "application/json"} if body is not None else {},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:  # noqa: S310
+            return json.loads(response.read() or "null")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        # A body we cannot parse is not a reason to lose the status line. The
+        # fallback below names the code and the route, which is enough to act
+        # on; raising out of the error handler would replace a bad message
+        # with a traceback.
+        with contextlib.suppress(ValueError, OSError):
+            detail = json.loads(exc.read()).get("detail", "")
+        raise Failed(detail or f"{exc.code} {exc.reason} from {path}") from exc
+    except urllib.error.URLError as exc:
+        raise Failed(
+            f"cannot reach a Controller at {url} ({exc.reason}).\n"
+            "  Is it running? Pass --url, or --config /etc/bystack/bystack.yaml."
+        ) from exc
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+
+def cmd_status(args: argparse.Namespace, url: str) -> int:
+    health = call(url, "/healthz")
+    terms = call(url, "/agents/enrollment")
+
+    if args.json:
+        print(json.dumps({"health": health, "enrollment": terms}, indent=2))
+        return 0
+
+    print(f"controller  {url}  ({health['status']})")
+    print(f"graph       {health['node_count']} node(s), {health['edge_count']} edge(s)")
+    print(f"read only   {'yes' if health['read_only'] else 'no'}")
+    local = terms["local_agent"]
+    print(f"this host   {local['state']} — {local['detail']}")
+    print(
+        f"fleet       {'listening on ' + terms['listen'] if terms['enabled'] else 'off'}"
+        f"{'  (auto-approve on)' if terms['auto_approve'] else ''}"
+    )
+    for provider in health["providers"]:
+        print(f"  {provider['id']:<24} {provider['state']}")
+    # A Controller that is up but sees nothing is the failure this exists to
+    # distinguish from one that is down, so it is answered rather than left as
+    # an empty list to interpret.
+    if not health["providers"]:
+        print("  (no providers — nothing is being observed)")
+    return 0
+
+
+def cmd_hosts(args: argparse.Namespace, url: str) -> int:
+    agents = call(url, "/agents")
+    if args.json:
+        print(json.dumps(agents, indent=2))
+        return 0
+
+    if not agents:
+        print("no hosts. Mint a token with `bystack-ctl token` to add one.")
+        return 0
+
+    # Measured rather than assumed. Engine IDs are a UUID on Docker 25 and
+    # later and a 64-hex string before it, normalized to 25 characters
+    # (`core/identity.py`) -- so any constant here is wrong for one of them,
+    # and a column that is too narrow does not truncate, it just destroys the
+    # alignment of every row after the longest one.
+    width = max(len("ENGINE ID"), *(len(agent["engine_id"]) for agent in agents))
+    print(f"{'ENGINE ID':<{width}} {'STATUS':<10} {'LINK':<12} {'VERSION':<9} CERTIFICATE")
+    for agent in agents:
+        link = "connected" if agent["connected"] else "offline"
+        if agent["local"]:
+            link += " (local)"
+        print(
+            f"{agent['engine_id']:<{width}} {agent['status']:<10} {link:<12} "
+            f"{agent['agent_version'] or '-':<9} {_expiry(agent['certificate_expires_at'])}"
+        )
+    # The one state that needs a person, said once rather than per row.
+    pending = [agent for agent in agents if agent["status"] == "pending"]
+    if pending:
+        print()
+        print(f"{len(pending)} awaiting approval. They contribute nothing until approved:")
+        for agent in pending:
+            print(f"  bystack-ctl approve {agent['engine_id']}")
+    return 0
+
+
+def cmd_token(args: argparse.Namespace, url: str) -> int:
+    minted = call(url, "/agents/tokens", method="POST", body={"ttl_minutes": args.ttl})
+    terms = call(url, "/agents/enrollment")
+
+    if args.json:
+        print(json.dumps(minted, indent=2))
+        return 0
+
+    print(minted["manual"] if args.manual else minted["install"])
+    print()
+    # Minutes, not a date. A join token lives for fifteen of them by design,
+    # and "2026-08-09 (0d)" is a true statement that answers nothing.
+    print(f"Expires in {_minutes(minted['expires_at'])}, single use.")
+    print("Shown once — the Controller keeps only a digest of it.")
+    if not terms["enabled"]:
+        # Minting succeeds whether or not the listener is bound, which is the
+        # exact gap `GET /agents/enrollment` was added to close for the UI. A
+        # CLI that printed a command with nothing to dial would be worse: at
+        # least the dialog is looked at by someone who is already here.
+        print()
+        print(f"WARNING: agents.enabled is false, so nothing is listening on {terms['listen']}.")
+        print("This command will fail at the dial, not at the token.")
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace, url: str) -> int:
+    agent = call(url, f"/agents/{args.engine_id}/approve", method="POST")
+    print(f"{agent['engine_id']} is {agent['status']}")
+    print("Takes effect on its next connection attempt, which is seconds away.")
+    return 0
+
+
+def cmd_revoke(args: argparse.Namespace, url: str) -> int:
+    agent = call(url, f"/agents/{args.engine_id}/revoke", method="POST")
+    print(f"{agent['engine_id']} is {agent['status']}")
+    # Said plainly because the opposite is a reasonable thing to assume, and
+    # assuming it during an incident is expensive.
+    print("A connected agent keeps its current stream; this refuses the next one.")
+    return 0
+
+
+def _minutes(unix: int) -> str:
+    """How long is left, for something whose whole lifetime is minutes."""
+    left = unix - int(dt.datetime.now(tz=dt.UTC).timestamp())
+    if left <= 0:
+        return "no time at all — it has already expired"
+    if left < 60:
+        return f"{left} seconds"
+    return f"{left // 60} minutes"
+
+
+def _expiry(unix: int) -> str:
+    """A timestamp as a date and a distance.
+
+    Both, because they answer different questions and an operator reading a
+    fleet list is usually asking the second one. Zero means there is no
+    certificate at all -- the Controller's own agent never enrolled -- and
+    printing the epoch for that would be a fabricated fact.
+    """
+    if not unix:
+        return "—"
+    when = dt.datetime.fromtimestamp(unix, tz=dt.UTC)
+    days = (when - dt.datetime.now(tz=dt.UTC)).days
+    return f"{when:%Y-%m-%d} ({'expired' if days < 0 else f'{days}d'})"
+
+
+# --------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bystack-ctl",
+        description="Talk to a ByStack Controller.",
+    )
+    parser.add_argument("--url", help=f"Controller base URL (default {DEFAULT_URL})")
+    parser.add_argument("--config", help="Read the address out of a Controller config file")
+    parser.add_argument("--json", action="store_true", help="Raw JSON instead of a table")
+    parser.add_argument("--version", action="version", version=f"bystack-ctl {__version__}")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("status", help="Health, what is observed, and whether hosts can join")
+    sub.add_parser("hosts", help="Every host this Controller manages")
+
+    token = sub.add_parser("token", help="Mint a join token and print the install command")
+    token.add_argument("--ttl", type=int, default=15, help="Minutes (default 15)")
+    token.add_argument(
+        "--manual",
+        action="store_true",
+        help="Print the command for a host that already has the agent binary",
+    )
+
+    for name, help_text in (
+        ("approve", "Let an enrolled agent contribute to the graph"),
+        ("revoke", "Stop trusting this host's certificate"),
+    ):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument("engine_id")
+
+    return parser
+
+
+COMMANDS = {
+    "status": cmd_status,
+    "hosts": cmd_hosts,
+    "token": cmd_token,
+    "approve": cmd_approve,
+    "revoke": cmd_revoke,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return COMMANDS[args.command](args, base_url(args))
+    except Failed as exc:
+        print(f"bystack-ctl: {exc}", file=sys.stderr)
+        return 1
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"bystack-ctl: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
