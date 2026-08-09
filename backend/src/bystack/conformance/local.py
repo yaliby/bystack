@@ -30,6 +30,7 @@ import contextlib
 import signal
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ from bystack.conformance.report import Check, report
 from bystack.core.identity import NodeKind, container_urn, engine_scope
 from bystack.core.ports.command import CommandKind, CommandRequest
 from bystack.main import local_listener
+from bystack.runtime import localagent
 from bystack.runtime.localagent import LocalAgentState
 
 C1 = "c" * 64
@@ -145,6 +147,7 @@ async def stopped_by_signal(agent_binary: Path) -> list[Check]:
             )
         )
 
+        started_stopping = time.monotonic()
         process.send_signal(signal.SIGTERM)
         try:
             await asyncio.wait_for(process.wait(), timeout=SETTLE)
@@ -153,6 +156,7 @@ async def stopped_by_signal(agent_binary: Path) -> list[Check]:
             exited = False
             process.kill()
             await process.wait()
+        took = time.monotonic() - started_stopping
 
         checks.append(
             Check(
@@ -161,6 +165,17 @@ async def stopped_by_signal(agent_binary: Path) -> list[Check]:
                 "to whoever asks why the unit is not running",
                 exited and process.returncode == 0,
                 f"exit status {process.returncode}" if exited else "did not exit",
+            )
+        )
+        checks.append(
+            Check(
+                "and it stops without the child having to be killed",
+                "the Controller SIGTERMs its local agent and waits STOP_GRACE before "
+                "SIGKILL, so an agent that ignores SIGTERM still produces a clean exit "
+                "-- five seconds late, every time. Elapsed time is the only thing that "
+                "tells the two apart from out here",
+                exited and took < localagent.STOP_GRACE,
+                f"{took:.2f}s, grace is {localagent.STOP_GRACE:.0f}s",
             )
         )
         checks.append(

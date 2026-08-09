@@ -253,6 +253,18 @@ async fn main() {
 
     let mut state = informer::State::default();
     let mut backoff = BACKOFF_MIN;
+    // Registered once, before the first connection, and kept for the life of
+    // the process. See `Shutdown` for why that is not a style choice.
+    let mut stopping = match Shutdown::listen() {
+        Ok(stopping) => stopping,
+        Err(e) => {
+            // Refusing to start beats starting unstoppably. A daemon a service
+            // manager cannot stop is one it can only kill, which turns every
+            // restart into an unclean one.
+            eprintln!("bystack-agent: cannot listen for stop signals: {e}");
+            std::process::exit(1);
+        }
+    };
 
     loop {
         tokio::select! {
@@ -265,14 +277,71 @@ async fn main() {
                 }
                 Ended::Disconnected(reason) => {
                     log(&format!("{reason}; reconnecting in {}s", backoff.as_secs()));
-                    tokio::time::sleep(backoff).await;
+                    // The backoff is a wait, not a commitment. Sleeping through
+                    // it plainly is what made a disconnected agent unstoppable
+                    // for up to a minute -- and a Controller shutting down
+                    // *closes the stream first*, so "disconnected" is precisely
+                    // the state every ordinary stop finds this process in.
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        _ = stopping.recv() => {
+                            log("shutting down");
+                            return;
+                        }
+                    }
                     backoff = (backoff * 2).min(BACKOFF_MAX);
                 }
             },
-            _ = tokio::signal::ctrl_c() => {
+            _ = stopping.recv() => {
                 log("shutting down");
                 return;
             }
+        }
+    }
+}
+
+/// Someone asking this process to stop.
+///
+/// **Both signals, not just the interactive one.** `ctrl_c` is SIGINT, which is
+/// what a terminal sends and what almost nothing else does. Every way this
+/// agent is actually deployed stops it with SIGTERM: `systemctl stop` sends it,
+/// `docker stop` sends it, and so does the Controller's own supervisor when it
+/// spawns one locally (`runtime/localagent.py`, `_terminate`).
+///
+/// **And registered once, for the life of the process**, which is the part that
+/// is not a style preference. A `Signal` stream only receives what arrives
+/// while it exists; one built inside the future a `select!` polls is dropped
+/// every time some *other* branch of that select completes first, and a signal
+/// delivered in the gap is delivered to nobody. In this agent the gap is not
+/// theoretical -- it is the reconnect backoff, which is exactly where an
+/// ordinary shutdown finds the process, because a Controller closes the stream
+/// on its way out and the agent's next move is to wait and redial.
+///
+/// The failure was quiet in the way these always are: the process did not
+/// react, and every caller escalates to SIGKILL eventually -- five seconds for
+/// the Controller, ninety for systemd's default. Nothing was ever reported as
+/// broken. Stopping simply took a suspiciously round number of seconds.
+struct Shutdown {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl Shutdown {
+    fn listen() -> std::io::Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    /// Cancel-safe, which is what lets it sit in a `select!` that some other
+    /// branch may win. Both `Signal::recv` calls are, and this adds nothing
+    /// that is not.
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {}
+            _ = self.terminate.recv() => {}
         }
     }
 }
