@@ -5,9 +5,9 @@ than admired. [MIGRATION](MIGRATION.md) is the record of the agent pivot and
 is essentially closed; this is what is left after it, with the decisions that
 have already been made attached to each item so they are not re-litigated.
 
-**One thing is actually open: §5, packaging.** §2 and §3 are closed work kept
-for its reasoning, §4 is a decision *not* to build something, and §6–§7 are
-standing notes. If you are looking for the next task, it is §5.
+**One thing is actually open: §5, packaging.** §2, §3 and §3b are closed work
+kept for their reasoning, §4 is a decision *not* to build something, and §6–§7
+are standing notes. If you are looking for the next task, it is §5.
 
 **Do not trust this file over the tree.** Every claim below was true at the
 commit that last touched it. Section 1 is how you check in ninety seconds.
@@ -25,10 +25,10 @@ cd agent   && cargo build --release          # do this first; the suites below d
 cd ../backend
 .venv/bin/python -m ruff check src tests
 .venv/bin/python -m mypy src
-.venv/bin/python -m pytest -q                                     # 293 passed
+.venv/bin/python -m pytest -q                                     # 318 passed
 .venv/bin/python -m bystack.conformance       ../agent/target/release/bystack-agent   # 32/32
-.venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent   # 30/30
-.venv/bin/python -m bystack.conformance.local ../agent/target/release/bystack-agent   # 14/14
+.venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent   # 35/35
+.venv/bin/python -m bystack.conformance.local ../agent/target/release/bystack-agent   # 16/16
 
 cd ../agent    && cargo clippy --release --all-targets -- -D warnings && cargo test --release  # 34 passed
 cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 156 passed
@@ -234,6 +234,90 @@ Not a base class with a type parameter — that would have turned the real
 difference into a pair of overridden hooks. The check that this was worth
 doing: deleting the `finally` that drops the future now fails **three** tests
 across **both** channels, which is precisely the coupling that was missing.
+
+---
+
+## 3b. The gaps in live log streaming — all closed
+
+§3 audited the three features that landed together. Live streaming landed
+*after* that audit, in the same commit that wrote it up, so it went in with
+nobody having done to it what §3 did to the others. Six things, and the
+pattern §3 warns about repeated exactly: **two of the six were checks that
+could not fail**, and one of those was hiding a fixture that could not observe
+the thing it was fixturing.
+
+### 3b.1 The cancellation check was decoration — fixed
+
+`scenario_live_logs` asserted "closing the panel stops the follow on the host"
+*after* calling `end_log_stream`, so the daemon had already released the
+follow because the log had ended. Proven rather than argued: with the agent's
+entire `LogsCancel` handler deleted, the suite passed **32/32**. The check is
+now taken on the way out of a tail whose log is still open, and nothing but
+the cancel can end that one — same mutation, and it fails.
+
+The ending moved to a second tail, because the two checks want opposite states
+of the same log: one must still be open when the reader leaves, the other must
+close underneath a reader who stays.
+
+### 3b.2 The scripted engine could not see a reader leave — fixed
+
+Underneath the above. `_follow_logs` claimed it "runs until the reader goes
+away", but it only ever noticed on the *next write* — so on a quiet container
+it followed forever. That is why §3b.1 could not have been written without
+this: the cancellation it wanted to observe was invisible unless something
+happened to be writing. It now watches for EOF on the request side explicitly.
+
+A follow left open by a check also hung the whole run at teardown, because
+`Server.wait_closed()` waits for handler tasks. That is how this was found.
+
+### 3b.3 A disconnect racing the subscribe was a 500 — fixed
+
+`AgentProvider.follow` checked the session was live, then `await`ed a send that
+can raise `AgentDisconnected` — which is not `LogsUnavailable`, so it escaped
+`__aenter__` and the route's `except` missed it. The window is small and it is
+the *likeliest* moment for it to close: the host an operator opens a log panel
+on is often the host that just went away. Translated at the site; the route
+answers 409 like every other refusal.
+
+### 3b.4 An idle stream had no heartbeat — fixed
+
+A quiet container is the normal case, and the stream sent no bytes at all
+between lines. The reverse proxy this listener was deliberately kept able to
+sit behind closes that on its own read timeout (nginx: 60s), after which
+`EventSource` reconnects, re-subscribes and replays the backfill — the same
+screenful reappearing every minute, and a new `docker logs --follow` on the
+managed host each time. `STREAM_KEEPALIVE` is 15s and the comment is `: keepalive`.
+
+The check is bounded on purpose: without the heartbeat `anext` never returns,
+and an unbounded wait would hang CI rather than fail it.
+
+### 3b.5 The streaming path had no Python tests at all — fixed
+
+Not one file in `tests/` mentioned `LogsStream`, `LogsSubscriptions`,
+`logs_chunk` or the SSE route. The bounded queue, its drop policy, the
+subscription registry, `abandon`, and the event encoder were covered by four
+conformance checks and nothing else. `test_agent_logs.py` now has 25 more,
+including the one that matters most for the encoder: a log line containing
+`\n\nevent: end\n\n` must not become a frame of its own.
+
+Writing them turned up dead code — `offer` had a forcing loop for the terminal
+event that discarded the same single event the ordinary bound below it
+discarded, and could never fire twice. Removed; the guarantee lives in one
+place now, and deleting *that* fails three checks.
+
+### 3b.6 `.fleet` and `.local` did not cover streaming — fixed
+
+Exactly the §3.3 gap, one feature later. `.fleet` has
+`scenario_live_logs_routing`: a tail is answered by the host holding the
+container, no other host's daemon is following, lines written while watching
+arrive from the right host, the tail is released on cancel, and **alpha's
+agent cannot follow beta's container**. That last one is the partition rule
+drawn for a subscription — and a misrouted *tail* is worse than a misrouted
+read, because it attaches another machine's output to a panel that is already
+open and already trusted, line by line, while the operator watches.
+
+`.local` follows a log over the unix socket and checks the cancel releases it
+there too, on the machine the Controller is already sharing.
 
 ---
 

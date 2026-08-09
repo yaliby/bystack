@@ -30,7 +30,9 @@ import contextlib
 import signal
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from bystack.api.app import build_context
 from bystack.config import AgentsConfig, LocalAgentConfig, Settings
@@ -64,6 +66,28 @@ async def until(predicate: object, within: float = SETTLE) -> bool:
             return True
         await asyncio.sleep(0.05)
     return bool(predicate())
+
+
+async def _await_line(stream: Any, matches: Callable[[Any], bool]) -> Any | None:
+    """The next event satisfying ``matches``, or ``None`` within the budget.
+
+    ``None`` rather than a raised ``TimeoutError``, for the reason the copies
+    in `runner.py` and `fleet.py` give: a tail that opens and then says
+    nothing is exactly the failure the check exists to catch, so it has to
+    arrive as a failed check rather than as a traceback that ends the run.
+    """
+    deadline = asyncio.get_running_loop().time() + SETTLE
+    while asyncio.get_running_loop().time() < deadline:
+        remaining = deadline - asyncio.get_running_loop().time()
+        try:
+            event = await asyncio.wait_for(stream.next(), timeout=remaining)
+        except TimeoutError:
+            return None
+        if matches(event):
+            return event
+        if event.done:
+            return None
+    return None
 
 
 async def stopped_by_signal(agent_binary: Path) -> list[Check]:
@@ -331,6 +355,59 @@ async def run(agent_binary: Path) -> int:
                 "local agent is the one sharing a machine with the Controller",
                 tailed is not None and tailed.ok and len(tailed.lines) < 3,
                 f"{len(tailed.lines) if tailed else '-'} line(s) for tail=1",
+            )
+        )
+
+        # -- and a live tail does too -------------------------------------
+        #
+        # The one-shot read above is a single request and a single response.
+        # A subscription is a different frame, an open connection to the
+        # daemon and a cancellation path, and none of that is exercised by
+        # the read that precedes it. It is worth carrying over this transport
+        # specifically: the local agent shares a machine with the Controller,
+        # so a follow that is never cancelled leaks a daemon connection on the
+        # operator's own box, and the zero-config path is the one a first-run
+        # user is on.
+
+        followed: list[tuple[bool, str]] = []
+        live_ok = False
+        released = False
+        if provider is not None:
+            async with provider.follow(C1, 100) as stream:
+                first = await _await_line(stream, lambda e: bool(e.lines))
+                if first is not None:
+                    followed = [(line.stderr, line.text) for line in first.lines]
+
+                await until(lambda: C1 in engine.following, 5.0)
+                engine.logs[C1].append((True, "written while watching"))
+                fresh = await _await_line(
+                    stream,
+                    lambda e: any("while watching" in line.text for line in e.lines),
+                )
+                live_ok = fresh is not None
+
+            released = await until(lambda: C1 not in engine.following, 5.0)
+
+        checks.append(
+            Check(
+                "a live tail follows over the local socket",
+                "the panel opens a stream, not a one-shot read, so the path a first-run "
+                "user actually exercises is this one; a backfill that arrives and then "
+                "goes silent looks exactly like a container with nothing to say",
+                (False, "listening on :80") in followed and live_ok,
+                f"{len(followed)} backfilled, "
+                f"{'live line arrived' if live_ok else 'nothing arrived while watching'}",
+            )
+        )
+
+        checks.append(
+            Check(
+                "and closing it stops the follow on this machine too",
+                "an uncancelled follow is a daemon connection held open for a panel "
+                "nobody is looking at -- on the operator's own machine, where the "
+                "Controller is already spending that memory",
+                released,
+                "the daemon connection was dropped" if released else "still following",
             )
         )
 

@@ -165,7 +165,7 @@ class ScriptedEngine:
             query = parse_qs(target.query)
             self.recorded.calls.append(path)
 
-            await self._route(method, path, query, writer)
+            await self._route(method, path, query, reader, writer)
         except (ConnectionError, asyncio.IncompleteReadError):
             return
         finally:
@@ -178,6 +178,7 @@ class ScriptedEngine:
         method: str,
         path: str,
         query: dict[str, list[str]],
+        reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
         if path == "/events":
@@ -194,7 +195,7 @@ class ScriptedEngine:
         parts = path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "containers":
             if parts[2] == "logs":
-                await self._logs(parts[1], query, writer)
+                await self._logs(parts[1], query, reader, writer)
                 return
             if parts[2] == "json":
                 await self._inspect(parts[1], writer)
@@ -258,7 +259,11 @@ class ScriptedEngine:
         await _raw(writer, 204, b"")
 
     async def _logs(
-        self, container_id: str, query: dict[str, list[str]], writer: asyncio.StreamWriter
+        self,
+        container_id: str,
+        query: dict[str, list[str]],
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
     ) -> None:
         """``GET /containers/{id}/logs``, in Docker's multiplexed framing.
 
@@ -282,7 +287,7 @@ class ScriptedEngine:
         tail = int(query.get("tail", [str(len(lines))])[0] or len(lines))
 
         if query.get("follow", ["0"])[0] in ("1", "true"):
-            await self._follow_logs(container_id, tail, writer)
+            await self._follow_logs(container_id, tail, reader, writer)
             return
 
         # Tailed per stream and then restored to write order, which is what
@@ -295,7 +300,11 @@ class ScriptedEngine:
         await _raw(writer, 200, b"".join(_frame(*lines[i]) for i in sorted(kept)))
 
     async def _follow_logs(
-        self, container_id: str, tail: int, writer: asyncio.StreamWriter
+        self,
+        container_id: str,
+        tail: int,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
     ) -> None:
         """``GET /containers/{id}/logs?follow=1``: backfill, then keep going.
 
@@ -304,10 +313,14 @@ class ScriptedEngine:
         do not line up with chunk boundaries. A fixture that sent the whole
         thing at once would never exercise that.
 
-        Ends when `end_log_stream` is called for this container, which is how
-        a check drives "the container exited" without a container. Otherwise
-        it runs until the reader goes away -- and the reader going away is the
-        cancellation path worth testing, so nothing here times out on its own.
+        Ends two ways, and it needs both. `end_log_stream` is how a check
+        drives "the container exited" without a container. **The reader going
+        away** is the cancellation path, and it is watched explicitly rather
+        than discovered on the next write: a quiet container never writes, so
+        a loop that only noticed a broken pipe would keep following a log
+        nobody is reading until something happened to say. That left the
+        cancellation observable only on a container that was still producing
+        output -- which is not the container an operator closes the panel on.
         """
         head = (
             b"HTTP/1.1 200 OK\r\n"
@@ -324,8 +337,12 @@ class ScriptedEngine:
         await writer.drain()
         self.following.add(container_id)
 
+        # Completes on EOF, which is what the agent dropping its end of the
+        # socket looks like from here. Nothing is ever sent on this connection
+        # after the request, so anything at all arriving means the peer closed.
+        departed = asyncio.ensure_future(reader.read(1))
         try:
-            while container_id not in self._ended_streams:
+            while container_id not in self._ended_streams and not departed.done():
                 lines = self.logs.get(container_id, [])
                 if len(lines) > sent:
                     fresh = lines[sent:]
@@ -333,13 +350,15 @@ class ScriptedEngine:
                     writer.write(_chunked(b"".join(_frame(s, t) for s, t in fresh)))
                     await writer.drain()
                 await asyncio.sleep(0.05)
-            writer.write(b"0\r\n\r\n")  # the terminating chunk
-            await writer.drain()
+            if not departed.done():
+                writer.write(b"0\r\n\r\n")  # the terminating chunk
+                await writer.drain()
         except (ConnectionResetError, BrokenPipeError):
             # The agent cancelled by dropping the connection, which is exactly
             # what a `LogsCancel` is supposed to cause.
             pass
         finally:
+            departed.cancel()
             self.following.discard(container_id)
 
     def end_log_stream(self, container_id: str) -> None:

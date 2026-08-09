@@ -600,20 +600,13 @@ async def scenario_live_logs(h: Harness) -> None:
             "arrived, still tagged stderr" if appeared else "never arrived",
         )
 
-        h.engine.end_log_stream(container_id)
-        ended = await _await_line(stream, lambda e: e.done) is not None
-
-        h.record(
-            "a log that ends says so",
-            "silence after a container exits is indistinguishable from silence "
-            "while it runs, and the operator needs to know which one they are watching",
-            ended,
-            "terminal chunk received" if ended else "the stream never ended",
-        )
-
-    # Leaving the context cancels. The agent must drop the connection to the
-    # daemon, or every panel an operator ever opened is still costing that
-    # host a `docker logs --follow`.
+    # Cancellation is checked *here*, on the way out of a tail whose log is
+    # still open, and the ordering is the point. It used to sit after
+    # `end_log_stream` below, where it proved nothing: the daemon had already
+    # stopped following because the log had ended, so the check passed
+    # identically whether or not the cancel ever arrived -- it stayed green
+    # with the agent's entire `LogsCancel` handler deleted. Nothing can end
+    # this one except the cancel.
     released = await h.until(lambda: container_id not in h.engine.following)
     h.record(
         "and closing the panel stops the follow on the host",
@@ -622,6 +615,22 @@ async def scenario_live_logs(h: Harness) -> None:
         released,
         "the daemon connection was dropped" if released else "still following",
     )
+
+    # A second tail, for the ending. Separate from the one above because the
+    # two want opposite states of the same log: one must still be open when
+    # the reader leaves, the other must close underneath a reader who stays.
+    async with provider.follow(container_id, 100) as ending:
+        await h.until(lambda: container_id in h.engine.following)
+        h.engine.end_log_stream(container_id)
+        ended = await _await_line(ending, lambda e: e.done) is not None
+
+        h.record(
+            "a log that ends says so",
+            "silence after a container exits is indistinguishable from silence "
+            "while it runs, and the operator needs to know which one they are watching",
+            ended,
+            "terminal chunk received" if ended else "the stream never ended",
+        )
 
 
 async def scenario_reconnect(h: Harness) -> None:

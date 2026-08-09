@@ -709,6 +709,127 @@ async def scenario_logs_routing(h: Harness) -> None:
     )
 
 
+async def _await_line(stream: Any, matches: Callable[[Any], bool]) -> Any | None:
+    """The next event satisfying ``matches``, or ``None`` within the budget.
+
+    ``None`` rather than a raised ``TimeoutError``, for the reason the copy in
+    `runner.py` gives: a stream that opens and then says nothing is exactly the
+    failure these checks exist to catch, so it must arrive as a failed check
+    with the other checks still running, not as a traceback that ends the run.
+    """
+    deadline = asyncio.get_running_loop().time() + SETTLE
+    while asyncio.get_running_loop().time() < deadline:
+        remaining = deadline - asyncio.get_running_loop().time()
+        try:
+            event = await asyncio.wait_for(stream.next(), timeout=remaining)
+        except TimeoutError:
+            return None
+        if matches(event):
+            return event
+        if event.done:
+            return None
+    return None
+
+
+async def scenario_live_logs_routing(h: Harness) -> None:
+    """A *live* tail must be answered by the host that holds the container.
+
+    `scenario_logs_routing` above pins this for the one-shot read, and none of
+    it carries over. A subscription is a different frame, a different lifetime
+    and — the part that matters here — a different thing to get wrong: the
+    one-shot read is routed once and answered once, while a tail routes every
+    chunk that arrives for as long as it is open, through a correlation map
+    shared by every subscription on that connection.
+
+    So the misrouting this looks for is worse than the one-shot version. That
+    one hands the operator another machine's output once. This one can attach
+    another machine's output to a panel that is already open and already
+    trusted, line by line, while they watch it.
+    """
+    alpha, beta = h.hosts["alpha"], h.hosts["beta"]
+    assert alpha.engine is not None and beta.engine is not None
+
+    for host in (alpha, beta):
+        assert host.engine is not None
+        for container in host.containers:
+            host.engine.logs[container["Id"]] = [(False, f"serving from {host.name}")]
+
+    target = next(iter(h.containers_on(beta)))
+    container_id = target.urn.segments[-1]
+
+    async with h.provider(beta).follow(container_id, 100) as stream:
+        first = await _await_line(stream, lambda e: bool(e.lines))
+        text = " ".join(line.text for line in first.lines) if first else ""
+
+        h.record(
+            "a live tail is answered by the host that holds the container",
+            "a tail routes every chunk for as long as it is open, so a "
+            "misrouting here feeds another machine's output into a panel the "
+            "operator is already watching",
+            first is not None and "beta" in text and "alpha" not in text,
+            text[:60] if text else "nothing arrived",
+        )
+
+        # Only beta's daemon should be following. `following` is the scripted
+        # engine's record of open `logs?follow=1` connections, so this asks the
+        # question at the daemon rather than at the Controller's bookkeeping.
+        h.record(
+            "and no other host's daemon is following",
+            "a tail that fans out holds an open connection on every uplink in "
+            "the fleet for a container on one of them",
+            container_id in beta.engine.following and not alpha.engine.following,
+            f"beta={sorted(beta.engine.following)!r} alpha={sorted(alpha.engine.following)!r}",
+        )
+
+        # Written after the subscription is open: the half a one-shot read
+        # cannot do, checked here for the *right host* rather than at all.
+        beta.engine.logs[container_id].append((True, "beta: written while watching"))
+        live = await _await_line(
+            stream, lambda e: any("while watching" in line.text for line in e.lines)
+        )
+        h.record(
+            "and lines written while watching arrive from it",
+            "a tail that only ever delivers the backfill is a slower one-shot "
+            "read wearing the interface of a live one",
+            live is not None
+            and all("beta" in line.text for line in live.lines),
+            "arrived from beta" if live else "never arrived",
+        )
+
+    # Leaving the tail releases it on the host that had it, and only there.
+    assert alpha.engine is not None and beta.engine is not None
+    released = await h.until(lambda: container_id not in beta.engine.following)  # type: ignore[union-attr]
+    h.record(
+        "and closing it releases the follow on that host",
+        "the same cancellation the single-agent suite pins, asked of a fleet: "
+        "a leak here costs an open daemon connection on a machine the operator "
+        "has navigated away from",
+        released and not alpha.engine.following,
+        f"beta={sorted(beta.engine.following)!r} alpha={sorted(alpha.engine.following)!r}",
+    )
+
+    # The partition rule, for live reads. `PartitionWriter` stops an agent
+    # writing another host's entities and `scenario_logs_routing` draws the
+    # same line for a one-shot read; nothing had drawn it for a subscription,
+    # which is the longest-lived way to be wrong about it.
+    beta.engine.recorded.calls.clear()
+    async with h.provider(alpha).follow(container_id, 100) as stream:
+        ended = await _await_line(stream, lambda e: e.done)
+
+    # Refused, and beta's daemon never consulted about it. The refusal must
+    # carry a reason: an empty terminal chunk is indistinguishable from a
+    # container that had nothing to say, which is the plausible-looking wrong
+    # answer this whole scenario exists to rule out.
+    beta_untouched = not any(call.endswith("/logs") for call in beta.engine.recorded.calls)
+    h.record(
+        "one host's agent cannot follow another's container",
+        "an agent that opened a tail for an id it does not own would make "
+        "every enrolled host a live window onto every other one",
+        ended is not None and bool(ended.reason) and beta_untouched,
+        (ended.reason if ended and ended.reason else "no refusal arrived")[:70],
+    )
+
+
 async def scenario_read_only_agent(h: Harness) -> None:
     """gamma's agent refuses regardless of what arrives on the wire.
 
@@ -803,6 +924,7 @@ SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("no resurrection", scenario_no_resurrection),
     ("command routing", scenario_command_routing),
     ("logs routing", scenario_logs_routing),
+    ("live logs routing", scenario_live_logs_routing),
     ("logical fan-out", scenario_logical_fanout),
     ("read-only agent", scenario_read_only_agent),
 ]
