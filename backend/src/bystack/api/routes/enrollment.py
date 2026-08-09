@@ -18,6 +18,7 @@ import datetime as dt
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from bystack import __version__
 from bystack.api.deps import Context
 from bystack.core.identity import engine_scope
 from bystack.core.ports.provider import ProviderState
@@ -37,6 +38,23 @@ DEFAULT_TTL_MINUTES = 15
 #: extra steps.
 MAX_TTL_MINUTES = 24 * 60
 
+#: Where the pasted command fetches `scripts/install-agent.sh` from.
+#:
+#: Pinned to this Controller's version rather than to a branch, so a host added
+#: today gets the installer that shipped with the Controller it is joining. A
+#: `main` URL would mean the command an operator copies changes underneath them
+#: between one host and the next.
+#:
+#: **The Controller cannot serve this itself**, which is worth stating because
+#: it looks like an obvious improvement. The port a new host can reach is the
+#: fleet listener, and that one requires a client certificate the host does not
+#: have yet -- that is the whole shape of ADR-0011. The browser-facing port is
+#: on loopback by default. So the script comes from where releases come from,
+#: and `--binary` is the escape hatch for a network with no egress.
+INSTALLER_URL = (
+    f"https://raw.githubusercontent.com/yaliby/bystack/v{__version__}/scripts/install-agent.sh"
+)
+
 
 class TokenIn(BaseModel):
     ttl_minutes: int = Field(default=DEFAULT_TTL_MINUTES, ge=1, le=MAX_TTL_MINUTES)
@@ -52,6 +70,16 @@ class TokenOut(BaseModel):
     Shown once and never retrievable, because the Controller keeps only a
     digest -- and because a token you can go back and read again is a token
     that is worth stealing for longer than it is alive.
+    """
+
+    manual: str
+    """The same thing for a machine that already has the binary.
+
+    Both are offered because they answer different questions. The first is for
+    a host that has nothing on it, which is the case the dashboard's button
+    exists for. This one is for a host where the agent is already installed --
+    a re-enrolment after a rebuild, or a fleet that distributes binaries by
+    configuration management and would not thank us for a curl to GitHub.
     """
 
 
@@ -187,14 +215,16 @@ async def mint_token(body: TokenIn, context: Context) -> TokenOut:
     reachable = context.settings.agents.server_names[0] if (
         host in ("0.0.0.0", "::", "")
     ) else host
+    url = f"wss://{reachable}:{port}"
     return TokenOut(
         token=minted.token,
         expires_at=minted.expires_at_unix,
         ca_fingerprint=context.trust.ca.fingerprint,
         install=(
-            f"bystack-agent --controller wss://{reachable}:{port}"
-            f" --token {minted.token}"
+            f"curl -fsSL {INSTALLER_URL} | sudo sh -s --"
+            f" --controller {url} --token {minted.token}"
         ),
+        manual=f"bystack-agent --controller {url} --token {minted.token}",
     )
 
 

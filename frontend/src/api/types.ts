@@ -244,6 +244,8 @@ export interface JoinToken {
   readonly ca_fingerprint: string;
   /** The command to paste, composed by the Controller. Never assembled here. */
   readonly install: string;
+  /** The same, for a host that already has the binary. Also the Controller's. */
+  readonly manual: string;
 }
 
 /** Whether a host can join at all, and on what terms. Configuration, not state. */

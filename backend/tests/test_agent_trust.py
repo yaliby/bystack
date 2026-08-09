@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from tests.conftest import Controller, make_controller, make_csr
 
+from bystack import __version__
 from bystack.agent.v1 import agent_pb2 as wire
 from bystack.api.app import API_PREFIX
 from bystack.api.tls import _tls_extension, peer_certificate_pem
@@ -656,6 +657,33 @@ def test_an_operator_can_mint_approve_and_revoke(tmp_path: Path) -> None:
             "revoked"
         )
         assert browser.post(f"{API_PREFIX}/agents/nobody/approve").status_code == 404
+
+
+def test_the_pasted_command_installs_something_that_exists(tmp_path: Path) -> None:
+    """The command the dashboard hands out has to be runnable on a bare host.
+
+    It used to be `bystack-agent --controller … --token …`, which assumes a
+    binary that is not there -- the button handed you a command you could not
+    yet run, and that was step 7's whole claim on the product rather than on
+    the release. Both forms are checked because they are different promises:
+    one fetches the installer, and one is for a host that already has the
+    agent.
+    """
+    controller = make_controller(tmp_path)
+
+    with TestClient(controller.ui) as browser:
+        minted = browser.post(f"{API_PREFIX}/agents/tokens", json={"ttl_minutes": 15}).json()
+
+    for form in (minted["install"], minted["manual"]):
+        assert minted["token"] in form
+        assert "wss://" in form
+
+    assert "install-agent.sh" in minted["install"]
+    # Pinned to a released tag, not to a branch. A `main` URL would mean the
+    # command an operator copies changes underneath them between one host and
+    # the next.
+    assert f"/v{__version__}/" in minted["install"]
+    assert minted["manual"].startswith("bystack-agent ")
 
 
 def test_an_unknown_verdict_never_reaches_the_admitted_branch() -> None:

@@ -1404,6 +1404,32 @@ body {
   font-size: 11px;
 }
 
+/* The second install command, folded away. It answers a different question --
+   "the agent is already on that host" -- and putting both at the same weight
+   would make the first decision on this screen a choice between two things
+   most people meet once. */
+.modal__note > summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--ink-muted);
+}
+
+.modal__note > summary:hover {
+  color: var(--ink);
+}
+
+.modal__note[open] > summary {
+  margin-bottom: 9px;
+}
+
+.modal__note .token {
+  margin: 0;
+}
+
+.modal__note p {
+  margin: 9px 0 0;
+}
+
 .modal__warn {
   margin: 12px 0 0;
   padding: 9px 11px;

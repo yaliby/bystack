@@ -25,7 +25,8 @@ interface Props {
 
 export function AddHostDialog({ token, autoApprove, onClose }: Props) {
   const [now, setNow] = useState(() => Date.now());
-  const [copied, setCopied] = useState(false);
+  /** Which command was last copied, if any. Two buttons, one answer. */
+  const [copied, setCopied] = useState<'install' | 'manual' | null>(null);
   const [clipboardFailed, setClipboardFailed] = useState(false);
 
   const life = tokenLife(token.expires_at, now);
@@ -39,14 +40,14 @@ export function AddHostDialog({ token, autoApprove, onClose }: Props) {
 
   useEffect(() => {
     if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 2_000);
+    const timer = window.setTimeout(() => setCopied(null), 2_000);
     return () => window.clearTimeout(timer);
   }, [copied]);
 
-  const copy = async () => {
+  const copy = async (which: 'install' | 'manual') => {
     try {
-      await navigator.clipboard.writeText(token.install);
-      setCopied(true);
+      await navigator.clipboard.writeText(which === 'install' ? token.install : token.manual);
+      setCopied(which);
       setClipboardFailed(false);
     } catch {
       // Denied permission, or an insecure origin. The command is in a
@@ -66,8 +67,9 @@ export function AddHostDialog({ token, autoApprove, onClose }: Props) {
         </header>
 
         <p className="modal__lead">
-          Run this on the machine you want to manage. The agent generates its own key,
-          never sends it, and dials the Controller — nothing needs to reach the host.
+          Run this on the machine you want to manage. It installs the agent as a service,
+          which then generates its own key, never sends it, and dials the Controller —
+          nothing needs to reach the host.
         </p>
 
         <div className="token">
@@ -78,8 +80,8 @@ export function AddHostDialog({ token, autoApprove, onClose }: Props) {
             aria-label="Install command"
             onFocus={(event) => event.currentTarget.select()}
           />
-          <button type="button" className="control token__copy" onClick={() => void copy()}>
-            {copied ? 'Copied' : 'Copy'}
+          <button type="button" className="control token__copy" onClick={() => void copy('install')}>
+            {copied === 'install' ? 'Copied' : 'Copy'}
           </button>
         </div>
 
@@ -90,12 +92,30 @@ export function AddHostDialog({ token, autoApprove, onClose }: Props) {
           </p>
         ) : null}
 
-        {/* The known gap, named rather than papered over with a download link
-            that would 404. Packaging is tracked separately (MIGRATION §6.7). */}
-        <p className="modal__note">
-          Assumes <code>bystack-agent</code> is already on that host. There is no installer
-          yet; build it with <code>cargo build --release</code> in <code>agent/</code>.
-        </p>
+        {/* Second, and folded away, because it answers a different question:
+            the host already has the binary. Offering both at the same size
+            would make the first decision on this screen "which of these am I",
+            for a distinction most people meet once. */}
+        <details className="modal__note">
+          <summary>The agent is already on that host</summary>
+          <div className="token">
+            <input
+              className="token__command"
+              readOnly
+              value={token.manual}
+              aria-label="Command for a host that already has the agent"
+              onFocus={(event) => event.currentTarget.select()}
+            />
+            <button type="button" className="control token__copy" onClick={() => void copy('manual')}>
+              {copied === 'manual' ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <p>
+            Also what to use on a network with no route to GitHub: build the binary with{' '}
+            <code>scripts/build-agent.sh</code>, copy it over, and run{' '}
+            <code>install-agent.sh --binary</code> to get the service as well.
+          </p>
+        </details>
 
         <p className="modal__warn">
           This token is shown once. The Controller keeps only a digest of it, so closing
