@@ -73,13 +73,29 @@ The dashboard is bound to loopback on purpose — nothing asks a browser for a
 password, so the Controller does not put itself on your network without being
 told to. Two ways to reach it:
 
-**Forward the port** (nothing changes on the server, works over any SSH):
+**Forward the port** (nothing changes on the server, works over any SSH). Run
+this on *your* machine, not on the server:
 
 ```bash
-ssh -N -L 8000:127.0.0.1:8000 you@your-server
+ssh -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8000 you@your-server
 ```
 
-Leave that running and open <http://127.0.0.1:8000> on your own machine.
+Leave it running and open <http://127.0.0.1:8080>.
+
+The two numbers are two different machines. `8080` is a port on your own
+machine and you can pick any free one; `127.0.0.1:8000` is what the Controller
+listens on over there and does not change. 8080 rather than 8000 on purpose —
+if you also have a Controller running locally, it already holds 8000, and
+`bind [127.0.0.1]:8000: Address already in use` is that collision on *your*
+side, not a problem with the server.
+
+`ExitOnForwardFailure=yes` is not optional dressing. Without it, ssh that
+cannot bind IPv4 will happily bind `[::1]` alone and keep running, leaving
+`http://localhost:8000` pointing at either machine depending on which address
+your browser resolves first — a much worse afternoon than an error message.
+
+And `you@your-server` is a hostname, not a URL: `yali@192.168.1.224`, never
+`yali@http://192.168.1.224/`.
 
 **Or publish it**, if you trust every machine that can reach that server:
 
@@ -163,6 +179,8 @@ ssh you@newserver 'sudo sh /tmp/install-agent.sh --binary /tmp/bystack-agent-x86
 | --- | --- |
 | `open .../compose.yaml: no such file or directory` | You are not in the `bystack` directory. `cd` into the clone. |
 | `port is already allocated` | Something already holds 8000 or 8443 on this machine. `ss -ltnp \| grep -E ':8000\|:8443'`. |
+| `bind [127.0.0.1]:8000: Address already in use` | From `ssh -L`, and it is about *your* machine, not the server. Pick another local port: `-L 8080:127.0.0.1:8000`. |
+| `ssh: Could not resolve hostname http://…` | `ssh` takes `user@host`, not a URL. Drop the `http://` and the trailing slash. |
 | Browser cannot connect at all | The port is on loopback. See Step 2. |
 | The map is completely empty | The Docker socket group. See below. |
 | The pasted `curl` in Step 3 returns 404 | No release has been published for this Controller's version yet. Tag one (`git tag v0.1.0 && git push origin v0.1.0`) or use the `--binary` form above. |

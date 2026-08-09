@@ -243,16 +243,29 @@ docker compose up -d --build</pre>
       <span data-lang="en">If you installed on a server you reach over SSH:</span>
     </p>
     <p>
-      <span data-lang="he">הדשבורד מאזין ב־loopback בכוונה — שום דבר לא מבקש סיסמה מהדפדפן, אז המרכז לא חושף את עצמו לרשת בלי שביקשתם. מריצים אצלכם במחשב:</span>
-      <span data-lang="en">The dashboard binds to loopback on purpose — nothing asks a browser for a password, so the Controller does not put itself on your network unasked. On your own machine, run:</span>
+      <span data-lang="he">הדשבורד מאזין ב־loopback בכוונה — שום דבר לא מבקש סיסמה מהדפדפן, אז המרכז לא חושף את עצמו לרשת בלי שביקשתם. מריצים <b>אצלכם במחשב</b>, לא על השרת:</span>
+      <span data-lang="en">The dashboard binds to loopback on purpose — nothing asks a browser for a password, so the Controller does not put itself on your network unasked. Run this <b>on your own machine</b>, not on the server:</span>
     </p>
     <div class="code" data-lang="both">
       <button class="copy" onclick="copyCode(this)">Copy</button>
-      <pre>ssh -N -L 8000:127.0.0.1:8000 you@your-server</pre>
+      <pre>ssh -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8000 you@your-server</pre>
     </div>
     <p>
-      <span data-lang="he">משאירים את זה רץ, ופותחים <code class="inline">http://127.0.0.1:8000</code>. לחלופין, אם אתם סומכים על כל מי שמגיע לשרת הזה — <code class="inline">echo "BYSTACK_BIND=0.0.0.0" &gt;&gt; .env</code> ואז <code class="inline">docker compose up -d</code>, ואז <code class="inline">http://&lt;server-ip&gt;:8000</code>. רק ברשת פרטית.</span>
-      <span data-lang="en">Leave it running and open <code class="inline">http://127.0.0.1:8000</code>. Or, if you trust every machine that can reach that server — <code class="inline">echo "BYSTACK_BIND=0.0.0.0" &gt;&gt; .env</code> then <code class="inline">docker compose up -d</code>, and open <code class="inline">http://&lt;server-ip&gt;:8000</code>. Private networks only.</span>
+      <span data-lang="he">משאירים את זה רץ, ופותחים <code class="inline">http://127.0.0.1:8080</code>.</span>
+      <span data-lang="en">Leave it running and open <code class="inline">http://127.0.0.1:8080</code>.</span>
+    </p>
+
+    <div class="callout">
+      <span class="ico">💡</span>
+      <span>
+        <span data-lang="he">שני המספרים הם שתי מכונות שונות. <code>8080</code> הוא פורט <b>אצלכם</b> ואפשר לבחור כל פורט פנוי; <code>127.0.0.1:8000</code> זה מה שהמרכז מאזין לו <b>שם</b>. אם תקבלו <code>Address already in use</code> — זו התנגשות אצלכם, לא בשרת: תבחרו מספר שמאלי אחר. ו‑<code>you@your-server</code> זה שם מארח, לא כתובת URL — <code>yali@192.168.1.224</code>, בלי <code>http://</code>.</span>
+        <span data-lang="en">The two numbers are two different machines. <code>8080</code> is a port on <b>your</b> machine — pick any free one; <code>127.0.0.1:8000</code> is what the Controller listens on <b>over there</b>. An <code>Address already in use</code> is a collision on your side, not the server's: pick a different left-hand number. And <code>you@your-server</code> is a hostname, not a URL — <code>yali@192.168.1.224</code>, no <code>http://</code>.</span>
+      </span>
+    </div>
+
+    <p>
+      <span data-lang="he">לחלופין, אם אתם סומכים על כל מי שמגיע לשרת הזה — <code class="inline">echo "BYSTACK_BIND=0.0.0.0" &gt;&gt; .env</code> ואז <code class="inline">docker compose up -d</code>, ואז <code class="inline">http://&lt;server-ip&gt;:8000</code>. רק ברשת פרטית.</span>
+      <span data-lang="en">Or, if you trust every machine that can reach that server — <code class="inline">echo "BYSTACK_BIND=0.0.0.0" &gt;&gt; .env</code> then <code class="inline">docker compose up -d</code>, and open <code class="inline">http://&lt;server-ip&gt;:8000</code>. Private networks only.</span>
     </p>
     <p>
       <span data-lang="he">כבר תראו שם את הקונטיינרים של אותה מכונה — המרכז מנהל את עצמו אוטומטית, אז אף פעם לא מוסיפים אותו כשרת.</span>
