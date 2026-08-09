@@ -2,7 +2,7 @@
  * Layered topology layout via ELK — positions + routed edge polylines.
  */
 
-import ELK, { type ElkExtendedEdge, type ElkNode } from 'elkjs/lib/elk.bundled.js';
+import type { ELK, ElkExtendedEdge, ElkNode } from 'elkjs/lib/elk-api';
 import type { GraphEdge, GraphNode, Urn } from '../../../api/types';
 import { extractEdgePolylines } from './edgePaths';
 import { NODE_SIZE, shapeOf } from './geometry';
@@ -13,7 +13,27 @@ export interface Point {
   y: number;
 }
 
-const elk = new ELK();
+/**
+ * The solver, fetched the first time something needs laying out.
+ *
+ * ELK is two thirds of the application by weight — a GWT-compiled Java layout
+ * engine, and there is no smaller build of it. Loading it up front means the
+ * dashboard cannot paint anything until the whole of it has arrived, which is
+ * backwards: the first frame is a header, a status bar and an empty canvas,
+ * none of which need a solver.
+ *
+ * Deferring it costs nothing in wall-clock terms because the caller is already
+ * `async` and the first layout waits on the graph arriving over the stream.
+ * The promise is kept rather than the instance so that two calls that race —
+ * which the first snapshot and the first delta routinely do — share one fetch
+ * instead of instantiating two engines.
+ */
+let engine: Promise<ELK> | null = null;
+
+function solver(): Promise<ELK> {
+  engine ??= import('elkjs/lib/elk.bundled.js').then((module) => new module.default());
+  return engine;
+}
 
 const GROUP_PAD = { top: 42, left: 24, bottom: 24, right: 24 };
 
@@ -241,7 +261,7 @@ export async function layoutPrepared(prepared: TopologyGraph): Promise<LayoutSna
     edges: rootEdges,
   };
 
-  const laid = await elk.layout(graph);
+  const laid = await (await solver()).layout(graph);
   const positions = new Map<Urn, Point>();
   const groupBounds = new Map<Urn, { x: number; y: number; width: number; height: number }>();
   const rawPaths = new Map<string, Point[]>();
