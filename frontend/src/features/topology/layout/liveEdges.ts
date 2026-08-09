@@ -21,6 +21,41 @@ const MARGIN = 18;
  * picture.
  */
 const STICKY_QUANT = 10;
+/**
+ * How much shorter a rival corridor must be before the wire actually moves to it.
+ *
+ * A VHV and an HVH elbow between the same two cards are the *same* Manhattan
+ * length, so "pick the shortest" is a coin toss decided by the port offsets —
+ * and it lands differently every time the quantizer lets the search run again.
+ * That was the flicker: the card slid two pixels and the link snapped to the
+ * other side of the rectangle, back and forth, for the whole drag.
+ *
+ * The corridor in use has to be beaten by a real margin, so a tie keeps the
+ * wire where the eye last saw it. Only clearance overrules the margin — see
+ * `solveRoute`.
+ */
+const SWITCH_MARGIN = 0.2;
+const SWITCH_MARGIN_PX = 40;
+/**
+ * How far a card must overtake its neighbour before the two swap fan slots.
+ *
+ * Slot order is what spreads links across a shared card, so a swap moves both
+ * wires by a whole PORT at once. Ordering on raw position re-decided that on
+ * every frame near the crossing, which made the two stubs trade places over
+ * and over while the card was still sliding past.
+ */
+const SLOT_HYSTERESIS = 26;
+/**
+ * How far a card must eat into the corridor in use before the wire gives it up.
+ *
+ * Clearance is measured against a card inflated by `PAD`, so a wire "hits" a
+ * card it is merely passing near. Judging the corridor already on screen by
+ * that same hairline meant every card that drifted alongside a link during a
+ * drag threw it onto a detour and then handed it back — a re-route each way.
+ * A wire riding close to a card for a moment is nothing; a wire drawn through
+ * one is the thing worth a jump, so only the second kind moves it.
+ */
+const HOLD_SLACK = 18;
 
 export interface RouteEdge {
   readonly key: string;
@@ -45,10 +80,13 @@ interface StickyEntry {
 }
 
 const stickyRoutes = new Map<string, StickyEntry>();
+/** Fan slot order per card, as edge keys — held across frames for hysteresis. */
+const slotOrder = new Map<string, string[]>();
 
 /** Drop cached corridors (tests / full graph replace). */
 export function clearStickyRoutes(): void {
   stickyRoutes.clear();
+  slotOrder.clear();
 }
 
 /**
@@ -79,6 +117,15 @@ export function routeDrawnEdges(
     const to = anchors.get(edge.dst)!;
     const port = ports.get(edge.key)!;
     const ignore = new Set([edge.src, edge.dst]);
+    // A card dragged on top of another card leaves both its endpoints inside
+    // that card. Nothing can route around an obstacle it starts inside, so
+    // every corridor scores as blocked and the search falls back to whichever
+    // is shortest this frame — which is how a wire ends up flipping sides while
+    // you hold a card over a neighbour. Standing on a card means ignoring it.
+    for (const o of obstacles) {
+      if (ignore.has(o.id)) continue;
+      if (covers(o, from) || covers(o, to)) ignore.add(o.id);
+    }
     const sig = routeSignature(from, to, port, obstacles, ignore);
 
     // Same corridor as last frame: skip the search, but redraw the corridor at
@@ -92,7 +139,7 @@ export function routeDrawnEdges(
       }
     }
 
-    const solved = solveRoute(from, to, port, obstacles, ignore);
+    const solved = solveRoute(from, to, port, obstacles, ignore, prev?.route);
     stickyRoutes.set(edge.key, { route: solved.route, sig });
     out.set(edge.key, solved.path);
   }
@@ -148,17 +195,15 @@ function assignPorts(
   const countAt = new Map<string, number>();
 
   for (const [urn, list] of incident) {
-    const sorted = [...list].sort((a, b) => {
-      const pa = anchors.get(a.other)!;
-      const pb = anchors.get(b.other)!;
-      if (Math.abs(pa.x - pb.x) > 1) return pa.x - pb.x;
-      if (Math.abs(pa.y - pb.y) > 1) return pa.y - pb.y;
-      return a.key.localeCompare(b.key);
-    });
+    const sorted = stableSlotOrder(urn, list, anchors);
     countAt.set(urn, sorted.length);
     const slots = new Map<string, number>();
     sorted.forEach((entry, index) => slots.set(entry.key, index));
     slotAt.set(urn, slots);
+  }
+
+  for (const urn of [...slotOrder.keys()]) {
+    if (!incident.has(urn)) slotOrder.delete(urn);
   }
 
   const out = new Map<string, Porting>();
@@ -171,6 +216,62 @@ function assignPorts(
     });
   }
   return out;
+}
+
+/**
+ * Fan slots for one card, carried over from the last frame.
+ *
+ * Links arriving at a card are spread left-to-right by where they come from.
+ * Re-deciding that from scratch every frame means two neighbours sitting at
+ * the same x trade slots on whatever noise is in their positions; the order
+ * here only changes once a card has genuinely overtaken its neighbour by
+ * `SLOT_HYSTERESIS`, and then it changes once.
+ */
+function stableSlotOrder(
+  urn: string,
+  list: readonly { key: string; other: string }[],
+  anchors: ReadonlyMap<string, Point>,
+): { key: string; other: string }[] {
+  const byKey = new Map(list.map((entry) => [entry.key, entry]));
+
+  // Fresh links join in position order; everything else keeps last frame's slot.
+  const kept = (slotOrder.get(urn) ?? []).filter((key) => byKey.has(key));
+  const seen = new Set(kept);
+  const fresh = list
+    .filter((entry) => !seen.has(entry.key))
+    .sort((a, b) => {
+      const pa = anchors.get(a.other)!;
+      const pb = anchors.get(b.other)!;
+      if (Math.abs(pa.x - pb.x) > 1) return pa.x - pb.x;
+      if (Math.abs(pa.y - pb.y) > 1) return pa.y - pb.y;
+      return a.key.localeCompare(b.key);
+    })
+    .map((entry) => entry.key);
+
+  const order = [...kept, ...fresh];
+
+  // Overtaking is judged on x alone. Falling back to y for a near-tie in x —
+  // the way the fresh sort does — gives two rules that disagree either side of
+  // the band, and a pair straddling it swaps on one rule and swaps straight
+  // back on the other. Cards level in x keep whatever order they were given.
+  const overtakes = (aKey: string, bKey: string): boolean => {
+    const pa = anchors.get(byKey.get(aKey)!.other)!;
+    const pb = anchors.get(byKey.get(bKey)!.other)!;
+    return pa.x - pb.x > SLOT_HYSTERESIS;
+  };
+
+  for (let pass = 0; pass < order.length; pass += 1) {
+    let swapped = false;
+    for (let i = 0; i + 1 < order.length; i += 1) {
+      if (!overtakes(order[i], order[i + 1])) continue;
+      [order[i], order[i + 1]] = [order[i + 1], order[i]];
+      swapped = true;
+    }
+    if (!swapped) break;
+  }
+
+  slotOrder.set(urn, order);
+  return order.map((key) => byKey.get(key)!);
 }
 
 /** Orthogonal elbow with lateral stubs so shared endpoints fan out. */
@@ -204,13 +305,20 @@ export function routeOrthoAvoiding(
 
 const DIRECT_ROUTE = 'direct';
 
-/** Search every corridor and report which one won, so it can be replayed. */
+/**
+ * Search every corridor and report which one won, so it can be replayed.
+ *
+ * `incumbent` is the corridor already on screen. It keeps the wire unless a
+ * rival is clear when it is not, or beats it by `SWITCH_MARGIN` — a corridor
+ * change is a jump the eye reads as a glitch, so it has to be worth making.
+ */
 function solveRoute(
   from: Point,
   to: Point,
   port: Porting,
   obstacles: readonly RouteObstacle[],
   ignore: ReadonlySet<string>,
+  incumbent?: string,
 ): { path: Point[]; route: string } {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
@@ -223,23 +331,44 @@ function solveRoute(
   let bestLen = Infinity;
   let bestClear: Candidate | null = null;
   let bestClearLen = Infinity;
+  let held: Candidate | null = null;
+  let heldLen = Infinity;
+  let heldClear = false;
 
   for (const candidate of candidates) {
     const clean = dedupe(candidate.points);
     if (clean.length < 2) continue;
     const len = pathLength(clean);
+    const clear = !pathHitsObstacles(clean, blockers);
     if (len < bestLen) {
       best = { id: candidate.id, points: clean };
       bestLen = len;
     }
-    if (!pathHitsObstacles(clean, blockers) && len < bestClearLen) {
+    if (clear && len < bestClearLen) {
       bestClear = { id: candidate.id, points: clean };
       bestClearLen = len;
+    }
+    if (candidate.id === incumbent) {
+      held = { id: candidate.id, points: clean };
+      heldLen = len;
+      heldClear = clear || !pathHitsObstacles(clean, blockers, HOLD_SLACK);
     }
   }
 
   const won = bestClear ?? best;
-  return won ? { path: won.points, route: won.id } : { path: [from, to], route: DIRECT_ROUTE };
+  if (!won) return { path: [from, to], route: DIRECT_ROUTE };
+
+  // Hold the corridor in use unless the winner is clear and it is not — a card
+  // moved into its way and it genuinely has to go around — or the winner is
+  // shorter by more than the margin.
+  if (held && (heldClear || !bestClear)) {
+    const wonLen = bestClear ? bestClearLen : bestLen;
+    if (heldLen <= wonLen * (1 + SWITCH_MARGIN) + SWITCH_MARGIN_PX) {
+      return { path: held.points, route: held.id };
+    }
+  }
+
+  return { path: won.points, route: won.id };
 }
 
 /**
@@ -397,34 +526,56 @@ function inCorridor(o: RouteObstacle, from: Point, to: Point): boolean {
   return o.x >= minX && o.x <= maxX && o.y >= minY && o.y <= maxY;
 }
 
-function inflate(o: RouteObstacle): {
+/** True when the point sits inside the card's inflated rectangle. */
+function covers(o: RouteObstacle, p: Point): boolean {
+  const r = inflate(o);
+  return p.x > r.left && p.x < r.right && p.y > r.top && p.y < r.bottom;
+}
+
+function inflate(
+  o: RouteObstacle,
+  slack = 0,
+): {
   left: number;
   right: number;
   top: number;
   bottom: number;
 } {
+  const padX = Math.max(0, o.hw + PAD - slack);
+  const padY = Math.max(0, o.hh + PAD - slack);
   return {
-    left: o.x - o.hw - PAD,
-    right: o.x + o.hw + PAD,
-    top: o.y - o.hh - PAD,
-    bottom: o.y + o.hh + PAD,
+    left: o.x - padX,
+    right: o.x + padX,
+    top: o.y - padY,
+    bottom: o.y + padY,
   };
 }
 
-/** True if any segment of the polyline crosses an obstacle interior. */
+/**
+ * True if any segment of the polyline crosses an obstacle interior.
+ *
+ * `slack` shrinks every card before the test, for asking the softer question
+ * "is this wire actually drawn *through* something" — see `HOLD_SLACK`.
+ */
 export function pathHitsObstacles(
   path: readonly Point[],
   obstacles: readonly RouteObstacle[],
+  slack = 0,
 ): boolean {
   for (let i = 1; i < path.length; i += 1) {
-    if (segmentHits(path[i - 1], path[i], obstacles)) return true;
+    if (segmentHits(path[i - 1], path[i], obstacles, slack)) return true;
   }
   return false;
 }
 
-function segmentHits(a: Point, b: Point, obstacles: readonly RouteObstacle[]): boolean {
+function segmentHits(
+  a: Point,
+  b: Point,
+  obstacles: readonly RouteObstacle[],
+  slack: number,
+): boolean {
   for (const o of obstacles) {
-    const r = inflate(o);
+    const r = inflate(o, slack);
     if (segmentHitsRect(a, b, r)) return true;
   }
   return false;
