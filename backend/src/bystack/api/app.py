@@ -18,6 +18,7 @@ from bystack.api.deps import AppContext
 from bystack.api.routes import agents as agent_routes
 from bystack.api.routes import commands as commands_routes
 from bystack.api.routes import enrollment, graph, health, stream
+from bystack.api.web import mount_web
 from bystack.config import Settings
 from bystack.core.graph.store import InMemoryGraphStore
 from bystack.core.ports.command import AuditLog
@@ -139,6 +140,10 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
     # The agent's side is `create_agent_app` and shares nothing but the
     # context.
     app.include_router(enrollment.router, prefix=API_PREFIX)
+    # Last, and that ordering is load-bearing: Starlette matches in
+    # registration order, so the dashboard's catch-all only sees paths no API
+    # route claimed. See `api/web.py`.
+    mount_web(app)
     return app
 
 
