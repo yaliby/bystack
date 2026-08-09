@@ -10,11 +10,17 @@ import { layoutLog, shortUrn } from '../layout/layoutDebug';
 import type { TopologyGraph } from '../layout/prepareTopology';
 import type { GraphState } from '../model/graphStore';
 import { traceFrom } from '../model/graphStore';
+import {
+  initialGesture,
+  onPointerDown as gestureDown,
+  onPointerMove as gestureMove,
+  onPointerUp as gestureUp,
+  type GestureState,
+} from './gesture';
 import { draw, hitTest, hitTestEdge, hitTestGroup, type Scene, type Viewport } from './render';
 import type { Palette } from './theme';
+import { MIN_ZOOM, pinchZoom, zoomAt } from './viewport';
 
-const MIN_ZOOM = 0.08;
-const MAX_ZOOM = 6;
 /** Fit packs the topology into the canvas without leaving a huge empty frame. */
 const FIT_MAX_ZOOM = 2.2;
 /**
@@ -55,6 +61,14 @@ interface Props {
     readonly left?: number;
   };
   readonly fitToken?: number;
+  /**
+   * Bumped by the narrow ± controls. Each bump applies `zoomFactor` toward
+   * the canvas centre (same space as wheel/pinch anchors).
+   */
+  readonly zoomToken?: number;
+  readonly zoomFactor?: number;
+  /** Edge hit slop in screen pixels — wider on touch/narrow. */
+  readonly edgeHitPx?: number;
 }
 
 /**
@@ -94,12 +108,16 @@ export function TopologyCanvas({
   onSelectEdge,
   inset = { right: 0, bottom: 0 },
   fitToken = 0,
+  zoomToken = 0,
+  zoomFactor = 1,
+  edgeHitPx = 16,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const elkRef = useRef(new TopologyLayout());
   const liveRef = useRef(new InteractiveLayout());
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 });
   const dragRef = useRef<DragTarget | null>(null);
+  const gestureRef = useRef<GestureState>(initialGesture());
   /** A reseed that arrived mid-drag and is waiting for the pointer to come up. */
   const seedPendingRef = useRef(false);
   const fittedRef = useRef(false);
@@ -107,6 +125,8 @@ export function TopologyCanvas({
   insetRef.current = inset;
   const paletteRef = useRef(palette);
   paletteRef.current = palette;
+  const edgeHitPxRef = useRef(edgeHitPx);
+  edgeHitPxRef.current = edgeHitPx;
   const [hoveredUrn, setHoveredUrn] = useState<Urn | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const [hoverKind, setHoverKind] = useState<'node' | 'group' | 'edge' | null>(null);
@@ -172,6 +192,13 @@ export function TopologyCanvas({
     setLayoutEpoch((n) => n + 1);
   }, []);
 
+  const flushSeedIfIdle = () => {
+    if (dragRef.current || gestureRef.current.mode !== 'idle') return;
+    if (!seedPendingRef.current) return;
+    seedPendingRef.current = false;
+    applySeed();
+  };
+
   useEffect(() => {
     let cancelled = false;
     void elkRef.current.sync(prepared).then((changed) => {
@@ -181,7 +208,7 @@ export function TopologyCanvas({
       // are holding lets go and the frame jumps out from under it. A container
       // starting somewhere else on the host is never a reason to do that, so
       // the reseed waits for the pointer to come up.
-      if (dragRef.current) {
+      if (dragRef.current || gestureRef.current.mode !== 'idle') {
         seedPendingRef.current = true;
         return;
       }
@@ -202,6 +229,16 @@ export function TopologyCanvas({
       y: (clientY - rect.top - rect.height / 2 - viewport.y) / viewport.zoom,
     };
   }, []);
+
+  const toCanvasAnchor = (clientX: number, clientY: number): Point => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: clientX - rect.left - rect.width / 2,
+      y: clientY - rect.top - rect.height / 2,
+    };
+  };
 
   const buildScene = (): Scene => {
     const live = sceneLive.current;
@@ -259,6 +296,11 @@ export function TopologyCanvas({
   useEffect(() => {
     if (fitToken > 0) fit();
   }, [fitToken, fit]);
+
+  useEffect(() => {
+    if (zoomToken === 0) return;
+    viewportRef.current = zoomAt(viewportRef.current, 0, 0, zoomFactor);
+  }, [zoomToken, zoomFactor]);
 
   /**
    * Fit once, on the first layout that has something in it.
@@ -345,14 +387,24 @@ export function TopologyCanvas({
     onSelectEdge(pending.edge);
   };
 
-  const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const world = toWorld(event.clientX, event.clientY);
+  const cancelActiveDrag = () => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (drag.kind === 'node' && drag.moved) {
+      liveRef.current.release(drag.urn, { x: 0, y: 0 });
+    } else if (drag.kind === 'group') {
+      liveRef.current.cancelGroupDrag(drag.urn);
+    }
+    dragRef.current = null;
+  };
+
+  const beginSingleDrag = (clientX: number, clientY: number) => {
+    const world = toWorld(clientX, clientY);
     const grip = {
-      lastX: event.clientX,
-      lastY: event.clientY,
-      originX: event.clientX,
-      originY: event.clientY,
+      lastX: clientX,
+      lastY: clientY,
+      originX: clientX,
+      originY: clientY,
       moved: false,
     };
     const node = hitTest(sceneRef.current, world);
@@ -369,47 +421,129 @@ export function TopologyCanvas({
         velocity: { x: 0, y: 0 },
         pending: { node, edge: null },
       };
-    } else {
-      const edge = hitTestEdge(sceneRef.current, world, viewportRef.current.zoom);
-      if (edge) {
-        layoutLog('pointer:down', { target: 'edge', key: edge.key, kind: edge.kind });
-        dragRef.current = { ...grip, kind: 'pan', pending: { node: null, edge: edge.key } };
-      } else {
-        const groupUrn = hitTestGroup(sceneRef.current, world);
-        if (groupUrn) {
-          const stack = sceneRef.current.nodes.find((n) => n.urn === groupUrn) ?? null;
-          layoutLog('pointer:down', { target: 'group-frame', urn: shortUrn(groupUrn) });
-          dragRef.current = {
-            ...grip,
-            kind: 'group',
-            urn: groupUrn,
-            pending: { node: stack, edge: null },
-          };
-        } else {
-          layoutLog('pointer:down', { target: 'pan' });
-          dragRef.current = { ...grip, kind: 'pan', pending: { node: null, edge: null } };
-        }
-      }
+      return;
     }
-    setDragging(true);
+    const edge = hitTestEdge(
+      sceneRef.current,
+      world,
+      viewportRef.current.zoom,
+      edgeHitPxRef.current,
+    );
+    if (edge) {
+      layoutLog('pointer:down', { target: 'edge', key: edge.key, kind: edge.kind });
+      dragRef.current = { ...grip, kind: 'pan', pending: { node: null, edge: edge.key } };
+      return;
+    }
+    const groupUrn = hitTestGroup(sceneRef.current, world);
+    if (groupUrn) {
+      const stack = sceneRef.current.nodes.find((n) => n.urn === groupUrn) ?? null;
+      layoutLog('pointer:down', { target: 'group-frame', urn: shortUrn(groupUrn) });
+      dragRef.current = {
+        ...grip,
+        kind: 'group',
+        urn: groupUrn,
+        pending: { node: stack, edge: null },
+      };
+      return;
+    }
+    layoutLog('pointer:down', { target: 'pan' });
+    dragRef.current = { ...grip, kind: 'pan', pending: { node: null, edge: null } };
+  };
+
+  const finishSingleUp = () => {
+    const drag = dragRef.current;
+    if (drag?.kind === 'node') {
+      layoutLog('pointer:up', {
+        target: 'node',
+        urn: shortUrn(drag.urn),
+        moved: drag.moved,
+        action: drag.moved ? 'release+spring' : 'click-no-physics',
+      });
+      if (drag.moved) liveRef.current.release(drag.urn, drag.velocity);
+    } else if (drag?.kind === 'group') {
+      layoutLog('pointer:up', {
+        target: 'group-frame',
+        urn: shortUrn(drag.urn),
+        moved: drag.moved,
+        action: drag.moved ? 'releaseGroup→redefine-home' : 'cancelGroupDrag→keep-home',
+      });
+      if (drag.moved) liveRef.current.releaseGroup(drag.urn);
+      else liveRef.current.cancelGroupDrag(drag.urn);
+    } else if (drag?.kind === 'pan') {
+      layoutLog('pointer:up', { target: 'pan', moved: drag.moved });
+    }
+    // A gesture that travelled was a drag or a pan; only a stationary press
+    // inspects something.
+    if (drag && !drag.moved) applyClick(drag.pending);
+    dragRef.current = null;
+    setDragging(false);
+    flushSeedIfIdle();
+  };
+
+  const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const result = gestureDown(
+      gestureRef.current,
+      event.pointerId,
+      event.clientX,
+      event.clientY,
+    );
+    gestureRef.current = result.state;
+
+    if (result.action.type === 'enter-pinch') {
+      if (result.action.cancelSingle) cancelActiveDrag();
+      setHoverAtomic(null, null, null);
+      setDragging(true);
+      return;
+    }
+
+    if (result.action.type === 'enter-single') {
+      beginSingleDrag(event.clientX, event.clientY);
+      setDragging(true);
+    }
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const drag = dragRef.current;
+    const result = gestureMove(
+      gestureRef.current,
+      event.pointerId,
+      event.clientX,
+      event.clientY,
+    );
+    gestureRef.current = result.state;
 
-    if (!drag) {
-      const world = toWorld(event.clientX, event.clientY);
-      const node = hitTest(sceneRef.current, world);
-      if (node) {
-        setHoverAtomic(node.urn, null, 'node');
-      } else {
-        const edge = hitTestEdge(sceneRef.current, world, viewportRef.current.zoom);
-        if (edge) {
-          setHoverAtomic(null, edge.key, 'edge');
-        } else if (hitTestGroup(sceneRef.current, world)) {
-          setHoverAtomic(null, null, 'group');
+    if (result.action.type === 'pinch') {
+      const mid = toCanvasAnchor(result.action.mid.x, result.action.mid.y);
+      viewportRef.current = pinchZoom(
+        viewportRef.current,
+        result.action.prevDist,
+        result.action.nextDist,
+        mid,
+      );
+      return;
+    }
+
+    const drag = dragRef.current;
+    if (!drag || gestureRef.current.mode !== 'single') {
+      if (!drag && gestureRef.current.mode === 'idle') {
+        const world = toWorld(event.clientX, event.clientY);
+        const node = hitTest(sceneRef.current, world);
+        if (node) {
+          setHoverAtomic(node.urn, null, 'node');
         } else {
-          setHoverAtomic(null, null, null);
+          const edge = hitTestEdge(
+            sceneRef.current,
+            world,
+            viewportRef.current.zoom,
+            edgeHitPxRef.current,
+          );
+          if (edge) {
+            setHoverAtomic(null, edge.key, 'edge');
+          } else if (hitTestGroup(sceneRef.current, world)) {
+            setHoverAtomic(null, null, 'group');
+          } else {
+            setHoverAtomic(null, null, null);
+          }
         }
       }
       return;
@@ -455,38 +589,30 @@ export function TopologyCanvas({
     }
   };
 
-  const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    event.currentTarget.releasePointerCapture(event.pointerId);
-    const drag = dragRef.current;
-    if (drag?.kind === 'node') {
-      layoutLog('pointer:up', {
-        target: 'node',
-        urn: shortUrn(drag.urn),
-        moved: drag.moved,
-        action: drag.moved ? 'release+spring' : 'click-no-physics',
-      });
-      if (drag.moved) liveRef.current.release(drag.urn, drag.velocity);
-    } else if (drag?.kind === 'group') {
-      layoutLog('pointer:up', {
-        target: 'group-frame',
-        urn: shortUrn(drag.urn),
-        moved: drag.moved,
-        action: drag.moved ? 'releaseGroup→redefine-home' : 'cancelGroupDrag→keep-home',
-      });
-      if (drag.moved) liveRef.current.releaseGroup(drag.urn);
-      else liveRef.current.cancelGroupDrag(drag.urn);
-    } else if (drag?.kind === 'pan') {
-      layoutLog('pointer:up', { target: 'pan', moved: drag.moved });
+  const endPointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Already released — common after pointercancel.
     }
-    // A gesture that travelled was a drag or a pan; only a stationary press
-    // inspects something.
-    if (drag && !drag.moved) applyClick(drag.pending);
-    dragRef.current = null;
-    setDragging(false);
+    const result = gestureUp(gestureRef.current, event.pointerId);
+    gestureRef.current = result.state;
 
-    if (seedPendingRef.current) {
-      seedPendingRef.current = false;
-      applySeed();
+    if (result.action.type === 'leave-pinch') {
+      dragRef.current = null;
+      setDragging(false);
+      flushSeedIfIdle();
+      return;
+    }
+
+    if (result.action.type === 'leave-single') {
+      finishSingleUp();
+      return;
+    }
+
+    if (gestureRef.current.mode === 'idle' && !dragRef.current) {
+      setDragging(false);
+      flushSeedIfIdle();
     }
   };
 
@@ -494,20 +620,10 @@ export function TopologyCanvas({
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const viewport = viewportRef.current;
-
-    const factor = Math.exp(-event.deltaY * 0.0015);
-    const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, viewport.zoom * factor));
-
     const px = event.clientX - rect.left - rect.width / 2;
     const py = event.clientY - rect.top - rect.height / 2;
-    const scale = zoom / viewport.zoom;
-
-    viewportRef.current = {
-      zoom,
-      x: px - (px - viewport.x) * scale,
-      y: py - (py - viewport.y) * scale,
-    };
+    const factor = Math.exp(-event.deltaY * 0.0015);
+    viewportRef.current = zoomAt(viewportRef.current, px, py, factor);
   };
 
   return (
@@ -525,7 +641,8 @@ export function TopologyCanvas({
       }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
+      onPointerUp={endPointer}
+      onPointerCancel={endPointer}
       onPointerLeave={() => {
         setHoverAtomic(null, null, null);
       }}

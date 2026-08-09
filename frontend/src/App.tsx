@@ -2,7 +2,7 @@
  * Application shell — canvas-first, DockGraph-style minimal chrome.
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CommandKind, GraphNode, Urn } from './api/types';
 import { prepareTopologyGraph } from './features/topology/layout/prepareTopology';
 import { neighborsOf } from './features/topology/model/graphStore';
@@ -22,13 +22,16 @@ import { EmptyState, StatusBanner } from './features/topology/ui/CanvasOverlay';
 import { Legend } from './features/topology/ui/Legend';
 import { NodeInspector } from './features/topology/ui/NodeInspector';
 import { TopologyCanvas } from './features/topology/ui/TopologyCanvas';
+import { EDGE_HIT_PX, EDGE_HIT_PX_TOUCH } from './features/topology/ui/render';
 import { DARK, LIGHT } from './features/topology/ui/theme';
+import { ZOOM_BUTTON_FACTOR } from './features/topology/ui/viewport';
 import { useMediaQuery } from './lib/useMediaQuery';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? window.location.origin;
 
 /** Keep in step with the `@media (max-width: 720px)` chrome in `index.css`. */
 const NARROW_QUERY = '(max-width: 720px)';
+const COARSE_POINTER_QUERY = '(pointer: coarse)';
 
 const INSPECTOR_WIDTH = 320;
 /** The hosts panel, on the other side. Keep in step with `.hosts` in CSS. */
@@ -42,7 +45,8 @@ const LEGEND_HEIGHT = 150;
 const LEGEND_HEIGHT_NARROW = 118;
 /** The topbar floats over a full-bleed canvas, so `fit` has to allow for it. */
 const TOPBAR_HEIGHT = 58;
-const TOPBAR_HEIGHT_NARROW = 96;
+/** Trace row + wrapped actions; keep in step with narrow `.topbar--slim`. */
+const TOPBAR_HEIGHT_NARROW = 132;
 /** So does the banner, when there is one. Keep in step with `.banner` in CSS. */
 const BANNER_HEIGHT = 33;
 /** Docker's own networks. Present on every host, so counting them says nothing. */
@@ -55,9 +59,12 @@ export default function App() {
   const [traceDepth, setTraceDepth] = useState(1);
   const [query, setQuery] = useState('');
   const [fitToken, setFitToken] = useState(0);
+  const [zoomToken, setZoomToken] = useState(0);
+  const [zoomFactor, setZoomFactor] = useState(1);
   const [hostsOpen, setHostsOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const narrow = useMediaQuery(NARROW_QUERY);
+  const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
 
   const { graph, connection, resyncs } = useGraphStream(API_BASE);
   const health = useHealth(API_BASE);
@@ -192,6 +199,23 @@ export default function App() {
     clearSelection();
   }, [clearSelection]);
 
+  const bumpZoom = useCallback((factor: number) => {
+    setZoomFactor(factor);
+    setZoomToken((n) => n + 1);
+  }, []);
+
+  // Escape dismisses floating chrome the same way the sheet backdrop does.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (!hostsOpen && !activityOpen && !inspectorOpen) return;
+      event.preventDefault();
+      closeSheets();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [hostsOpen, activityOpen, inspectorOpen, closeSheets]);
+
   // The two left-hand panels answer different questions and share one edge of
   // the screen, so opening either closes the other. Stacking them would put
   // the canvas — the thing both of them are about — in a strip.
@@ -283,19 +307,18 @@ export default function App() {
           )}
         </div>
 
-        {!narrow ? (
-          <label className="control control--trace">
-            Trace
-            <input
-              type="range"
-              min={1}
-              max={4}
-              value={traceDepth}
-              onChange={(event) => setTraceDepth(Number(event.target.value))}
-            />
-            <span>{traceDepth}</span>
-          </label>
-        ) : null}
+        <label className="control control--trace">
+          Trace
+          <input
+            type="range"
+            min={1}
+            max={4}
+            value={traceDepth}
+            onChange={(event) => setTraceDepth(Number(event.target.value))}
+            aria-label="Trace depth"
+          />
+          <span>{traceDepth}</span>
+        </label>
 
         <div className="spacer" />
 
@@ -313,6 +336,26 @@ export default function App() {
           <button className="control" onClick={openActivity}>
             Activity
           </button>
+          {narrow ? (
+            <>
+              <button
+                type="button"
+                className="control control--zoom"
+                aria-label="Zoom out"
+                onClick={() => bumpZoom(1 / ZOOM_BUTTON_FACTOR)}
+              >
+                −
+              </button>
+              <button
+                type="button"
+                className="control control--zoom"
+                aria-label="Zoom in"
+                onClick={() => bumpZoom(ZOOM_BUTTON_FACTOR)}
+              >
+                +
+              </button>
+            </>
+          ) : null}
           <button className="control" onClick={() => setFitToken((n) => n + 1)}>
             Fit
           </button>
@@ -353,6 +396,9 @@ export default function App() {
             left: !narrow && (hostsOpen || activityOpen) ? HOSTS_WIDTH : 0,
           }}
           fitToken={fitToken}
+          zoomToken={zoomToken}
+          zoomFactor={zoomFactor}
+          edgeHitPx={narrow || coarsePointer ? EDGE_HIT_PX_TOUCH : EDGE_HIT_PX}
         />
         {sheetOpen ? (
           <button

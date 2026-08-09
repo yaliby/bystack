@@ -44,6 +44,18 @@ export function AddHostDialog({ token, autoApprove, onClose }: Props) {
     return () => window.clearTimeout(timer);
   }, [copied]);
 
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      // Capture + stopImmediate so the app shell does not also dismiss Hosts.
+      event.stopImmediatePropagation();
+      onClose();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+
   const copy = async (which: 'install' | 'manual') => {
     try {
       await navigator.clipboard.writeText(which === 'install' ? token.install : token.manual);

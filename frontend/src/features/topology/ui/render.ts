@@ -989,7 +989,9 @@ export function hitTestGroup(scene: Scene, world: Point): Urn | null {
   return best?.urn ?? null;
 }
 
-const EDGE_HIT_PX = 16;
+/** Default edge hit slop in screen pixels. Touch/narrow chrome passes a wider value. */
+export const EDGE_HIT_PX = 16;
+export const EDGE_HIT_PX_TOUCH = 24;
 
 /**
  * The routes the last frame actually drew.
@@ -1001,13 +1003,18 @@ const EDGE_HIT_PX = 16;
 let drawnRoutes: ReadonlyMap<string, Point[]> = new Map();
 
 /** Nearest drawn edge within a hit threshold (world units). */
-export function hitTestEdge(scene: Scene, world: Point, zoom: number): GraphEdge | null {
+export function hitTestEdge(
+  scene: Scene,
+  world: Point,
+  zoom: number,
+  hitPx: number = EDGE_HIT_PX,
+): GraphEdge | null {
   if (hitTest(scene, world)) return null;
 
   const paths = drawnRoutes.size
     ? drawnRoutes
     : routeDrawnEdges(scene.edges, endpointAnchors(scene), DRAWN_EDGES, collectObstacles(scene));
-  const threshold = EDGE_HIT_PX / zoom;
+  const threshold = hitPx / zoom;
   let best: { edge: GraphEdge; dist: number } | null = null;
 
   for (const edge of scene.edges) {
