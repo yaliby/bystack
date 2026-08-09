@@ -393,9 +393,13 @@ alongside for a host that already has the agent.
 
 ### What is left: Controller-driven upgrade
 
-Version skew is *observable* — the Controller reads `Hello.agent_version` from
-every agent and knows its own — and that is the whole of it. Acting on it is
-not implemented, and the obvious design does not work:
+**Decided and recorded in [ADR-0015](adr/0015-agent-upgrade.md).** The
+reporting half is built: `/healthz` carries the Controller's version, and both
+`bystack-ctl hosts` and the Hosts panel mark the agents that differ. Applying
+an upgrade is `install-agent.sh` on that host, which is idempotent and never
+touches the certificate.
+
+Automating it is deliberately not done, and the obvious design does not work:
 
 **The agent has no root store.** `agent/Cargo.toml` takes rustls's
 underscore-prefixed `__rustls-tls` feature precisely to avoid the public CA
@@ -417,7 +421,14 @@ stream that is already open and already mutually authenticated. That needs:
   the inode rather than writing through it is what stops a running process
   reading a half-written file.
 
-That is an ADR, not a patch. Nothing in the current tree pre-empts it.
+And a cost that is not the transport: `ProtectSystem=strict` in the agent's
+unit makes `/usr/local/bin` read-only to the service, so self-replacement needs
+`ReadWritePaths=` there — write access to a directory of executables, granted
+to a network-facing daemon. **Superseding ADR-0015 is the way to do that**, not
+adding a flag.
+
+Nothing in the current tree pre-empts any of it: no wire message, no tag spent,
+no capability invented, and the `.proto` is unchanged.
 
 ### Two notes that were live during this work, and still are
 
