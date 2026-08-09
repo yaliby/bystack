@@ -1,0 +1,203 @@
+# Cut a release: the binaries the installer fetches, the wheels, the image.
+#
+#     git tag v0.2.0 && git push origin v0.2.0
+#
+# Everything an operator can reach is produced here, and the pieces are not
+# independent. `scripts/install-agent.sh` fetches `bystack-agent-<arch>` and
+# `SHA256SUMS` from the tag it was itself fetched from, and the Controller
+# composes that URL out of its own version. So a tag that publishes a wheel
+# without binaries produces a Controller whose "add a host" button hands out a
+# command that 404s -- which is the exact failure step 7 existed to fix, in a
+# new place. The jobs are ordered so that cannot happen quietly: the release is
+# published once, from artifacts that all had to exist.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  agent:
+    name: Agent (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      # The same script a contributor runs, containers and all. A release path
+      # that differs from the local one is a release path nobody has tested.
+      - run: ./scripts/build-agent.sh --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.arch }}
+          path: dist/bystack-agent-${{ matrix.arch }}
+          if-no-files-found: error
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard
+          path: frontend/dist
+          if-no-files-found: error
+
+  wheels:
+    name: Wheel (${{ matrix.arch }})
+    needs: [agent, dashboard]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-${{ matrix.arch }}
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard
+          path: frontend/dist
+      # One wheel per architecture, each carrying the matching agent. The tag
+      # says so (`hatch_build.py`), which is what stops an aarch64 host
+      # installing an x86_64 agent and finding out at the first spawn.
+      - name: Build
+        working-directory: backend
+        env:
+          BYSTACK_TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          chmod +x ../dist/bystack-agent-${{ matrix.arch }}
+          python -m build --wheel --outdir ../wheels
+      - name: It is not a pure wheel
+        run: |
+          ls -l wheels
+          case "$(ls wheels)" in
+            *py3-none-any*)
+              echo "::error::wheel for ${{ matrix.arch }} carries no agent" && exit 1 ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.arch }}
+          path: wheels/*.whl
+          if-no-files-found: error
+
+  image:
+    name: Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      # The image builds the agent for the platform it is being built for
+      # (`packaging/Dockerfile`), so arm64 goes through QEMU here. Slow, and
+      # correct, and it happens once per release rather than once per push.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: Publish
+    needs: [agent, wheels, image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          pattern: "{agent-*,wheel-*}"
+          merge-multiple: true
+
+      # Written here rather than carried from the build jobs, because those
+      # produce one line each and the installer fetches *one* file. A
+      # SHA256SUMS assembled from fragments is a file whose completeness
+      # nothing checks; this one covers exactly what is about to be published.
+      - name: Checksums
+        working-directory: staged
+        run: |
+          chmod +x bystack-agent-*
+          sha256sum bystack-agent-* *.whl > SHA256SUMS
+          cat SHA256SUMS
+
+      # Both architectures, or no release. `install-agent.sh` picks by
+      # `uname -m` and reports "no prebuilt agent" for anything it cannot find
+      # -- a release missing aarch64 would be a working install on half a
+      # fleet and a puzzle on the other half.
+      - name: Both architectures are here
+        working-directory: staged
+        run: |
+          test -f bystack-agent-x86_64
+          test -f bystack-agent-aarch64
+          test "$(ls -1 ./*.whl | wc -l)" -eq 2
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: staged/*
+          generate_release_notes: true
+          # The installer's URL is composed from the Controller's version and
+          # points at a tag, so publishing a draft would leave that command
+          # 404ing for as long as the draft sat there.
+          draft: false

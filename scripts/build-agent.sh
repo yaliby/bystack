@@ -118,6 +118,7 @@ mkdir -p "$OUT"
 # A missing `readelf` is a failure rather than a skip. Skipping would make this
 # a check that any future base image can retire by dropping binutils, and the
 # whole point is that nothing else in the pipeline would notice.
+# shellcheck disable=SC2016  # $BIN is the container's variable, not ours
 assert_static='
 	command -v readelf >/dev/null 2>&1 || {
 		echo "build-agent.sh: no readelf; cannot verify $BIN is static" >&2

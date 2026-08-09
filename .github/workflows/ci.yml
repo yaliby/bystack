@@ -1,0 +1,253 @@
+# Everything that can fail without a Docker daemon, on every push.
+#
+# That qualifier is the whole design. "No test anywhere may require a Docker
+# daemon or a network" is a rule this codebase keeps deliberately (OPEN-WORK
+# section 7), and the payoff is collected here: the conformance suites -- which
+# drive the real agent binary, the real Controller, real mutual TLS and a real
+# unix socket -- run on an ordinary runner with nothing installed. There is no
+# services: block anywhere in this file and there should never be one.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A second push supersedes the first. Nobody is waiting on the results of a
+  # commit that has already been replaced.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend:
+    name: Controller
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from `requires-python`, and the current release. The floor
+        # is the one that matters: it is what a distribution's python3 will be
+        # for years, and a 3.13-only syntax slipping in is invisible on a
+        # laptop that has 3.13.
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e "backend[dev]"
+      - name: Lint
+        run: ruff check backend/src backend/tests
+      - name: Types
+        working-directory: backend
+        run: mypy src
+      - name: Tests
+        working-directory: backend
+        run: pytest -q
+
+  frontend:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci
+      - name: Types
+        working-directory: frontend
+        run: npx tsc -b --noEmit
+      - name: Tests
+        working-directory: frontend
+        run: npm test
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+      - name: The bundle the browser waits for
+        working-directory: frontend
+        # Reported rather than asserted. A threshold here would be a number
+        # somebody has to argue with on the day they add a dependency; a line
+        # in the log is what makes the growth visible in the diff of two runs.
+        run: |
+          echo "initial payload:"
+          ls -l dist/assets/index-*.js dist/assets/*.css
+
+  agent:
+    name: Agent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      # No `cargo fmt --check`. The agent is not rustfmt-formatted -- it is
+      # written to a wider, hand-laid style, and no `rustfmt.toml` reproduces
+      # it. Adding the check means a reformat that touches every file in the
+      # crate, which is a decision worth making on its own rather than as a
+      # side effect of turning on CI.
+      - name: Lint
+        working-directory: agent
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        working-directory: agent
+        run: cargo test
+
+  conformance:
+    name: Conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      - run: pip install -e "backend[dev]"
+      - name: Build the agent
+        working-directory: agent
+        run: cargo build --release
+      # Three runs, three carriers for the same frames. The agent-only run
+      # measures the binary; `fleet` drives real enrolment over mutual TLS with
+      # an internal CA; `local` drives the zero-config path a first-run user is
+      # on, including the process launch and the signalled shutdown.
+      - name: Agent
+        working-directory: backend
+        run: python -m bystack.conformance ../agent/target/release/bystack-agent
+      - name: Fleet
+        working-directory: backend
+        run: python -m bystack.conformance.fleet ../agent/target/release/bystack-agent
+      - name: Zero-config
+        working-directory: backend
+        run: python -m bystack.conformance.local ../agent/target/release/bystack-agent
+
+  wire:
+    name: Wire contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e "backend[dev]"
+      # The Python bindings and the agent's descriptor set are checked in, so
+      # that installing the Controller never needs protoc and cross-compiling
+      # the agent never needs it either. This is what keeps that honest: a
+      # `.proto` edited without regenerating fails here rather than at the
+      # first frame a mixed-version fleet cannot decode.
+      - name: The checked-in bindings match the contract
+        working-directory: backend
+        run: python scripts/generate_proto.py --check
+
+  packaging:
+    name: Packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+      - run: pip install build
+
+      # The static-binary build, on the path an operator would take: the
+      # containerised one. A release that only ever gets exercised at tag time
+      # is a release process that breaks at tag time.
+      - name: Static agent
+        run: ./scripts/build-agent.sh --target x86_64-unknown-linux-musl
+
+      - name: Dashboard
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      # And the wheel that carries both. `hatch_build.py` prints which kind it
+      # produced; a wheel that quietly came out pure is the failure worth
+      # catching, because it looks exactly like one that did not.
+      - name: Wheel
+        working-directory: backend
+        run: |
+          python -m build --wheel --outdir ../artifacts
+          ls -l ../artifacts
+          case "$(ls ../artifacts)" in
+            *py3-none-any*)
+              echo "::error::the wheel carries no agent binary" && exit 1 ;;
+          esac
+
+      - name: It installs, and finds both
+        run: |
+          python -m venv /tmp/check
+          /tmp/check/bin/pip install artifacts/*.whl
+          # From a directory that is not the checkout, so this imports the
+          # *installed* package rather than `backend/src` on the path.
+          cd "$HOME" && /tmp/check/bin/python -c "
+          from bystack.api.web import web_root
+          from bystack.runtime.localagent import _find_binary
+          import subprocess
+          assert web_root()[0] is not None, 'no dashboard in the wheel'
+          binary = _find_binary('')[0]
+          assert binary is not None, 'no agent in the wheel'
+          print(subprocess.run([str(binary), '--version'], check=True, capture_output=True, text=True).stdout)
+          "
+
+      - name: The image
+        run: docker build -f packaging/Dockerfile -t bystack:ci .
+
+      - name: The image serves what it claims to
+        run: |
+          docker run -d --name ci -p 127.0.0.1:8000:8000 bystack:ci
+          for _ in $(seq 30); do
+            curl -fsS http://127.0.0.1:8000/api/v1/healthz && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8000/ | grep -qi '<!doctype html'
+          # A stop that takes ten seconds is a SIGKILL wearing a clean exit
+          # status, which is exactly the bug the agent had.
+          start=$(date +%s)
+          docker stop ci
+          echo "stopped in $(( $(date +%s) - start ))s"
+          [ $(( $(date +%s) - start )) -lt 5 ]
+
+  scripts:
+    name: Shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The installer is the one piece of this project that runs as root on a
+      # stranger's machine. It gets linted.
+      - run: shellcheck scripts/install-agent.sh scripts/build-agent.sh
+      - name: The units parse
+        run: |
+          # `verify` resolves ExecStart=, and neither binary is installed on a
+          # runner. Pointing them at something that exists checks the rest of
+          # the file, which is the part with the decisions in it.
+          mkdir -p /tmp/units
+          sed 's|^ExecStart=.*|ExecStart=/bin/true|' packaging/systemd/bystack-agent.service \
+            > /tmp/units/bystack-agent.service
+          sed 's|^ExecStart=.*|ExecStart=/bin/true|' packaging/systemd/bystack-controller.service \
+            > /tmp/units/bystack-controller.service
+          systemd-analyze verify /tmp/units/bystack-agent.service /tmp/units/bystack-controller.service
