@@ -11,12 +11,20 @@ Everything below is meant to be pasted as-is. The only thing you have to
 supply is a machine with Docker on it:
 
 ```bash
-docker version
+docker ps
 ```
 
-If that prints a version, you are ready. If it says `permission denied`, add
-yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log out
-and back in) or put `sudo` in front of every `docker` command below.
+If that prints a table — even an empty one — you are ready. If it says
+`permission denied while trying to connect to the docker API`, add yourself to
+the `docker` group and start a new login shell:
+
+```bash
+sudo usermod -aG docker $USER    # then log out and back in
+```
+
+Or put `sudo` in front of every `docker` command below. (`docker version` is
+not the check: it prints the client's version happily while the daemon is
+unreachable.)
 
 ---
 
@@ -31,9 +39,9 @@ echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
 docker compose up -d --build
 ```
 
-**Run them from inside the `bystack` directory that `git clone` just made.**
-`docker compose` reads `compose.yaml` from the directory you are standing in;
-that is why the second line is `cd bystack` and not decoration.
+The `cd bystack` is not decoration: `docker compose` reads `compose.yaml` out
+of the directory you are standing in, so the last two lines only work from
+inside the clone. `no such file or directory` means you are somewhere else.
 
 The third line tells the container which group owns your Docker socket, which
 differs between distributions. Without it the Controller still starts — it just
@@ -154,11 +162,30 @@ ssh you@newserver 'sudo sh /tmp/install-agent.sh --binary /tmp/bystack-agent-x86
 | What you see | What it is |
 | --- | --- |
 | `open .../compose.yaml: no such file or directory` | You are not in the `bystack` directory. `cd` into the clone. |
-| The map is empty, only the Controller box | The Docker socket group. Re-run the `.env` line from Step 1 and `docker compose up -d`. |
+| `port is already allocated` | Something already holds 8000 or 8443 on this machine. `ss -ltnp \| grep -E ':8000\|:8443'`. |
 | Browser cannot connect at all | The port is on loopback. See Step 2. |
-| `docker compose ps` says `unhealthy` | `docker compose logs -f controller` — the health check reports the agent's state, so this usually means the same socket problem. |
+| The map is completely empty | The Docker socket group. See below. |
 | The pasted `curl` in Step 3 returns 404 | No release has been published for this Controller's version yet. Tag one (`git tag v0.1.0 && git push origin v0.1.0`) or use the `--binary` form above. |
 | Agent says the certificate name does not match | The address it dialled is not in `server_names`. Step 3a. |
+
+**The empty map is worth its own paragraph**, because nothing else reports it.
+The container stays `healthy` and the dashboard loads normally — the Controller
+*is* fine; it just has no agent. Ask it directly:
+
+```bash
+curl -s localhost:8000/api/v1/healthz
+```
+
+`"providers":[]` with `"node_count":0` means the bundled agent could not read
+the Docker socket, which is the group. Fix it and restart:
+
+```bash
+echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
+docker compose up -d
+```
+
+A working Controller answers that same URL with `"state":"ready"` and a node
+count in the dozens.
 
 Logs, always:
 
