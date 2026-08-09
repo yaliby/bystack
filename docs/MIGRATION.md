@@ -421,17 +421,59 @@ Each step leaves the tree working.
    The Controller bundles the agent and spawns it locally over a unix socket;
    `python -m bystack` with no config manages this machine again. See §4 for
    the four decisions inside it.
-7. **Packaging**: static binaries, container image, systemd unit, and
-   Controller-driven upgrade. **Still open, and the last step here** — see
-   [OPEN-WORK](OPEN-WORK.md) §5, which also records why it blocks the product
-   rather than only the release: "add a host" composes a command that assumes
-   the binary is already on the target machine.
+7. ✅ **Packaging**: static binaries, container image, systemd units, wheel,
+   installer, CLI, CI. **One clause remains open** — Controller-driven
+   upgrade; see below and [OPEN-WORK](OPEN-WORK.md) §5.
 
-   The one hook the Controller already has for it is
-   `bystack/_bundled/bystack-agent`, first in the local agent's search order
-   and empty in a source checkout — where the search falls through to
-   `agent/target/release/`, so a contributor who has run `cargo build` gets the
-   same first run as someone who installed a package.
+   `bystack/_bundled/bystack-agent` is filled now. It was first in the local
+   agent's search order from the start, with a comment saying populating it
+   was packaging's job; `backend/hatch_build.py` force-includes the binary
+   there and the vite bundle at `bystack/_web`, so the same wheel gives a
+   Controller its own agent and its own dashboard. A source checkout still
+   falls through to `agent/target/release/` and `frontend/dist`, so a
+   contributor who has built either gets the same first run as someone who
+   installed a package.
+
+   What was decided rather than transcribed:
+
+   - **musl, and verified rather than claimed.** glibc's symbol versioning
+     means a binary linked on the build machine refuses to start on anything
+     older, which is the most common way a "static" binary is not one. The
+     build fails if the output wants a dynamic loader. The cost is that a
+     musl target needs a musl-targeting C compiler, because `ring` compiles
+     C — which is the footnote `agent/Cargo.toml` deserves: choosing `ring`
+     over `aws-lc-rs` avoids cmake and a full toolchain *per architecture*,
+     not a C compiler outright. A cross image supplies it and nothing lands
+     on a contributor's laptop.
+   - **The Controller serves the dashboard.** Until now the UI existed only
+     under `npm run dev`, across an origin — which is why `api.cors_origins`
+     defaults to a vite address. Shipping that meant Node on a control-plane
+     host. One process, one port, one origin.
+   - **The pasted command installs something that exists.** It was
+     `bystack-agent --controller … --token …`, which assumes a binary already
+     on the target. It is now a `curl … | sudo sh` over
+     `scripts/install-agent.sh`, pinned to the Controller's own version so
+     the copied command does not change between one host and the next. The
+     Controller *cannot* serve that script itself: the only port a new host
+     can reach is the fleet listener, and that one requires a client
+     certificate the host does not have yet.
+   - **The agent never handled SIGTERM.** Found writing the unit.
+     `ctrl_c()` is SIGINT and nothing that deploys this sends SIGINT, so
+     every stop was a SIGKILL five seconds late — and handling the signal was
+     only half of it: a `Signal` stream built inside a `select!` branch is
+     dropped whenever another branch wins, and the gap that leaves is the
+     reconnect backoff, which is exactly where a shutdown finds the process.
+
+   **Still open: Controller-driven upgrade.** The Controller knows its own
+   version and every agent's (`Hello.agent_version`), so skew is observable;
+   what does not exist is a way to act on it. The obvious design does not
+   work: the agent's rustls has **no root store at all**, deliberately
+   (`agent/Cargo.toml`), so it cannot fetch a binary from GitHub without
+   gaining a set of public CAs it exists not to trust. The shape that fits
+   ADR-0008 is the Controller streaming the binary down the stream that is
+   already open and already mutually authenticated — which is a wire change,
+   a capability gate, and a Controller that holds binaries for architectures
+   other than its own. That is an ADR, not a patch.
 
 ### What step 2 measured
 

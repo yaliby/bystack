@@ -38,7 +38,7 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 
 | Working now | Being built | Not built yet | Decided against |
 |---|---|---|---|
-| Docker discovery (List / Watch / Resync) | Packaging: static builds, image, systemd | Durable graph history | User authentication and RBAC ([ADR-0014](docs/adr/0014-no-user-identity.md)) |
+| Docker discovery (List / Watch / Resync) | Controller-driven agent upgrade | Durable graph history | User authentication and RBAC ([ADR-0014](docs/adr/0014-no-user-identity.md)) |
 | Canonical graph, two-layer identity | | Plugin system | Destructive operations — `remove`, `prune`, volume deletion |
 | Compose stacks, services, `depends_on` | | | |
 | Incremental deltas over WebSocket | | | |
@@ -46,12 +46,14 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 | Container / service / stack operations | | | |
 | Agent wire protocol + Controller ingest | | | |
 | mTLS, join-token enrollment, auto-renewal | | | |
-| The agent — Rust, 1.82 MiB, 3.9 MiB RSS | | | |
+| The agent — Rust, 1.97 MiB static musl, 3.9 MiB RSS | | | |
 | Zero-config startup — a bundled local agent | | | |
 | Hosts and the operations timeline, on the map | | | |
 | Container logs — one-shot **and live** | | | |
 | Crash-loop depth (`RestartCount`) | | | |
 | A durable operations log | | | |
+| Static binaries, an image, systemd units, a one-command install | | | |
+| `bystack-ctl`, and the dashboard served by the Controller | | | |
 
 The fourth column is not a backlog. ByStack is a **single-operator LAN control
 plane**: one Controller, on a network you own, managing your own machines.
@@ -90,10 +92,59 @@ connection is mutually authenticated against an internal CA, agents enrol with
 a single-use join token, and certificates renew themselves over the stream
 that is already open.
 
-One thing named in the docs is still open: **packaging** — static builds, a
-container image, a systemd unit, Controller-driven upgrade
-([`docs/MIGRATION.md`](docs/MIGRATION.md) §7). Everything the platform *does*
-is reachable from the map; what is missing is how it gets onto a machine.
+**And it now installs.** Static musl binaries per architecture, a container
+image, systemd units, a wheel that carries both the agent and the dashboard,
+and `bystack-ctl` ([`docs/MIGRATION.md`](docs/MIGRATION.md) §7). The dashboard
+is served by the Controller on its own port, so there is no Node on a
+control-plane host and no second origin. "Add a host" hands out a command that
+works on a machine with nothing on it, which is what it did not do before.
+
+One clause of that step is still open: **Controller-driven upgrade**. Version
+skew is visible — the Controller knows its own version and every agent's — but
+replacing a running agent is still `install-agent.sh` on that host.
+
+---
+
+## Installing it
+
+Three ways in, and they differ only in what you already run.
+
+```bash
+# 1. The container. The Controller manages the engine it is mounted against.
+docker compose -f packaging/docker-compose.yml up -d
+#    -> http://127.0.0.1:8000
+
+# 2. A wheel. Carries the agent binary and the dashboard; nothing else needed.
+python3 -m venv /opt/bystack
+/opt/bystack/bin/pip install bystack-0.1.0-py3-none-manylinux*_x86_64*.whl
+/opt/bystack/bin/bystack                        # manages this machine
+
+# 3. From a checkout. `scripts/build-agent.sh` produces the static binaries.
+./scripts/build-agent.sh && (cd frontend && npm ci && npm run build)
+pip install -e backend && bystack
+```
+
+Adding a host is one command on that host, and the dashboard composes it with
+the token already in it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.1.0/scripts/install-agent.sh \
+  | sudo sh -s -- --controller wss://controller:8443 --token bst1.…
+```
+
+It fetches one static binary, checks it against the release's `SHA256SUMS`,
+installs a hardened systemd unit and starts it. `--binary` skips the download
+for a network with no egress; `--uninstall` removes everything except the
+certificate, because that is this host's identity and not ours to discard.
+
+Everything an operator can do in the dashboard is also in `bystack-ctl`:
+
+```bash
+bystack-ctl status              # health, what is observed, whether hosts can join
+bystack-ctl token               # mint a token, print the command to paste
+bystack-ctl hosts               # the fleet, and which rows need a decision
+bystack-ctl approve <engine-id>
+```
 
 ---
 
@@ -289,7 +340,9 @@ nothing.
 
 Revoking asks first, by name.
 
-The same four routes drive everything above, and are the scriptable path:
+The same four routes drive everything above, and are the scriptable path.
+`bystack-ctl` is a thin layer over exactly these, for when curl and jq is more
+typing than the job deserves:
 
 ```bash
 # 1. Mint a token on the Controller. Single-use, 15 minutes by default, and it
@@ -297,11 +350,15 @@ The same four routes drive everything above, and are the scriptable path:
 #    before sending the secret.
 curl -sX POST localhost:8000/api/v1/agents/tokens -d '{"ttl_minutes": 15}' \
      -H 'content-type: application/json'
-# -> {"token": "bst1.<sha256>.<secret>", "install": "bystack-agent --controller ..."}
+# -> {"token": "bst1.<sha256>.<secret>",
+#     "install": "curl -fsSL .../install-agent.sh | sudo sh -s -- --controller ...",
+#     "manual":  "bystack-agent --controller ... --token ..."}
 
-# 2. On the managed host. The agent generates its own key, never sends it, and
-#    stores the certificate it gets back.
-bystack-agent --controller wss://controller.example:8443 --token bst1....
+# 2. On the managed host. `install` puts the agent there and runs it as a
+#    service; `manual` is the same enrolment on a host that already has the
+#    binary. The agent generates its own key, never sends it, and stores the
+#    certificate it gets back.
+sudo sh install-agent.sh --controller wss://controller.example:8443 --token bst1....
 
 # 3. Approve it. Until you do, the agent is connected and contributing nothing
 #    — which is what makes a stolen token visible instead of silently effective.

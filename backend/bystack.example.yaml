@@ -4,18 +4,28 @@
 # discovered, always. Manual configuration exists as optional metadata, never as
 # a source of structure.
 
-# Refuse every mutating operation. Secure default: opt out deliberately.
+# Refuse every mutating operation. **Defaults to false** -- this is a control
+# plane and not a diagram.
 #
-# Set to false to enable start / stop / restart / pause / unpause / kill on
-# containers, services and stacks. Discovery is unaffected either way -- it is
-# read-only by nature.
+# It shipped `true` on the reasoning that a mutating default is never safe.
+# ADR-0014 closed that door from the other side instead: everything in
+# `CommandKind` is a reversible lifecycle transition, the API binds to
+# loopback, and every attempt is recorded durably. The worst a wrong click does
+# is restart a container. Against that, the cost of the safe default was paid
+# on every first run -- a platform whose whole point is "the live map is the
+# control surface" came up refusing every action, with no error a new operator
+# could connect to a setting they had never read about.
 #
-# There is no per-operation switch and no allow-list, because there is not yet
-# anything to attach one to: authentication does not exist, so every operation
-# is recorded against `anonymous`. Until it does, this one flag is the whole
-# authorization model, and pretending otherwise with finer-grained settings
-# would suggest a control that is not there. See docs/adr/0012.
-read_only: true
+# Set it to true to get the viewer back: a Controller pointed at production
+# from a laptop, or any host you want to watch and not touch. It is enforced at
+# one choke point (`CommandService`) and again by each agent on its own
+# authority, so it is a real guarantee rather than a UI preference.
+#
+# There is no per-operation switch and no allow-list, and there will not be
+# one: nothing authenticates a browser to this API by design (ADR-0014), so
+# there is nobody to attach a permission to. Finer-grained settings would
+# suggest a control that is not there.
+read_only: false
 
 # Where agents dial in. This is the entire discovery configuration, because
 # agents arrive rather than being reached -- there is nothing here about
@@ -106,6 +116,10 @@ api:
   # any platform should ship.
   host: 127.0.0.1
   port: 8000
+  # A development arrangement, and only that. The Controller serves the
+  # dashboard itself on the port above (`api/web.py`), so a deployed
+  # installation has one origin and needs nothing here -- set it to `[]`. This
+  # entry exists for `npm run dev`, where the UI is on 5173 and the API is not.
   cors_origins:
     - http://localhost:5173
 

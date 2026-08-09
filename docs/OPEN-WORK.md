@@ -378,38 +378,66 @@ what ADR-0014 is scoped to — a feature request does not.
 
 ## 5. Step 7 — packaging
 
-The last unchecked step in [MIGRATION §6](MIGRATION.md). Nothing exists yet:
-no `.github/workflows`, no Dockerfile, no systemd unit, no `bystack-ctl`.
+~~The last unchecked step in [MIGRATION §6](MIGRATION.md).~~ **Landed**, except
+for one clause. What exists now: `scripts/build-agent.sh` (static musl, both
+architectures, checksummed), `scripts/install-agent.sh`, `packaging/`
+(Dockerfile, compose, two systemd units, the image's config),
+`backend/hatch_build.py`, `bystack-ctl`, and two workflows.
 
-The one hook already in place is `bystack/_bundled/bystack-agent`
-(`runtime/localagent.py:48`), first in the local agent's search order and
-absent in a source checkout, where the search falls through to
-`agent/target/release/`.
+**The thing that blocked the product is closed.** "Add a host" composed
+`bystack-agent --controller … --token …` — a command that assumed the binary
+was already on the target machine, so the button handed you something you
+could not run on a new server. It now composes a `curl … | sudo sh` over the
+installer, pinned to the Controller's own version, with the direct form kept
+alongside for a host that already has the agent.
 
-**Why this blocks the product, not just the release:** "add a host" in the
-dashboard mints a token and composes
-`bystack-agent --controller wss://… --token …` for the operator to paste — a
-command that assumes the binary is *already on the target machine*. There is
-no package, no installer and no bootstrap script, so today the button hands
-you a command you cannot yet run on a new server. Until step 7 lands, the
-fleet story is complete for hosts that already have the binary and for no
-others.
+### What is left: Controller-driven upgrade
 
-Note for whoever writes the systemd unit: `serve()` owns SIGINT and SIGTERM
-itself (`main.py`, commit `4143b5f`) precisely so `systemctl stop` finishes
-cleanly. `bystack.conformance.local`'s `stopped_by_signal` is the check that
-holds it — it spawns the real entry point and signals it, and it is the only
-check in the suite that does. Do not let a refactor quietly hand the signals
-back to uvicorn: `Server.serve()` re-raises the signal it caught, which
-terminates the process before any cleanup its caller arranged.
+Version skew is *observable* — the Controller reads `Hello.agent_version` from
+every agent and knows its own — and that is the whole of it. Acting on it is
+not implemented, and the obvious design does not work:
 
-Two things the packaging will now have to place that it would not have before:
+**The agent has no root store.** `agent/Cargo.toml` takes rustls's
+underscore-prefixed `__rustls-tls` feature precisely to avoid the public CA
+sets the two ordinary spellings bring, because the agent trusts exactly one
+CA — the Controller's — and a public CA that mis-issues for the Controller's
+hostname must not be a way in. So an agent cannot fetch a release from GitHub
+without acquiring the trust surface it was built to refuse, plus the binary
+size that comes with it.
 
-- `agents.state_dir` holds a third file (`operations.jsonl`) and is created
-  0700. A container image needs it on a volume or the audit log is durable
-  only until the container is replaced, which is worse than honest.
-- The frontend bundle is **1.72 MB (530 KB gzipped)**, over vite's warning
-  threshold. Untouched, and a code-splitting question that belongs here.
+The shape that fits ADR-0008 is the Controller pushing the binary down the
+stream that is already open and already mutually authenticated. That needs:
+
+- a wire message and a capability to gate it on, so an older agent refuses
+  with a diagnosis rather than timing out (the rule in §7 below);
+- a Controller that holds binaries for architectures other than its own —
+  the wheel carries exactly one, on purpose;
+- an agent that can replace its own executable and exit for the service
+  manager to restart it, which is where `install`-not-`cp` matters: replacing
+  the inode rather than writing through it is what stops a running process
+  reading a half-written file.
+
+That is an ADR, not a patch. Nothing in the current tree pre-empts it.
+
+### Two notes that were live during this work, and still are
+
+`serve()` owns SIGINT and SIGTERM itself (`main.py`, commit `4143b5f`)
+precisely so `systemctl stop` finishes cleanly, and
+`bystack.conformance.local`'s `stopped_by_signal` is what holds it. Do not let
+a refactor hand the signals back to uvicorn: `Server.serve()` re-raises the
+signal it caught, which terminates the process before any cleanup its caller
+arranged. That check now also measures *how long* the stop took — the agent
+ignored SIGTERM entirely and every shutdown was a kill five seconds late,
+which a ten-second budget passed happily.
+
+`agents.state_dir` holds `operations.jsonl` and is created 0700. The image
+declares it a volume; a container that keeps its audit trail only until it is
+replaced is worse than one with none, because it looks like a record.
+
+~~The frontend bundle is 1.72 MB (530 KB gzipped), over vite's warning
+threshold.~~ **Split.** elkjs is fetched on first layout, so the initial
+payload is 293 kB / 94 kB gzipped. The warning threshold moved to just above
+elkjs, because a warning that fires on every build is one nobody reads.
 
 ---
 
