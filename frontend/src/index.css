@@ -1032,6 +1032,31 @@ body {
   line-height: 1.45;
 }
 
+/* Version skew is a report, not a fault, and the colour is the argument: the
+   same muted surface as a note rather than `--critical`, which is reserved for
+   something that is actually wrong. Every host counted here is managed, healthy
+   and doing its job — it is simply older than the Controller. */
+.hosts__upgrade {
+  flex: none;
+  margin: 12px 0 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.hosts__upgrade > p {
+  margin: 0 0 8px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.hosts__upgrade > p.hosts__upgrade-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+}
+
 .hosts__list {
   flex: 1;
   min-height: 0;

@@ -193,10 +193,18 @@ def cmd_hosts(args: argparse.Namespace, url: str) -> int:
         # agent version was already on this route with nothing to compare it
         # against, which made it a fact rather than an answer (ADR-0015).
         print()
-        print(f"* {len(behind)} host(s) behind the Controller ({current}). Upgrading is:")
-        print("    sudo sh install-agent.sh --controller wss://… --token …   # on that host")
-        print("  Re-running the installer is the supported path; it is idempotent and")
-        print("  never touches the certificate.")
+        print(f"* {len(behind)} host(s) behind the Controller ({current}). On each one:")
+        # The command the Controller composes, not one written here. It carries
+        # the running version and the address agents actually dial, so an
+        # operator who upgraded the Controller ten minutes ago is handed the
+        # matching agent rather than a line with an ellipsis in it that they
+        # have to reconstruct on every host.
+        print(f"    {call(url, '/agents/enrollment')['upgrade']}")
+        # Said out loud because the missing token is the part that looks like
+        # an omission. Re-running the installer *with* one makes the agent
+        # enrol again, and the host comes back as a stranger waiting for
+        # approval while the row above it goes quiet.
+        print("  No token: that is what makes it an upgrade rather than a second host.")
     return 0
 
 

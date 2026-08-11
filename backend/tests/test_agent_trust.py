@@ -705,6 +705,31 @@ def test_the_pasted_command_installs_something_that_exists(tmp_path: Path) -> No
     assert minted["manual"].startswith("bystack-agent ")
 
 
+def test_the_upgrade_command_carries_no_token(tmp_path: Path) -> None:
+    """The one difference between installing and upgrading, and it is the load-bearing one.
+
+    A token beside a stored certificate makes the agent enrol a second time, so
+    a host upgraded with the install command comes back as a stranger awaiting
+    approval while the row an operator was looking at goes quiet. The Controller
+    composes the correct line rather than leaving it to be reconstructed from a
+    document, so this asserts the absence as much as the contents.
+    """
+    controller = make_controller(tmp_path)
+
+    with TestClient(controller.ui) as browser:
+        terms = browser.get(f"{API_PREFIX}/agents/enrollment").json()
+        minted = browser.post(f"{API_PREFIX}/agents/tokens", json={"ttl_minutes": 15}).json()
+
+    upgrade = terms["upgrade"]
+    assert "--token" not in upgrade
+    assert minted["token"] not in upgrade
+    # Otherwise the same command, pinned to this Controller's version, so an
+    # upgraded Controller hands out the agent that matches it.
+    assert "install-agent.sh" in upgrade
+    assert f"/v{__version__}/" in upgrade
+    assert "--controller wss://" in upgrade
+
+
 def test_an_unknown_verdict_never_reaches_the_admitted_branch() -> None:
     """Every `Refusal` has a place in the terminal/retry split. A value added
     later without a decision would be silently treated as retryable, which is

@@ -20,6 +20,7 @@ import type { JoinToken, ProviderHealth } from '../../../api/types';
 import {
   LINK_LABEL,
   STATUS_LABEL,
+  behindCount,
   describeRow,
   describeSince,
   fleetRows,
@@ -68,6 +69,7 @@ export function HostsPanel({
   const rows = fleetRows(fleet.agents, providers, resolveHostName, now);
   const listenerOff = fleet.terms !== null && !fleet.terms.enabled;
   const localNotice = localAgentNotice(fleet.terms, rows);
+  const behind = behindCount(rows, controllerVersion);
 
   const addHost = async () => {
     setMinting(true);
@@ -128,6 +130,24 @@ export function HostsPanel({
         </p>
       ) : null}
 
+      {/* Once, above the list, and not on each card that is behind: the command
+          is the same on every one of them, and a constant repeated per row is
+          how four hosts become four copies of one sentence. The cards say
+          *which*; this says what to do about it.
+
+          Shown verbatim from the Controller, which is the whole point. It
+          carries the version the Controller is actually running, so upgrading
+          the Controller changes this line without anyone editing it — and it
+          has no token, which is the part an operator would get wrong from
+          memory. */}
+      {behind > 0 && fleet.terms ? (
+        <UpgradeNotice
+          count={behind}
+          controllerVersion={controllerVersion}
+          command={fleet.terms.upgrade}
+        />
+      ) : null}
+
       <div className="hosts__list">
         {rows.map((row) => (
           <HostCard
@@ -165,6 +185,78 @@ export function HostsPanel({
         />
       ) : null}
     </aside>
+  );
+}
+
+/**
+ * Hosts running an older agent than the Controller, and the line that fixes it.
+ *
+ * A report and not an alarm. A mixed-version fleet is an ordinary operating
+ * state under ADR-0008 — nothing here is broken, and every one of those hosts
+ * is still managed — so this reads as a note in the panel rather than as an
+ * error, and nothing about it blocks anything.
+ *
+ * The same `token__command` field the install command uses, for one reason:
+ * that field is selectable and read-only, so an operator whose browser refuses
+ * the clipboard (an insecure origin, which is exactly what a Controller on a
+ * private IP is) can still select the text. A `<code>` block would look the
+ * same and lose that.
+ */
+function UpgradeNotice({
+  count,
+  controllerVersion,
+  command,
+}: {
+  count: number;
+  controllerVersion: string | null;
+  command: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setFailed(false);
+    } catch {
+      setFailed(true);
+    }
+  };
+
+  return (
+    <div className="hosts__upgrade">
+      <p>
+        {count === 1 ? '1 host is' : `${count} hosts are`} running an older agent. This
+        Controller is {controllerVersion}. Run this on each of them, as root:
+      </p>
+      <div className="token">
+        <input
+          className="token__command"
+          readOnly
+          value={command}
+          aria-label="Upgrade command"
+          onFocus={(event) => event.currentTarget.select()}
+        />
+        <button type="button" className="control token__copy" onClick={() => void copy()}>
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      {/* The sentence that saves an afternoon. Every other command in this
+          panel carries a token, so its absence here looks like something the
+          UI forgot rather than the thing that makes this an upgrade. */}
+      <p className="hosts__upgrade-note">
+        No token, deliberately: that is what keeps the host's identity instead of
+        enrolling it again as a stranger. Nothing is deleted, and the host drops off the
+        map for a second while the agent restarts.
+      </p>
+      {failed ? (
+        <p className="hosts__upgrade-note">
+          The browser would not write to the clipboard. Select the command above and copy
+          it by hand.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -224,14 +316,14 @@ function HostCard({
         {versionSkew(agent, controllerVersion) ? (
           /* A report, not a fault. A mixed-version fleet is an ordinary
              operating state under ADR-0008, so this is styled as a note and
-             carries no button: upgrading is `install-agent.sh` on that host
-             (ADR-0015). What it replaces is a version printed next to nothing
-             to compare it against. */
+             carries no button: this card says *which* host is behind, and the
+             command that fixes it is named once at the top of the panel
+             (`UpgradeNotice`) because it is the same on all of them. */
           <>
             <span className="brand__sep">·</span>
             <span
               className="host__skew"
-              title={`This Controller is ${controllerVersion}. Re-run install-agent.sh on that host to upgrade it.`}
+              title={`This Controller is ${controllerVersion}. The command to upgrade this host is at the top of this panel.`}
             >
               Controller is {controllerVersion}
             </span>

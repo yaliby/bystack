@@ -7,6 +7,7 @@ import type {
 } from '../../../api/types';
 import {
   RENEWAL_WINDOW_MS,
+  behindCount,
   certificateNote,
   describeRow,
   describeSince,
@@ -395,6 +396,7 @@ function terms(overrides: Partial<EnrollmentTerms> = {}): EnrollmentTerms {
     enabled: false,
     auto_approve: false,
     listen: '0.0.0.0:8443',
+    upgrade: 'curl -fsSL …/install-agent.sh | sudo sh -s -- --controller wss://c:8443',
     local_agent: { state: 'running', detail: '' },
     ...overrides,
   };
@@ -544,5 +546,31 @@ describe('version skew', () => {
     // panel has no stake in, and a wrong guess shows a host as current when
     // it is not.
     expect(versionSkew(agent('a', { agent_version: '0.2.0-rc1' }), '0.2.0')).toBe(true);
+  });
+
+  it('counts the hosts the upgrade command is for', () => {
+    // The panel shows that command once rather than on every card, so the
+    // count is what decides whether to show it at all.
+    const rows = fleetRows(
+      [
+        agent('a', { agent_version: '0.1.0' }),
+        agent('b', { agent_version: '0.1.0' }),
+        agent('c', { agent_version: '0.2.0' }),
+      ],
+      [],
+      noNames,
+      NOW,
+    );
+
+    expect(behindCount(rows, '0.2.0')).toBe(2);
+  });
+
+  it('counts nothing while the Controller version is unknown', () => {
+    // Every card would otherwise light up for the first moment of every load,
+    // and the notice would appear and vanish on a fleet that is entirely
+    // current.
+    const rows = fleetRows([agent('a', { agent_version: '0.1.0' })], [], noNames, NOW);
+
+    expect(behindCount(rows, null)).toBe(0);
   });
 });

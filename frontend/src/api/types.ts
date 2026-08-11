@@ -261,6 +261,16 @@ export interface EnrollmentTerms {
   readonly enabled: boolean;
   readonly auto_approve: boolean;
   readonly listen: string;
+  /**
+   * What to run on a host whose agent is older than the Controller.
+   *
+   * Composed by the Controller, so it carries the running version and the
+   * address agents dial — and deliberately carries no token: one beside a
+   * stored certificate makes the agent enrol again, and the host returns as a
+   * stranger awaiting approval while the one you have goes quiet. Shown
+   * verbatim; the UI never assembles this from parts.
+   */
+  readonly upgrade: string;
   readonly local_agent: LocalAgentStatus;
 }
 

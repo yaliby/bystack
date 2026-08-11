@@ -124,6 +124,27 @@ class EnrollmentOut(BaseModel):
     """Where agents dial. Already inside every ``install`` string; repeated
     here so the disabled case can name the port that is not open."""
 
+    upgrade: str
+    """The command that replaces the agent on a host that already has one.
+
+    Composed here rather than written down anywhere, for the same reason
+    ``install`` is: it carries *this* Controller's version, so an operator who
+    upgrades the Controller and then reads this line is told to install the
+    matching agent instead of whichever number a document was last edited with.
+
+    **It has no token, and that is the whole content of this field.** The
+    obvious guess -- that upgrading is the install command again -- is wrong in
+    a way that costs an afternoon: a token sitting beside a stored certificate
+    makes the agent enrol a second time, so the host comes back as a stranger
+    awaiting approval while the one you actually have goes quiet. Handing out
+    the correct line is cheaper than documenting the trap.
+
+    Constant across hosts, so it is here rather than on each row of
+    ``GET /agents``. Nothing about it is a secret: it names a public installer
+    and the address agents already dial, which is why it is served on a route
+    that mints nothing and can be read before anything is behind.
+    """
+
     local_agent: LocalAgentOut
 
 
@@ -201,6 +222,23 @@ class AgentOut(BaseModel):
         )
 
 
+def _dial_url(context: Context) -> str:
+    """The address a host on the network types to reach this listener.
+
+    Not `listen`, which is a bind. `0.0.0.0` is a correct thing to bind and a
+    meaningless thing to dial, so a wildcard falls back to the first name the
+    listener issued itself a certificate for -- and that is the right fallback
+    rather than a convenient one: an agent that dialled any *other* name would
+    reject the certificate and refuse to connect, so the names in
+    `server_names` are exactly the set of addresses this command can work at.
+    """
+    host, port = context.settings.agents.listen_address
+    reachable = (
+        context.settings.agents.server_names[0] if host in ("0.0.0.0", "::", "") else host
+    )
+    return f"wss://{reachable}:{port}"
+
+
 @router.post("/tokens", response_model=TokenOut, summary="Mint a join token")
 async def mint_token(body: TokenIn, context: Context) -> TokenOut:
     """One token, one certificate, a few minutes.
@@ -211,11 +249,7 @@ async def mint_token(body: TokenIn, context: Context) -> TokenOut:
     token is long: it is two credentials, not one.
     """
     minted = context.trust.mint_token(dt.timedelta(minutes=body.ttl_minutes))
-    host, port = context.settings.agents.listen_address
-    reachable = context.settings.agents.server_names[0] if (
-        host in ("0.0.0.0", "::", "")
-    ) else host
-    url = f"wss://{reachable}:{port}"
+    url = _dial_url(context)
     return TokenOut(
         token=minted.token,
         expires_at=minted.expires_at_unix,
@@ -242,6 +276,7 @@ async def enrollment_terms(context: Context) -> EnrollmentOut:
         enabled=context.settings.agents.enabled,
         auto_approve=context.settings.agents.auto_approve,
         listen=context.settings.agents.listen,
+        upgrade=f"curl -fsSL {INSTALLER_URL} | sudo sh -s -- --controller {_dial_url(context)}",
         local_agent=LocalAgentOut(state=status.state.value, detail=status.detail),
     )
 

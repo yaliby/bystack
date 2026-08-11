@@ -207,11 +207,25 @@ export function certificateNote(agent: EnrolledAgent, now: number): string | nul
  *
  * A mixed-version fleet is an ordinary operating state (ADR-0008), so this is
  * a *report*. It is not styled as a fault and there is no button beside it:
- * upgrading is `install-agent.sh` on that host (ADR-0015).
+ * upgrading is `install-agent.sh` on that host (ADR-0015), and the command is
+ * named once for the whole panel — see `behindCount`.
  */
 export function versionSkew(agent: EnrolledAgent, controller: string | null): boolean {
   return Boolean(controller) && Boolean(agent.agent_version) &&
     agent.agent_version !== controller;
+}
+
+/**
+ * How many hosts are running something other than the Controller.
+ *
+ * Exists so the upgrade command can be shown *once*, above a list, rather than
+ * repeated on every card that is behind. The command is a constant — the same
+ * line runs on all of them — and a constant printed per row is the shape that
+ * turns a four-host fleet into a screen of the same sentence. Which hosts are
+ * behind is already on the cards; this answers whether to say anything at all.
+ */
+export function behindCount(rows: readonly HostRow[], controller: string | null): number {
+  return rows.filter((row) => versionSkew(row.agent, controller)).length;
 }
 
 export function hostLabel(engineId: string, name: string | null): string {

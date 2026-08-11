@@ -48,6 +48,10 @@ TERMS = {
     "enabled": True,
     "auto_approve": False,
     "listen": "0.0.0.0:8443",
+    "upgrade": (
+        "curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0"
+        "/scripts/install-agent.sh | sudo sh -s -- --controller wss://10.0.0.5:8443"
+    ),
     "local_agent": {"state": "running", "detail": "/usr/local/bin/bystack-agent"},
 }
 
@@ -122,7 +126,11 @@ def test_a_uuid_engine_id_does_not_destroy_the_table(
     rest of the table looking like a different table.
     """
     rows = [agent("f952ee52-b480-42d6-bf22-cae4fddb142c"), agent("AAAABBBBCCCC")]
-    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
+    monkeypatch.setattr(
+        ctl,
+        "call",
+        responder({"/agents": rows, "/healthz": HEALTH, "/agents/enrollment": TERMS}),
+    )
 
     ctl.cmd_hosts(args(), "http://x")
 
@@ -137,7 +145,11 @@ def test_a_pending_host_is_named_once_with_the_command_that_fixes_it(
     """Pending is the one state that needs a person. A list that reports it in
     a column and stops has left the reader to work out what to do about it."""
     rows = [agent("e1"), agent("e2", status="pending", connected=False)]
-    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
+    monkeypatch.setattr(
+        ctl,
+        "call",
+        responder({"/agents": rows, "/healthz": HEALTH, "/agents/enrollment": TERMS}),
+    )
 
     ctl.cmd_hosts(args(), "http://x")
 
@@ -155,7 +167,11 @@ def test_no_certificate_is_a_dash_and_never_the_epoch(
     exactly where somebody would read it as one.
     """
     rows = [agent("e1", local=True)]
-    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
+    monkeypatch.setattr(
+        ctl,
+        "call",
+        responder({"/agents": rows, "/healthz": HEALTH, "/agents/enrollment": TERMS}),
+    )
 
     ctl.cmd_hosts(args(), "http://x")
 
@@ -236,7 +252,11 @@ def test_json_is_the_whole_payload_and_nothing_else(
     """`--json` has to be pipeable, so the table's commentary must not leak
     into it — including the advice about pending hosts."""
     rows = [agent("e2", status="pending", connected=False)]
-    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
+    monkeypatch.setattr(
+        ctl,
+        "call",
+        responder({"/agents": rows, "/healthz": HEALTH, "/agents/enrollment": TERMS}),
+    )
 
     ctl.cmd_hosts(args(json=True), "http://x")
 
@@ -284,7 +304,11 @@ def test_hosts_behind_the_controller_are_named_with_the_way_to_fix_them(
         agent("old", agent_version="0.1.0"),
         agent("unseen", agent_version="", connected=False),
     ]
-    monkeypatch.setattr(ctl, "call", responder({"/agents": rows, "/healthz": HEALTH}))
+    monkeypatch.setattr(
+        ctl,
+        "call",
+        responder({"/agents": rows, "/healthz": HEALTH, "/agents/enrollment": TERMS}),
+    )
 
     ctl.cmd_hosts(args(), "http://x")
 
