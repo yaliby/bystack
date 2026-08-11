@@ -24,6 +24,7 @@ from bystack.core.identity import (
 )
 from bystack.providers.docker.mapper import (
     _parse_depends_on,
+    build_container_slice,
     build_partition,
     map_container,
     map_host,
@@ -348,3 +349,119 @@ def test_a_container_with_no_healthcheck_carries_no_verdict() -> None:
     nodes, _ = map_container(SOURCE, ENGINE_ID_SAFE, make_container("n" * 64, "web"))
 
     assert nodes[0].attrs["health"] is None
+
+
+# --------------------------------------------------------------------------
+# The logical layer's state
+#
+# A service and a stack used to carry none, and the two things that broke are
+# not obviously the same bug: the inspector said "No state" beside a card the
+# canvas had already drawn green, and — because a node whose content never
+# changes has a `revision` that never changes — the dashboard's action bar
+# never refetched, so a service that had just come back up kept offering
+# `Start`. Both are fixed by the same fact arriving.
+# --------------------------------------------------------------------------
+
+
+def logical(nodes, kind: str) -> Node:
+    return next(n for n in nodes if n.kind == kind)
+
+
+def test_a_service_takes_the_state_of_the_container_that_realizes_it() -> None:
+    payload = make_container("s" * 64, "web", project="shop", service="web", state="exited")
+
+    nodes, _ = map_container(SOURCE, ENGINE_ID_SAFE, payload)
+
+    assert logical(nodes, NodeKind.SERVICE).status == "exited"
+    assert logical(nodes, NodeKind.STACK).status == "exited"
+
+
+def test_a_service_reports_its_worst_replica() -> None:
+    # The whole reason to aggregate rather than deduplicate by URN: one dead
+    # replica out of three is the fact the operator needs, and the last
+    # container in the list would otherwise have overwritten it.
+    containers = [
+        make_container("a" * 64, "web-1", project="shop", service="web"),
+        make_container("b" * 64, "web-2", project="shop", service="web", state="exited"),
+        make_container("c" * 64, "web-3", project="shop", service="web"),
+    ]
+
+    nodes, _ = build_container_slice(SOURCE, ENGINE_ID_SAFE, containers)
+
+    assert logical(nodes, NodeKind.SERVICE).status == "exited"
+    assert logical(nodes, NodeKind.STACK).status == "exited"
+    # And the containers themselves are untouched by the fold.
+    assert sorted(n.status for n in nodes if n.kind == NodeKind.CONTAINER) == [
+        "exited", "running", "running",
+    ]
+
+
+def test_a_stack_reports_the_worst_of_all_its_services() -> None:
+    containers = [
+        make_container("a" * 64, "web", project="shop", service="web"),
+        make_container("b" * 64, "db", project="shop", service="db", state="restarting"),
+    ]
+
+    nodes, _ = build_container_slice(SOURCE, ENGINE_ID_SAFE, containers)
+
+    by_name = {n.name: n for n in nodes if n.kind == NodeKind.SERVICE}
+    assert by_name["web"].status == "running"
+    assert by_name["db"].status == "restarting"
+    assert logical(nodes, NodeKind.STACK).status == "restarting"
+
+
+def test_one_unhealthy_replica_is_reported_even_when_another_decides_the_state() -> None:
+    # Two ladders, folded independently. The state comes from the exited
+    # replica; the verdict from a different one entirely, and losing it would
+    # hide a failing probe behind a container that is merely stopped.
+    healthy = make_container("a" * 64, "web-1", project="shop", service="web")
+    healthy["Health"] = "healthy"
+    sick = make_container("b" * 64, "web-2", project="shop", service="web")
+    sick["Health"] = "unhealthy"
+
+    nodes, _ = build_container_slice(SOURCE, ENGINE_ID_SAFE, [healthy, sick])
+
+    service = logical(nodes, NodeKind.SERVICE)
+    assert service.status == "running"
+    assert service.attrs["health"] == "unhealthy"
+
+
+def test_a_state_we_do_not_recognise_loses_to_one_we_do() -> None:
+    # An unknown state renders as "No state", so letting it win would hide a
+    # container we can describe behind one we cannot — which is the failure
+    # this aggregation exists to remove.
+    known = make_container("a" * 64, "web-1", project="shop", service="web", state="exited")
+    alien = make_container("b" * 64, "web-2", project="shop", service="web", state="quantum")
+
+    nodes, _ = build_container_slice(SOURCE, ENGINE_ID_SAFE, [known, alien])
+
+    assert logical(nodes, NodeKind.SERVICE).status == "exited"
+
+
+def test_a_transition_moves_the_services_revision() -> None:
+    # The half of this fix that is not visible in the inspector: the action
+    # bar refetches on `revision`, so a service whose hash never moved kept
+    # offering the buttons it was selected with.
+    up = [make_container("a" * 64, "web", project="shop", service="web")]
+    down = [make_container("a" * 64, "web", project="shop", service="web", state="exited")]
+
+    before, _ = build_container_slice(SOURCE, ENGINE_ID_SAFE, up, observed_at=1.0)
+    after, _ = build_container_slice(SOURCE, ENGINE_ID_SAFE, down, observed_at=1.0)
+
+    assert not logical(before, NodeKind.SERVICE).same_content_as(
+        logical(after, NodeKind.SERVICE)
+    )
+
+
+def test_an_unchanged_service_keeps_its_revision() -> None:
+    # The property that keeps an idle cluster at zero WebSocket traffic: the
+    # fold must not invent a difference between two identical observations.
+    containers = [
+        make_container("a" * 64, "web-1", project="shop", service="web"),
+        make_container("b" * 64, "web-2", project="shop", service="web", state="exited"),
+    ]
+
+    first, _ = build_container_slice(SOURCE, ENGINE_ID_SAFE, containers, observed_at=1.0)
+    second, _ = build_container_slice(SOURCE, ENGINE_ID_SAFE, containers, observed_at=9999.0)
+
+    assert logical(first, NodeKind.SERVICE).same_content_as(logical(second, NodeKind.SERVICE))

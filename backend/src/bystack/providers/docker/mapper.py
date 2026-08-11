@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from bystack.core.graph.model import Edge, EdgeKind, Node
@@ -96,10 +96,11 @@ def map_container(
 
     Emits up to three nodes: the physical container, and -- when the container
     belongs to a compose project -- the logical stack and service it realizes.
-    Stack and service nodes are emitted redundantly by every container that
-    belongs to them; the store deduplicates by URN and content hash, so the
-    redundancy costs nothing and keeps this function free of cross-container
-    state.
+    Stack and service nodes are emitted by every container that belongs to
+    them, each carrying *that* container's state; folding them into one state
+    per service is :func:`build_container_slice`'s job, because it is the only
+    caller holding the whole membership. That split is what keeps this
+    function free of cross-container state.
     """
     at = observed_at or _now()
     container_id = payload["Id"]
@@ -108,6 +109,11 @@ def map_container(
     urn = container_urn(engine_id, container_id)
     host = host_urn(engine_id)
     ports = _map_ports(payload.get("Ports") or [])
+    # Read once: the logical nodes below are built from the same two facts, and
+    # a service whose state was spelled differently from its own container's
+    # would be the exact contradiction this layer exists to remove.
+    state = payload.get("State")
+    health = payload.get("Health") or None
 
     nodes: list[Node] = [
         Node(
@@ -115,7 +121,7 @@ def map_container(
             kind=NodeKind.CONTAINER,
             name=_container_name(payload, container_id),
             source=source,
-            status=payload.get("State"),
+            status=state,
             labels=labels,
             attrs={
                 "short_id": container_id[:12],
@@ -136,7 +142,7 @@ def map_container(
                 # `running`, and `capability.py` is right to keep offering
                 # the operations a running container has. What changes is
                 # what the map is allowed to claim about it.
-                "health": payload.get("Health") or None,
+                "health": health,
                 # How deep the crash loop is. `exit_code` says a container
                 # died and how; this says whether it has been dying for four
                 # seconds or four days, which is the difference between a
@@ -234,15 +240,23 @@ def map_container(
         stack = stack_urn(engine_id, project)
         svc = service_urn(engine_id, project, service)
 
+        # Both logical nodes carry this container's state, to be folded with
+        # its siblings' upstream. Leaving them stateless -- which they were --
+        # cost more than a blank line in the inspector: a node whose content
+        # never changes has a `revision` that never changes either, so the
+        # dashboard's action bar never refetched, and a stopped service kept
+        # offering `Start` long after it was running again.
         nodes.append(
             Node(
                 urn=stack,
                 kind=NodeKind.STACK,
                 name=project,
                 source=source,
+                status=state,
                 attrs={
                     "working_dir": labels.get(LABEL_WORKING_DIR),
                     "config_files": labels.get(LABEL_CONFIG_FILES),
+                    "health": health,
                 },
                 observed_at=at,
             )
@@ -253,7 +267,8 @@ def map_container(
                 kind=NodeKind.SERVICE,
                 name=service,
                 source=source,
-                attrs={"project": project},
+                status=state,
+                attrs={"project": project, "health": health},
                 observed_at=at,
             )
         )
@@ -442,6 +457,80 @@ def map_image(source: str, payload: dict[str, Any], *, observed_at: float | None
 # Whole-partition assembly (the List half of List/Watch)
 # --------------------------------------------------------------------------
 
+#: Container states, ordered by how much they should worry an operator.
+#:
+#: Mirrors `statusOf` in the frontend's `theme.ts` -- good, then warning, then
+#: serious, then critical -- and mirrors it deliberately. The point of giving a
+#: service a state at all is that the card and the panel beside it agree, so a
+#: ladder that disagreed with that one by a single rung would reintroduce the
+#: contradiction in a form much harder to see than a blank field.
+_STATE_SEVERITY: Final[Mapping[str, int]] = {
+    "running": 0,
+    "restarting": 1,
+    "paused": 1,
+    "removing": 1,
+    "created": 2,
+    "exited": 3,
+    "dead": 3,
+}
+
+#: Healthcheck verdicts, on their own ladder.
+#:
+#: Aggregated separately from the state because they are separate facts: the
+#: worst-off container decides the service's state, and *any* unhealthy member
+#: is worth reporting even when the state was decided by a different container
+#: entirely. `starting` is not a warning -- every healthchecked container
+#: passes through it on the way up -- it only outranks `healthy` so that a
+#: service still coming up is not described by whichever replica got there
+#: first.
+_HEALTH_SEVERITY: Final[Mapping[str, int]] = {
+    "healthy": 0,
+    "starting": 1,
+    "unhealthy": 2,
+}
+
+
+def _worse(left: str | None, right: str | None, severity: Mapping[str, int]) -> str | None:
+    """The more serious of two values in one vocabulary.
+
+    A value the ladder does not know loses to one it does, and that direction
+    is deliberate: an unrecognised state renders as "No state", so letting it
+    win would hide a container we can describe behind one we cannot -- which is
+    the failure this aggregation exists to remove. When neither is known the
+    left one survives, so the answer is always a state something reported.
+    """
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return right if severity.get(right, -1) > severity.get(left, -1) else left
+
+
+def _fold_logical(existing: Node, incoming: Node) -> Node:
+    """Merge two containers' views of the same service or stack.
+
+    Built by hand rather than with :func:`dataclasses.replace`, which is a trap
+    here: ``revision`` is an init field, so `replace` would copy the old hash
+    onto the new content and the store would decide nothing had changed.
+    """
+    status = _worse(existing.status, incoming.status, _STATE_SEVERITY)
+    health = _worse(
+        existing.attrs.get("health"), incoming.attrs.get("health"), _HEALTH_SEVERITY
+    )
+    if status == existing.status and health == existing.attrs.get("health"):
+        return existing
+
+    return Node(
+        urn=existing.urn,
+        kind=existing.kind,
+        name=existing.name,
+        source=existing.source,
+        status=status,
+        labels=existing.labels,
+        attrs={**existing.attrs, "health": health},
+        observed_at=existing.observed_at,
+    )
+
 
 def build_container_slice(
     source: str,
@@ -456,16 +545,33 @@ def build_container_slice(
     logical layer through the identical code path. Two derivations of "what is
     a service" would drift apart, and the divergence would show up as
     topology that changes depending on how it was discovered.
+
+    This is also where a service and a stack acquire their state. Each
+    container emits its own view of the logical nodes above it; they are folded
+    here into the worst state any member reported, which is a question only
+    this function can answer because it is the only one holding the whole
+    membership. One dead replica in a service of three is the fact an operator
+    needs, and it is the fact the *last* container in the list would have
+    overwritten if these were simply deduplicated by URN.
     """
     at = observed_at or _now()
     nodes: list[Node] = []
     edges: list[Edge] = []
+    logical: dict[URN, Node] = {}
+
     for payload in containers:
         container_nodes, container_edges = map_container(
             source, engine_id, payload, observed_at=at
         )
-        nodes.extend(container_nodes)
+        for node in container_nodes:
+            if node.kind == NodeKind.CONTAINER:
+                nodes.append(node)
+            else:
+                seen = logical.get(node.urn)
+                logical[node.urn] = node if seen is None else _fold_logical(seen, node)
         edges.extend(container_edges)
+
+    nodes.extend(logical.values())
     return nodes, edges
 
 

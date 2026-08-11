@@ -827,9 +827,17 @@ function enrichCard(node: GraphNode, container: GraphNode | undefined): CardDisp
   if (node.kind === 'service' && container) {
     return {
       title: node.name,
+      // Image and ports still come from a container: they are facts about one
+      // process, and the service has no opinion about them.
       subtitle: cardSubtitle(container),
       ports: cardPorts(container),
-      statusNode: container,
+      // The state does not. The Controller folds every replica's state into
+      // the service (`mapper.py`), so this is the whole service rather than
+      // whichever container `realizedContainers` happened to keep last — and
+      // it is the same node the inspector reads, which is what stops a green
+      // dot from sitting beside a panel that disagrees with it. Falls back to
+      // the container for a Controller old enough not to send one.
+      statusNode: node.status ? node : container,
     };
   }
   if (node.kind === 'volume') {
