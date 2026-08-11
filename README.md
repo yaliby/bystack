@@ -44,11 +44,13 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 | Incremental deltas over WebSocket | | | |
 | Interactive topology canvas | | | |
 | Container / service / stack operations | | | |
+| Unit and process operations, through the same six verbs | | | |
 | Agent wire protocol + Controller ingest | | | |
 | mTLS, join-token enrollment, auto-renewal | | | |
 | The agent — Rust, 1.97 MiB static musl, 3.9 MiB RSS | | | |
 | Zero-config startup — a bundled local agent | | | |
 | Hosts and the operations timeline, on the map | | | |
+| Watched systemd units and processes, selected per host | | | |
 | Container logs — one-shot **and live** | | | |
 | Crash-loop depth (`RestartCount`) | | | |
 | A durable operations log | | | |

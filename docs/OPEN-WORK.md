@@ -5,9 +5,9 @@ than admired. [MIGRATION](MIGRATION.md) is the record of the agent pivot and
 is essentially closed; this is what is left after it, with the decisions that
 have already been made attached to each item so they are not re-litigated.
 
-**One thing is actually open: §5, packaging.** §2, §3 and §3b are closed work
-kept for their reasoning, §4 is a decision *not* to build something, and §6–§7
-are standing notes. If you are looking for the next task, it is §5.
+**One thing is actually open: §5, packaging.** §2, §3, §3b and §8 are closed
+work kept for their reasoning, §4 is a decision *not* to build something, and
+§6–§7 are standing notes. If you are looking for the next task, it is §5.
 
 **Do not trust this file over the tree.** Every claim below was true at the
 commit that last touched it. Section 1 is how you check in ninety seconds.
@@ -25,17 +25,20 @@ cd agent   && cargo build --release          # do this first; the suites below d
 cd ../backend
 .venv/bin/python -m ruff check src tests
 .venv/bin/python -m mypy src
-.venv/bin/python -m pytest -q                                     # 318 passed
+.venv/bin/python -m pytest -q                                     # 377 passed
 .venv/bin/python -m bystack.conformance       ../agent/target/release/bystack-agent   # 32/32
 .venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent   # 35/35
-.venv/bin/python -m bystack.conformance.local ../agent/target/release/bystack-agent   # 16/16
+.venv/bin/python -m bystack.conformance.local ../agent/target/release/bystack-agent   # 17/17
 
-cd ../agent    && cargo clippy --release --all-targets -- -D warnings && cargo test --release  # 34 passed
-cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 156 passed
+cd ../agent    && cargo clippy --release --all-targets -- -D warnings && cargo test --release  # 49 passed
+cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 197 passed
 ```
 
-Agent binary: **1.82 MiB** against a 12 MiB budget, RSS **~3.95 MiB** against
-20. Both are measured by `bystack.conformance`, not asserted from memory.
+Agent binary: **1.96 MiB** against a 12 MiB budget, RSS **~5.00 MiB** against
+20. Both are measured by `bystack.conformance`, not asserted from memory. The
+movement from 1.82/3.95 is the hand-rolled D-Bus client and the host slices
+(ADR-0016) — recorded rather than smoothed, because the honest version of
+"under budget" is the one that shows what moved it.
 
 Three things that look like failures and are not:
 
@@ -512,3 +515,51 @@ elkjs, because a warning that fires on every build is one nobody reads.
   debugging bytecode.
 - **`PartitionWriter` never gets a `source` argument.** It is what stops a
   compromised agent writing to another host's partition.
+
+
+---
+
+## 8. Watched units and processes — closed, and where the edges are
+
+`ADR-0016`. A per-host watch list on the Controller
+(`core/ports/watch.py`, `infra/watch/`), two slices on the wire
+(`SLICE_UNIT`, `SLICE_PROCESS`), a D-Bus client and a `/proc` reader in the
+agent (`agent/src/dbus.rs`, `systemd.rs`, `procfs.rs`, `host.rs`), a mapper on
+the Controller (`providers/host/`), three routes (`api/routes/watch.py`) and a
+panel (`frontend/src/features/watch/`).
+
+Decisions that are settled — **do not reopen without the ADR**:
+
+- **Membership is the operator's selection.** Nothing enumerates a machine on
+  a timer. The picker (`GET /agents/{id}/inventory`) is the only thing that
+  walks a whole host and it runs when somebody opens the dialog — the same
+  rule `useLogs.ts` follows, for the same reason.
+- **A pid is not an identity.** The node is the *rule*; pids are attributes.
+  A command names a watch id and the agent resolves it to pids in the same
+  worker that signals them, with no `await` in between. Do not "optimise" that
+  by caching the pids from the last scan: the kernel recycles them.
+- **A watched thing that is not there is still a node** (`not-found`,
+  `absent`). Dropping the entity is what makes a watch indistinguishable from
+  having forgotten to add one.
+- **No new `CommandKind`, and no `enable`/`disable`/`mask`.** Every verb maps
+  onto the existing six. Unit-file changes are not lifecycle — they change what
+  the machine does after the next reboot — and adding one means reopening
+  ADR-0014 first, exactly as `prune` does.
+- **`active_enter_timestamp` is hashed**, and it looks like the `status_text`
+  trap and is its opposite. A `systemctl restart` by a person moves nothing
+  else: `NRestarts` counts only policy restarts and `ActiveState` is `active`
+  before and after. Verified against a live machine — the graph saw a manual
+  restart in under two seconds, and would have seen nothing without it.
+- **The polkit rule is broad and the bound is in the agent.** `host.rs` refuses
+  a lifecycle command for a unit that is not on this host's list. That is what
+  makes `manage-units` grantable at all; see the ADR and the comment in
+  `packaging/polkit/49-bystack-agent.rules`.
+
+Two things left deliberately undone, both cheap and neither obviously right:
+
+- **The process poll is a fixed ten seconds.** It could be adaptive, or driven
+  by the same coalescing window as everything else. Nothing has asked for it.
+- **`runs_in` is drawn only to nodes already in the graph.** A process inside
+  an unwatched unit carries the unit *name* as an attribute and no edge. The
+  alternative — auto-watching the unit — would add entries an operator did not
+  choose, which is the whole thing this feature refuses to do.

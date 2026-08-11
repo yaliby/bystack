@@ -140,7 +140,18 @@ impl From<&model::Image> for Image {
     }
 }
 
-/// Which slice a Docker event type invalidates.
+/// What the systemd watcher puts on the event channel.
+///
+/// The channel carries Docker's event *types* — `container`, `network` — and
+/// this is a name that cannot collide with one, so a bus signal and a daemon
+/// event coalesce together in the same 250ms window. One burst, one set of
+/// dirty slices, one round of frames, however many subsystems it came from.
+pub const SYSTEMD_EVENT: &str = "systemd";
+
+/// What the process poll puts there. Not a Docker event type either.
+pub const PROCESS_EVENT: &str = "process-scan";
+
+/// Which slice an event invalidates.
 ///
 /// Returns `None` for anything else. The daemon already filters server-side,
 /// so this is the second line of defence rather than the first.
@@ -149,6 +160,8 @@ pub fn slice_for_event(kind: &str) -> Option<Slice> {
         "container" => Some(Slice::Container),
         "network" => Some(Slice::Network),
         "volume" => Some(Slice::Volume),
+        SYSTEMD_EVENT => Some(Slice::Unit),
+        PROCESS_EVENT => Some(Slice::Process),
         _ => None,
     }
 }

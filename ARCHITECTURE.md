@@ -143,7 +143,11 @@ needed — see [ADR-0011](docs/adr/0011-agent-trust-and-enrollment.md).
 
 Turning Docker payloads into nodes, edges, stacks, services and `depends_on`
 relationships is business logic, it is intricate, and it exists once — in
-`providers/docker/mapper.py` on the Controller. Porting it into the Agent
+`providers/docker/mapper.py` on the Controller. The same line holds one
+subsystem over: `providers/host/mapper.py` is where a `LoadState` becomes a
+`not-found` card and a cgroup path becomes an edge to a container, and the
+agent that read both ships systemd's and the kernel's vocabulary upward
+without asking what either means (ADR-0016). Porting it into the Agent
 would duplicate the URN scheme across two languages and make every identity
 bug a cross-language bug.
 
@@ -579,6 +583,14 @@ container, on every managed host, forever. The Agent reports **its own**
 health and coarse state counts. Per-container resource time series belong to
 the system that already does them well.
 
+**Watching units and processes is the sharpest version of that temptation, and
+the answer to it is the shape of the feature** (ADR-0016). The agent can see
+every unit and every process on its machine; what it *observes* is the handful
+an operator selected, and it enumerates the rest only when somebody opens the
+picker. Nothing samples CPU or memory per process — not because it would be
+hard, but because the moment it does, this is a metrics agent with a bad
+sampling rate and a graph attached.
+
 Where an official API exists, we consume it. Where an official SDK exists and
 fits the architecture, we prefer it — with one deliberate exception documented
 in ADR-0007: the official `docker-py` SDK is synchronous and would block the
@@ -607,3 +619,5 @@ Controller/Agent pivot onward are separate documents in
 | [0012](docs/adr/0012-operations-and-audit.md) | Operations: lifecycle only, logical targets, no optimistic updates |
 | [0013](docs/adr/0013-agent-in-rust.md) | The Agent is written in Rust; supersedes ADR-0010 |
 | [0014](docs/adr/0014-no-user-identity.md) | No user identity; the network is the boundary, and destructive verbs stay out |
+| [0015](docs/adr/0015-agent-upgrade.md) | Controller-driven agent upgrade, and why it is not automated |
+| [0016](docs/adr/0016-watched-units-and-processes.md) | Units and processes are *selected*, not discovered; identity is the rule, not the pid |

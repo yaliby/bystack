@@ -310,6 +310,32 @@ async def _serve(websocket: WebSocket, *, local: bool) -> None:
             )
         )
 
+        # After the ack and before the pump, so the agent has its selection in
+        # hand before it sends the first frame of the two host slices. The
+        # other order costs a round trip of empty unit and process slices on
+        # every reconnect, and the operator watches their services blink.
+        #
+        # **Sent even when it is empty**, which costs a frame per connection on
+        # every host in the fleet and buys the one thing skipping it cannot.
+        #
+        # The agent answers a watch list with a full `Sync` of both host
+        # slices, so an empty list is what reconciles them away. Skip it, and
+        # this happens: a host is watching two services, goes offline, the
+        # operator removes both, and the host reconnects. Nothing tells it, so
+        # it sends no unit frame, so the slice is never reconciled -- and the
+        # two cards stay on the map, for a machine that is no longer watching
+        # them, until something unrelated happens to change the list again.
+        #
+        # The frame is a dozen bytes and the handshake already carries four
+        # Sync frames. "An idle host puts zero bytes on the wire" is a claim
+        # about steady state, and this is not steady state.
+        #
+        # A failure here is not a refusal: the list is the Controller's and it
+        # is durable, so a host that could not be told is one that will be told
+        # when it comes back. `send_watchlist` reports that; the connection is
+        # not the place to decide what to do about it.
+        await provider.send_watchlist(context.watchlist.entries(verdict.engine_id))
+
         if verdict.renew:
             # Over the connection that is already open and already
             # authenticated. No cron job, no second channel, no expiry outage.

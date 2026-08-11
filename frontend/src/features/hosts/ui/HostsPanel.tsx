@@ -39,6 +39,8 @@ interface Props {
   readonly controllerVersion: string | null;
   /** The host node's name in the graph, when discovery has produced one. */
   readonly resolveHostName: (engineId: string) => string | null;
+  /** Open this host's watch list. Per host, because the list is. */
+  readonly onWatch: (engineId: string) => void;
   readonly onClose: () => void;
 }
 
@@ -50,6 +52,7 @@ export function HostsPanel({
   providers,
   controllerVersion,
   resolveHostName,
+  onWatch,
   onClose,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
@@ -134,6 +137,7 @@ export function HostsPanel({
             controllerVersion={controllerVersion}
             busy={fleet.busy === row.agent.engine_id}
             confirming={confirming === row.agent.engine_id}
+            onWatch={() => onWatch(row.agent.engine_id)}
             onApprove={() => void fleet.approve(row.agent.engine_id)}
             onAskRevoke={() => setConfirming(row.agent.engine_id)}
             onCancelRevoke={() => setConfirming(null)}
@@ -170,6 +174,7 @@ function HostCard({
   controllerVersion,
   busy,
   confirming,
+  onWatch,
   onApprove,
   onAskRevoke,
   onCancelRevoke,
@@ -180,6 +185,7 @@ function HostCard({
   controllerVersion: string | null;
   busy: boolean;
   confirming: boolean;
+  onWatch: () => void;
   onApprove: () => void;
   onAskRevoke: () => void;
   onCancelRevoke: () => void;
@@ -241,6 +247,18 @@ function HostCard({
           so approve would have nothing to change and revoke would have nothing
           to refuse — both would return 404 and read as a broken panel. The way
           to stop managing it is `local_agent.enabled`, which the row says. */}
+      {/* Above the enrollment buttons and present for every host that is
+          managed at all, including this machine: what a host *shows on the
+          map* is a different question from whether it is allowed to speak,
+          and it is the one an operator returns to. */}
+      {status === 'pending' || status === 'revoked' ? null : (
+        <div className="actions host__actions">
+          <button type="button" className="action" onClick={onWatch}>
+            Services & processes
+          </button>
+        </div>
+      )}
+
       {status === 'local' ? null : confirming ? (
         <div className="host__confirm">
           <p>{revokeWarning(row)}</p>

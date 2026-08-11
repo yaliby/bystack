@@ -36,7 +36,13 @@ from typing import Any, Final
 
 from bystack.agent.v1 import agent_pb2 as wire
 from bystack.core.graph.model import Edge, EdgeKind, Node
-from bystack.core.identity import URN, NodeKind, engine_scope
+from bystack.core.identity import (
+    URN,
+    NodeKind,
+    container_urn,
+    engine_scope,
+    unit_urn,
+)
 from bystack.core.ports.provider import GraphWriter
 from bystack.providers.docker.mapper import (
     build_container_slice,
@@ -45,6 +51,7 @@ from bystack.providers.docker.mapper import (
     map_network,
     map_volume,
 )
+from bystack.providers.host.mapper import build_process_slice, build_unit_slice
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +67,8 @@ SLICE_KINDS: Final[dict[int, frozenset[str]]] = {
     wire.SLICE_NETWORK: frozenset({NodeKind.NETWORK}),
     wire.SLICE_VOLUME: frozenset({NodeKind.VOLUME}),
     wire.SLICE_IMAGE: frozenset({NodeKind.IMAGE}),
+    wire.SLICE_UNIT: frozenset({NodeKind.UNIT}),
+    wire.SLICE_PROCESS: frozenset({NodeKind.PROCESS}),
 }
 
 SLICE_NAME: Final[dict[int, str]] = {
@@ -67,7 +76,19 @@ SLICE_NAME: Final[dict[int, str]] = {
     wire.SLICE_NETWORK: "network",
     wire.SLICE_VOLUME: "volume",
     wire.SLICE_IMAGE: "image",
+    wire.SLICE_UNIT: "unit",
+    wire.SLICE_PROCESS: "process",
 }
+
+#: The two slices whose entity ids are not machine-generated.
+#:
+#: A container id is hexadecimal and a volume name is constrained by the
+#: daemon; a unit name is whatever the operator typed, and it reaches us back
+#: through a process running on a machine we do not own. Both become URN scope
+#: segments, where `/` and `:` are the separators -- so an id carrying one is
+#: either a bug on the agent or an attempt to forge an identity in another
+#: kind's namespace, and neither is a thing to map.
+_HOST_SLICES: Final[frozenset[int]] = frozenset({wire.SLICE_UNIT, wire.SLICE_PROCESS})
 
 
 class IngestError(ValueError):
@@ -159,7 +180,9 @@ class AgentIngest:
         """Apply a full slice. Replaces the membership wholesale."""
         slice_id = _require_slice(frame.slice)
         self._slices[slice_id] = {
-            entity.id: _decode(entity) for entity in frame.entities if entity.id
+            entity.id: _decode(entity)
+            for entity in frame.entities
+            if _usable_id(slice_id, entity.id, self._source)
         }
         await self._reconcile(slice_id)
 
@@ -176,10 +199,13 @@ class AgentIngest:
         entries = self._slices[slice_id]
 
         for entity in frame.changed:
-            if entity.id:
+            if _usable_id(slice_id, entity.id, self._source):
                 entries[entity.id] = _decode(entity)
 
-        present = set(frame.ids)
+        present = {
+            entity_id for entity_id in frame.ids
+            if _usable_id(slice_id, entity_id, self._source)
+        }
         # A payload for an id absent from the membership set is contradictory:
         # the frame is simultaneously saying "this changed" and "this is not
         # here". Trusting the membership set is right, because it is the
@@ -214,13 +240,30 @@ class AgentIngest:
         # one reconcile that is almost always empty -- and an empty delta never
         # reaches the wire, so a quiet cluster still produces zero bytes.
         if slice_id == wire.SLICE_CONTAINER and self._slices[wire.SLICE_IMAGE]:
-            await self._reconcile_images(engine_id)
+            await self._reproject(wire.SLICE_IMAGE, engine_id)
 
-    async def _reconcile_images(self, engine_id: str) -> None:
+        # And the same argument one layer down. A watched process is drawn
+        # inside the container or unit its cgroup names, but only while that
+        # thing is in the graph (`map_process`, `present`) -- so a container
+        # starting is what makes the edge legal, and a container going away is
+        # what makes it a dangling reference. Neither event is in the process
+        # slice, so nothing else would notice it.
+        if slice_id in (wire.SLICE_CONTAINER, wire.SLICE_UNIT) and self._slices[
+            wire.SLICE_PROCESS
+        ]:
+            await self._reproject(wire.SLICE_PROCESS, engine_id)
+
+    async def _reproject(self, slice_id: int, engine_id: str) -> None:
+        """Re-map a slice from cache, because something *else* moved.
+
+        Never recurses: it maps and reconciles directly rather than going back
+        through :meth:`_reconcile`, so a container change cannot start a chain
+        of re-projections that ends up back at containers.
+        """
         nodes, edges = self._map(
-            wire.SLICE_IMAGE, engine_id, list(self._slices[wire.SLICE_IMAGE].values())
+            slice_id, engine_id, list(self._slices[slice_id].values())
         )
-        await self._writer.reconcile(nodes, edges, kinds=SLICE_KINDS[wire.SLICE_IMAGE])
+        await self._writer.reconcile(nodes, edges, kinds=SLICE_KINDS[slice_id])
 
     def _map(
         self, slice_id: int, engine_id: str, payloads: Sequence[dict[str, Any]]
@@ -234,8 +277,29 @@ class AgentIngest:
             case wire.SLICE_VOLUME:
                 mapped = [map_volume(self._source, engine_id, p) for p in payloads]
                 return [n for n, _ in mapped], [e for _, e in mapped]
+            case wire.SLICE_UNIT:
+                return build_unit_slice(self._source, engine_id, payloads)
+            case wire.SLICE_PROCESS:
+                return build_process_slice(
+                    self._source, engine_id, payloads, present=self._declared(engine_id)
+                )
             case _:
                 return self._map_images(engine_id, payloads), []
+
+    def _declared(self, engine_id: str) -> frozenset[URN]:
+        """What this partition currently says exists, for correlation.
+
+        Read out of the membership caches rather than out of the store, and
+        that is the partition rule from ADR-0003 rather than an optimization:
+        asking the store would mean reading a graph that holds every host's
+        entities, and the question being answered is only ever about this one.
+        """
+        urns: set[URN] = set()
+        for container_id in self._slices[wire.SLICE_CONTAINER]:
+            urns.add(container_urn(engine_id, container_id))
+        for unit_name in self._slices[wire.SLICE_UNIT]:
+            urns.add(unit_urn(engine_id, unit_name))
+        return frozenset(urns)
 
     def _map_images(
         self, engine_id: str, payloads: Sequence[dict[str, Any]]
@@ -270,6 +334,31 @@ def _require_slice(slice_id: int) -> int:
     return slice_id
 
 
+def _usable_id(slice_id: int, entity_id: str, source: str) -> bool:
+    """Whether an entity id can be part of an identity at all.
+
+    Dropped rather than fatal, unlike a malformed *frame*. A frame we cannot
+    decode means we no longer know what the agent believes and the cheapest way
+    back is a reconnect; one unusable id among fifty means one card is missing,
+    and closing the stream over it would take a host's whole topology down for
+    a name somebody mistyped.
+
+    Only the host slices are checked, because only they carry ids a person
+    wrote. An image id is `sha256:...` and legitimately contains the character
+    this rejects -- `image_urn` splits on it -- so a blanket check here would
+    silently drop every image on every host.
+    """
+    if not entity_id:
+        return False
+    if slice_id in _HOST_SLICES and ("/" in entity_id or ":" in entity_id):
+        log.warning(
+            "agent %s reported an unusable %s id %r; dropping it",
+            source, SLICE_NAME.get(slice_id, "?"), entity_id[:64],
+        )
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------
 # Wire -> Docker vocabulary
 #
@@ -292,6 +381,10 @@ def _decode(entity: wire.Entity) -> dict[str, Any]:
             return _volume(entity.volume)
         case "image":
             return _image(entity.image)
+        case "unit":
+            return _unit(entity.unit)
+        case "process":
+            return _process(entity.process)
         case _:
             raise IngestError(f"entity {entity.id!r} carried no body")
 
@@ -387,6 +480,66 @@ def _image(message: wire.Image) -> dict[str, Any]:
         "Size": message.size,
         "Created": message.created,
         "Labels": dict(message.labels),
+    }
+
+
+def _unit(message: wire.Unit) -> dict[str, Any]:
+    """systemd's own property names, restated.
+
+    `Id` rather than `Name` because that is what systemd calls it on the bus,
+    and the rule for this file is that it speaks the source's vocabulary back
+    unread -- the same reason the container above it says `Names` and `Status`.
+    """
+    return {
+        "Id": message.name,
+        "Description": message.description,
+        "LoadState": message.load_state,
+        "ActiveState": message.active_state,
+        "SubState": message.sub_state,
+        "UnitFileState": message.unit_file_state,
+        "MainPID": message.main_pid,
+        # Microseconds, as systemd reports them. The mapper converts; nothing
+        # on the way here is entitled to know which unit this is in.
+        "ActiveEnterTimestamp": message.active_enter_timestamp,
+        "NRestarts": message.n_restarts,
+        "Result": message.result,
+        "ExecMainStatus": message.exec_main_status,
+        "FragmentPath": message.fragment_path,
+    }
+
+
+def _process(message: wire.Process) -> dict[str, Any]:
+    """One watch rule and what currently matches it.
+
+    The only payload in this file that is not a restatement of something the
+    source said, because /proc has no document shape to restate: the fields are
+    the Controller's own question echoed back beside the kernel's answer.
+    """
+    return {
+        "WatchId": message.watch_id,
+        "MatchKind": message.match_kind,
+        "Pattern": message.pattern,
+        # The operator's own words for this rule, round-tripped through the
+        # agent unread. A unit carries none: its name is systemd's, and a card
+        # naming it something else would not be the thing you type into
+        # `systemctl`.
+        "Label": message.label,
+        "Total": message.total,
+        "Instances": [
+            {
+                "Pid": instance.pid,
+                "Comm": instance.comm,
+                "Cmdline": instance.cmdline,
+                "State": instance.state,
+                "StartedAt": instance.started_at,
+                "Uid": instance.uid,
+                # Verbatim. Whether this says "inside a container" or "owned by
+                # a unit" is interpretation, and interpretation is the
+                # Controller's half of the seam (ADR-0009 section 1).
+                "Cgroup": instance.cgroup,
+            }
+            for instance in message.instances
+        ],
     }
 
 

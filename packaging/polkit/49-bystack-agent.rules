@@ -1,0 +1,58 @@
+// Let the agent start and stop systemd units on this machine.
+//
+//     install -m 0644 49-bystack-agent.rules /etc/polkit-1/rules.d/
+//
+// **Install this only if you want to operate services from the Controller.**
+// Watching them needs nothing: reading a unit's state over D-Bus is allowed
+// for any local user, so a host without this file still draws every selected
+// service on the map, live, with its state and its restart count. What it
+// cannot do is act, and it says so plainly -- systemd answers a start with
+// `InteractiveAuthorizationRequired`, which the Controller shows verbatim.
+//
+// It is here to be read before it is installed. An operator running a fleet is
+// entitled to know exactly what is being granted on their machines, and the
+// honest summary is: **this account may start, stop and restart any unit on
+// this host.**
+//
+// polkit cannot narrow that, and the reason is worth stating rather than
+// hiding. A rule is evaluated per call and its text is fixed on disk, while
+// the set of watched units is chosen in a browser and changes while the daemon
+// runs. A rule that named units would have to be rewritten on every edit --
+// configuration management to add a service to a map -- and one that matched a
+// prefix would be a naming convention pretending to be a boundary.
+//
+// So the bound is somewhere better: **in the agent, against the operator's own
+// list.** `agent/src/host.rs` refuses a lifecycle command for any unit that is
+// not on this host's watch list, before it touches the bus. That is the second
+// choke point ARCHITECTURE section 9 already required for containers, and it
+// is what makes the grant above equivalent in practice to "the services this
+// operator selected". ADR-0016 records the trade.
+//
+// Two things this does not grant, and both are deliberate:
+//
+//   * **No unit-file changes.** `manage-unit-files` covers enable, disable and
+//     mask -- the operations that change what the machine does after the next
+//     reboot. `CommandKind` contains none of them and never will
+//     (ADR-0012, ADR-0014), so granting it would be granting a capability the
+//     control plane has no verb for.
+//   * **No `reboot`, `power-off` or `set-environment`.** Same argument, and a
+//     louder one.
+
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "bystack-agent") {
+        return undefined;
+    }
+
+    // `manage-units` is start / stop / restart / reload / kill, on a unit that
+    // already exists. It is the whole of what the agent asks for.
+    if (action.id === "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.YES;
+    }
+
+    // Everything else falls through to the system's own policy, which for a
+    // system account with no seat and no session is a refusal. Written as an
+    // explicit `undefined` rather than omitted: a reader should be able to see
+    // that the rule declines to answer rather than wonder whether it fell off
+    // the end.
+    return undefined;
+});

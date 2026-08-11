@@ -12,6 +12,8 @@ import { useFleet } from './features/hosts/model/useFleet';
 import { HostsPanel } from './features/hosts/ui/HostsPanel';
 import { useActivity } from './features/activity/model/useActivity';
 import { ActivityPanel } from './features/activity/ui/ActivityPanel';
+import { WatchPanel } from './features/watch/ui/WatchPanel';
+import { useWatch } from './features/watch/model/useWatch';
 import { useLogs } from './features/logs/model/useLogs';
 import { LogsPanel } from './features/logs/ui/LogsPanel';
 import { useOperations } from './features/operations/model/useOperations';
@@ -63,6 +65,10 @@ export default function App() {
   const [zoomFactor, setZoomFactor] = useState(1);
   const [hostsOpen, setHostsOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
+  // Which host's selection is being edited, if any. One at a time and by
+  // engine id, because the watch list is per host and there is no such thing
+  // as editing the fleet's.
+  const [watchingHost, setWatchingHost] = useState<string | null>(null);
   const narrow = useMediaQuery(NARROW_QUERY);
   const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
 
@@ -72,6 +78,10 @@ export default function App() {
   // install command is the thing the operator is watching for.
   const fleet = useFleet(API_BASE, hostsOpen);
   const activity = useActivity(API_BASE, activityOpen);
+  // Loaded when a host is chosen and at no other time. Nothing here polls:
+  // the list changes when this operator changes it, and the *states* arrive on
+  // the delta stream like every other node.
+  const watching = useWatch(API_BASE, watchingHost);
   const palette = dark ? DARK : LIGHT;
 
   const status = useMemo(() => deriveStatus(connection, health), [connection, health]);
@@ -414,6 +424,7 @@ export default function App() {
             providers={providers}
             controllerVersion={controllerVersion}
             resolveHostName={resolveHostName}
+            onWatch={(engineId) => setWatchingHost(engineId)}
             onClose={() => setHostsOpen(false)}
           />
         ) : null}
@@ -429,6 +440,21 @@ export default function App() {
               if (narrow) setActivityOpen(false);
             }}
             onClose={() => setActivityOpen(false)}
+          />
+        ) : null}
+        {watchingHost ? (
+          <WatchPanel
+            baseUrl={API_BASE}
+            engineId={watchingHost}
+            hostName={resolveHostName(watchingHost) ?? watchingHost.slice(0, 12)}
+            watching={watching}
+            nodes={graph.nodes}
+            onSelect={(urn) => {
+              setSelected(urn);
+              setSelectedEdge(null);
+              if (narrow) setWatchingHost(null);
+            }}
+            onClose={() => setWatchingHost(null)}
           />
         ) : null}
         {emptyExplanation ? <EmptyState explanation={emptyExplanation} /> : null}

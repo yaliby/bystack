@@ -23,6 +23,13 @@ const SHAPES: Record<NodeKind, NodeShape> = {
   network: 'network',
   volume: 'volume',
   image: 'image',
+  // Drawn as containers, deliberately. A watched unit and a watched process
+  // are workloads on a host in exactly the sense a container is -- they have a
+  // state, they can be started and stopped, and an operator reads them the
+  // same way. Giving them a shape of their own would say they are a different
+  // *sort* of thing, which is the opposite of the point.
+  unit: 'container',
+  process: 'container',
 };
 
 export function shapeOf(kind: NodeKind): NodeShape {

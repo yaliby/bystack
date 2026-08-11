@@ -40,6 +40,7 @@ class EdgeKind(StrEnum):
     """
 
     HOSTS = "hosts"                 # host    -> container | network | volume
+                                    #          | unit | process
     CONTAINS = "contains"           # stack   -> service
     REALIZED_BY = "realized_by"     # service -> container   (logical->physical)
     ATTACHED_TO = "attached_to"     # container -> network
@@ -47,6 +48,7 @@ class EdgeKind(StrEnum):
     MOUNTS = "mounts"               # container -> volume
     USES_IMAGE = "uses_image"       # container -> image
     DEPENDS_ON = "depends_on"       # container | service -> same
+    RUNS_IN = "runs_in"             # process -> container | unit
 
 
 #: Which endpoint owns an edge for reconciliation purposes.
@@ -75,6 +77,13 @@ EDGE_OWNER: Final[Mapping[str, str]] = {
     EdgeKind.MOUNTS: "src",
     EdgeKind.USES_IMAGE: "src",
     EdgeKind.DEPENDS_ON: "src",
+    # The process declares what it is running inside, and the container or unit
+    # at the far end says nothing about it. Owning this from the other side
+    # would be the flap described above in its purest form: a container-scoped
+    # reconcile would claim every `runs_in` edge, delete them all because it
+    # never declares one, and have the next process frame put them straight
+    # back.
+    EdgeKind.RUNS_IN: "src",
 }
 
 

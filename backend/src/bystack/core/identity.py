@@ -50,6 +50,8 @@ class NodeKind(StrEnum):
     NETWORK = "network"
     VOLUME = "volume"
     IMAGE = "image"
+    UNIT = "unit"
+    PROCESS = "process"
 
 
 class URNError(ValueError):
@@ -163,6 +165,41 @@ def network_urn(engine_id: str, network_id: str) -> URN:
 
 def volume_urn(engine_id: str, volume_name: str) -> URN:
     return URN.build(NodeKind.VOLUME, engine_id, volume_name)
+
+
+def unit_urn(engine_id: str, unit_name: str) -> URN:
+    """Identify a systemd unit by the name systemd itself uses.
+
+    Engine-scoped like everything else on a host, and stable for the same
+    reason a volume name is: the unit file is the thing, and it survives every
+    restart, reload and reinstall of what it starts. There is no second,
+    physical identity underneath it -- ``MainPID`` is the equivalent of a
+    container id here, and it is deliberately an attribute rather than an
+    identity, because a service that restarts is the *same service*.
+
+    Unit names carry systemd's ``\\x2d`` escaping for mounts and paths, so they
+    contain no ``/`` and reach :meth:`URN.build` intact. A name that does
+    contain one is not a unit name, and being refused is the correct outcome.
+    """
+    return URN.build(NodeKind.UNIT, engine_id, unit_name)
+
+
+def process_urn(engine_id: str, watch_id: str) -> URN:
+    """Identify a watched process by the *rule*, never by the pid.
+
+    The two-layer identity of ADR-0002, arrived at from the other end. A pid is
+    the physical layer: recycled by the kernel, and gone on exactly the event
+    an operator is watching for. The logical layer is the operator's own
+    statement of what they care about -- "the thing whose executable is
+    ``/usr/local/bin/mydaemon``" -- and that survives the restart, which is
+    what lets the node keep its history across one.
+
+    So the scope segment is the watch entry's id rather than anything read off
+    the machine. It is assigned once, when the entry is created, and it does
+    not move when the pattern is edited: an operator fixing a typo in a rule is
+    correcting what they meant, not declaring a different thing.
+    """
+    return URN.build(NodeKind.PROCESS, engine_id, watch_id)
 
 
 def image_urn(digest_or_id: str) -> URN:

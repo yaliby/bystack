@@ -208,7 +208,7 @@ class CommandService:
                     else RejectionReason.PROVIDER_UNAVAILABLE
                 ),
                 detail=(
-                    f"nothing can be done to a container that is {node.status!r}"
+                    f"nothing can be done to a {node.kind} that is {node.status!r}"
                     if reachable
                     else "no connected agent owns this host right now"
                 ),
@@ -354,6 +354,12 @@ class CommandService:
         """
         match node.kind:
             case NodeKind.CONTAINER:
+                return (node,)
+            # A watched unit or process is its own target and expands to
+            # nothing. There is no logical layer above them to walk down from:
+            # the operator selected this exact thing by name, which is the
+            # whole difference between a watch list and a discovered inventory.
+            case NodeKind.UNIT | NodeKind.PROCESS:
                 return (node,)
             case NodeKind.SERVICE:
                 return self._follow(node.urn, EdgeKind.REALIZED_BY, NodeKind.CONTAINER)

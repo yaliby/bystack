@@ -61,6 +61,10 @@ message Envelope {
     RenewalOffer renewal_offer = 32;
     CertificateRequest certificate_request = 33;
     CertificateIssued certificate_issued = 34;
+
+    WatchList watch_list = 40;
+    InventoryRequest inventory_request = 41;
+    InventoryResponse inventory_response = 42;
   }
 }
 
@@ -76,6 +80,18 @@ enum Slice {
   SLICE_NETWORK = 2;
   SLICE_VOLUME = 3;
   SLICE_IMAGE = 4;
+
+  // The two host slices, and they are not like the four above them.
+  //
+  // Docker's slices are *discovered*: the agent Lists what the engine has and
+  // the membership is whatever it found. A machine has thousands of units and
+  // hundreds of processes, and enumerating them on a timer is the second-rate
+  // cAdvisor ARCHITECTURE section 12 exists to refuse. So the membership of
+  // these two is the operator's `WatchList` and nothing else -- the agent
+  // observes what it was told to observe, and a host nobody has selected
+  // anything on produces two empty slices at no cost.
+  SLICE_UNIT = 5;
+  SLICE_PROCESS = 6;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +284,8 @@ message Entity {
     Network network = 3;
     Volume volume = 4;
     Image image = 5;
+    Unit unit = 6;
+    Process process = 7;
   }
 }
 
@@ -420,6 +438,313 @@ message Image {
 }
 
 // ---------------------------------------------------------------------------
+// The host slices: units and processes
+// ---------------------------------------------------------------------------
+//
+// Everything in this section answers one question the four Docker slices never
+// had to: *which* of the thousands of things on this machine are we talking
+// about. Docker's answer is "all of them", because an engine's whole inventory
+// is the topology. A machine's is not — an operator cares about `nginx.service`
+// and the two daemons they wrote themselves, and the other 400 units are noise
+// that would bury the infrastructure they came to look at, at a CPU cost paid
+// on every managed host forever.
+//
+// So the operator selects, and the selection lives on the Controller as
+// configuration (ADR-0001's first durable category: user intent, not
+// discoverable). Three frames carry it:
+//
+//   InventoryRequest / InventoryResponse   what could I watch?      (a read)
+//   WatchList                              watch exactly these.     (intent)
+//   Sync / Delta over SLICE_UNIT|PROCESS   here is what they are.   (observation)
+//
+// The agent holds no policy in any of it. It is told a list of names and
+// patterns by the side that decides, exactly as it is told a container id when
+// a command arrives, and it does not know that a `WatchList` entry becomes a
+// node in a graph.
+
+// Controller -> Agent: observe exactly these, and nothing else.
+//
+// Authoritative and complete, like a `Sync` in the other direction: the list
+// replaces whatever the agent was watching, and an entry that stops appearing
+// stops being observed. Sent after `HelloAck` on every connection and again
+// whenever an operator changes it. An empty list is a legitimate and common
+// state — it is what every host starts as — and it means "watch nothing",
+// never "keep what you had".
+//
+// Gated on the `units` / `processes` capabilities. An older agent silently
+// ignoring this frame would report neither slice, which reads in the UI as a
+// host where every selected service has vanished.
+message WatchList {
+  repeated WatchEntry entries = 1;
+}
+
+message WatchEntry {
+  // The Controller's own id for this entry, opaque here. It is what the agent
+  // puts in `Entity.id` for a process, because a process watch has no natural
+  // name to be known by: `pid` is not an identity (it is recycled, and it
+  // changes on every restart of the very thing being watched) and the pattern
+  // is editable. The Controller assigns an id once, and the node keeps its
+  // identity and its history across both.
+  //
+  // For a unit this is carried but not needed: `name` is systemd's own id and
+  // is already stable, so the unit slice keys on that.
+  string id = 1;
+
+  // `unit` | `process`. A string rather than an enum for the reason
+  // `Command.verb` is one: an agent that does not know a kind must refuse it
+  // cleanly, and proto3 would decode an unknown enum value as UNSPECIFIED and
+  // let it be mistaken for something else.
+  string kind = 2;
+
+  // For `unit`: systemd's own unit name, `nginx.service`. Carried verbatim,
+  // including the `\x2d` escapes systemd uses in mount and path units.
+  //
+  // **It need not exist.** An operator adding a unit before installing it, or
+  // mistyping one, is answered by a node whose `load_state` is `not-found`
+  // rather than by silence — a watch that quietly observes nothing looks
+  // exactly like a watch that is working.
+  string name = 3;
+
+  // For `process`: how `pattern` is matched.
+  //
+  //   `name`     the executable's own name, /proc/<pid>/comm
+  //   `exec`     the absolute path of the executable, /proc/<pid>/exe
+  //   `cmdline`  a substring of the full command line
+  //
+  // Substrings and exact matches only — deliberately not a regular
+  // expression. A pattern authored on the Controller is evaluated inside a
+  // process on someone else's machine, against every entry in /proc, and a
+  // regex engine there is a way to spend a remote host's CPU by typing into a
+  // text box (ADR-0016).
+  string match_kind = 4;
+  string pattern = 5;
+
+  // What the operator calls this, if they said anything.
+  //
+  // Carried for `process` and meaningless for `unit`, which is why it is on
+  // the entry rather than on both payloads: a unit already has a name, and it
+  // is systemd's, and relabelling it on a map would mean the thing an operator
+  // reads and the thing they would type into `systemctl` are different
+  // strings. A process rule has no natural name at all -- `comm` is truncated
+  // to 15 characters and a pid is not a name -- so this is the only chance to
+  // have one.
+  //
+  // The agent does not interpret it, exactly as it does not interpret
+  // `pattern`: it echoes it back in `Process.label` so that a `Sync` carries
+  // everything needed to build the node, rather than making the Controller
+  // join two structures to draw a card.
+  string label = 6;
+}
+
+// -> mapper.map_unit
+//
+// systemd's vocabulary, shipped up unread. The three-state split is systemd's
+// own and is kept rather than flattened: `load_state` says whether the unit
+// file exists, `active_state` is the generic lifecycle every unit type shares,
+// and `sub_state` is the type-specific detail underneath it. An operator
+// diagnosing a service needs all three -- `active` / `exited` is a oneshot
+// that finished, `active` / `running` is a daemon, and collapsing them into
+// one "status" loses which one they are looking at.
+message Unit {
+  // `nginx.service`. systemd's own id, and the entity id in this slice.
+  string name = 1;
+  string description = 2;
+
+  // `loaded` | `not-found` | `masked` | `error`. **Hashed**, and the field
+  // that carries the answer for a watch on something that is not installed.
+  string load_state = 3;
+
+  // `active` | `inactive` | `failed` | `activating` | `deactivating`.
+  // **Hashed** -- this is the state the card is drawn from.
+  string active_state = 4;
+
+  // `running` | `dead` | `exited` | `start-pre` | ... **Hashed.**
+  string sub_state = 5;
+
+  // `enabled` | `disabled` | `static` | `masked` | empty. **Hashed**, because
+  // "running right now but not enabled at boot" is the difference between a
+  // service that survives a reboot and one that does not, and an operator
+  // reading a green card will assume the first.
+  string unit_file_state = 6;
+
+  uint32 main_pid = 7;
+
+  // `ActiveEnterTimestamp`, microseconds since the epoch -- systemd's own
+  // unit, converted by the Controller rather than here.
+  //
+  // **Hashed**, which looks like the `Container.status_text` trap and is its
+  // opposite. That field is a rendered duration that moves on a wall clock;
+  // this is a fixed instant that moves when the unit actually restarts. The
+  // browser renders "for 3 hours" from it without either side re-sending
+  // anything in between.
+  //
+  // Leaving it out of the hash has a concrete cost. `n_restarts` counts only
+  // the restarts *systemd* performed under a `Restart=` policy -- a
+  // `systemctl restart` by a person does not touch it, and `active_state` is
+  // `active` before and after. So for a manual restart this is the only field
+  // that moves at all, and excluding it means the map goes on claiming the
+  // service has been up since before the restart somebody just performed.
+  int64 active_enter_timestamp = 8;
+
+  // `NRestarts`. **Hashed**, and the same argument as `Container.restart_count`
+  // one layer down: `failed` is the same state on the second restart and the
+  // four-hundredth, so a count outside the hash is a crash loop reported once
+  // and never again. It advances on an event, not on a clock.
+  uint32 n_restarts = 9;
+
+  // `Result`: `success` | `exit-code` | `signal` | `oom-kill` | `timeout` |
+  // `core-dump`. **Hashed.** Why the unit stopped, which `active_state =
+  // failed` does not say -- and OOM in particular is a diagnosis an operator
+  // would otherwise go to the journal for.
+  string result = 10;
+
+  // `ExecMainStatus`: the exit code of the last run. **Hashed.** The systemd
+  // half of the exit code the container mapper digs out of Docker's status
+  // line, and available here as a number rather than as prose.
+  uint32 exec_main_status = 11;
+
+  // Where the unit file is. Carried because "which of the four possible
+  // directories is this thing actually loaded from" is a real question during
+  // an incident, and `systemctl cat` is not available through a browser.
+  string fragment_path = 12;
+}
+
+// -> mapper.map_process
+//
+// One entry per *watch rule*, not per process, and that is the whole identity
+// argument. A pid is not an identity: it is recycled by the kernel, and it
+// changes every time the thing being watched restarts -- which is precisely
+// the event an operator is watching for. So the entity is the rule, its
+// `instances` are what currently matches, and a rule matching nothing is an
+// observation ("it is not running") rather than an absence.
+//
+// This is the same two-layer identity as `service` over `container` in
+// ADR-0002, arrived at from the other direction.
+message Process {
+  // Echo of `WatchEntry.id`. The entity id in this slice.
+  string watch_id = 1;
+
+  // Echoed back so the Controller can render what is being matched beside
+  // what matched, without holding the wire frame and the watch list side by
+  // side. Cheap, and it makes a `Sync` self-describing.
+  string match_kind = 2;
+  string pattern = 3;
+
+  // What matches right now, capped by the agent. **Hashed** -- every field on
+  // every instance except `cpu`-anything, of which there is none: this is a
+  // control plane and per-process resource sampling belongs to the systems
+  // that already do it (ARCHITECTURE section 12).
+  repeated ProcessInstance instances = 4;
+
+  // How many matched before the cap, so the Controller can say "12 of 40"
+  // rather than quietly showing a truncated list as if it were complete.
+  uint32 total = 5;
+
+  // Echo of `WatchEntry.label`, uninterpreted. See there for why this exists
+  // on a process and not on a unit.
+  string label = 6;
+}
+
+message ProcessInstance {
+  uint32 pid = 1;
+
+  // /proc/<pid>/comm -- the executable's own name, truncated to 15 characters
+  // by the kernel, which is why it is not the identity either.
+  string comm = 2;
+
+  // The full command line, NUL-separated in /proc and joined with spaces
+  // here. Clamped by the agent: a command line can be a megabyte.
+  string cmdline = 3;
+
+  // `R` | `S` | `D` | `Z` | `T` -- the single letter from /proc/<pid>/stat.
+  // Interpreted by the Controller, which is where `Z` becomes "zombie".
+  string state = 4;
+
+  // Unix seconds. Derived by the agent from the kernel's boot time and the
+  // process's start ticks, because /proc reports the second of those in clock
+  // ticks since boot and nothing above the agent should have to know that.
+  int64 started_at = 5;
+
+  uint32 uid = 6;
+
+  // /proc/<pid>/cgroup, verbatim.
+  //
+  // The correlation seam, and the reason it is shipped raw. This one string
+  // says whether a process is inside a container (`.../docker/<id>`) or owned
+  // by a unit (`.../nginx.service`), and *deciding that* is interpretation --
+  // which lives on the Controller (ADR-0009 section 1). The agent would need
+  // to know the URN scheme to do anything else with it, and it must not.
+  string cgroup = 7;
+}
+
+// -- inventory --------------------------------------------------------------
+//
+// "What could I watch on this host?" A read, exactly like `LogsRequest`, and
+// not a `Command`: it mutates nothing, a read-only Controller answers it
+// through a read-only agent, and it is how the operator fills in the list in
+// the first place.
+//
+// One shot and bounded. This is the only frame in the protocol that enumerates
+// a whole machine, and it is answered on demand -- when an operator opens the
+// picker -- rather than on a timer. That is the entire difference between this
+// feature and a monitoring agent: nobody pays for the enumeration until
+// somebody asks to see it.
+
+message InventoryRequest {
+  string request_id = 1;
+
+  // `unit` | `process`.
+  string kind = 2;
+
+  // Case-insensitive substring, applied **at the agent**. Filtering here
+  // rather than in the browser is what keeps a 2,000-unit host from putting
+  // its entire unit table on somebody's home uplink so that a text box can
+  // discard 1,990 of them.
+  string filter = 3;
+
+  // Clamped by the agent, which is the side holding the memory budget and
+  // must not trust a number we sent it.
+  uint32 limit = 4;
+}
+
+message InventoryResponse {
+  string request_id = 1;
+
+  bool ok = 2;
+  string reason = 3;
+
+  repeated InventoryItem items = 4;
+
+  // Matches before the cap. The UI says "200 of 412" rather than presenting a
+  // truncated list as the whole truth -- the operator whose service is number
+  // 300 would otherwise conclude it is not installed.
+  uint32 total = 5;
+}
+
+// One row in the picker. Deliberately not a `Unit` or a `Process`: this is a
+// menu, and carrying the full observation payload for 400 units to draw a list
+// of names would put the cost of watching everything back on a host that has
+// chosen to watch three things.
+message InventoryItem {
+  // What a `WatchEntry` would name: the unit name, or for a process the
+  // executable path the rule would be built from.
+  string id = 1;
+
+  string name = 2;
+  string description = 3;
+
+  // `active` / `inactive` / `failed` for a unit; the state letter for a
+  // process. Shown so an operator picking from a list of four hundred can see
+  // which ones are actually running.
+  string state = 4;
+
+  // `sub_state` for a unit, the command line for a process.
+  string detail = 5;
+
+  uint32 pid = 6;
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
@@ -436,8 +761,18 @@ message Command {
   // treated as something else.
   string verb = 2;
 
-  // Docker's own id for the target. The Agent does not know the URN scheme.
+  // The target in the vocabulary of whatever owns it: Docker's own container
+  // id, systemd's own unit name, or a `WatchEntry.id` for a process rule. The
+  // Agent does not know the URN scheme and must not learn it, so the
+  // Controller unwraps the URN before the frame is built.
   string target_id = 3;
+
+  // Which of those `target_id` is, because the three namespaces overlap in
+  // shape and the agent must not guess. Empty means `container`, which is what
+  // every Controller before the host slices sent and what every agent that
+  // predates them assumes -- so an old frame and a new agent agree without a
+  // version check.
+  string target_kind = 5;
 
   map<string, string> args = 4;
 }

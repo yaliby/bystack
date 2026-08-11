@@ -222,8 +222,36 @@ docker compose logs -f controller
 - **No login to set up.** ByStack is built for one trusted network you own.
   Keep the dashboard on a private network, or behind your own login page.
 - **One directory is worth backing up:** the `bystack-state` volume. It holds
-  the CA key, the enrolment registry and the audit log. Losing it means
-  re-enrolling every host.
+  the CA key, the enrolment registry, the audit log and your watch lists.
+  Losing it means re-enrolling every host, and re-choosing which services you
+  were watching.
+
+---
+
+## Watching services and processes, not just containers
+
+Open **Hosts**, pick a server, and press **Services & processes**. You get a
+list of what that machine actually has — systemd units and running processes —
+and whatever you select is drawn on the map beside its containers, with the
+same start / stop / restart buttons.
+
+You can also type a name that is not there yet. A service you are about to
+install shows as *not installed* until it appears, which is the point: a watch
+that silently showed nothing would look exactly like one you forgot to add.
+
+**Watching works with no extra setup.** Operating needs one or two files,
+depending on what you want, and both are in
+[`packaging/`](packaging/) with the reasoning written on them:
+
+| Want to | Install | Grants |
+|---|---|---|
+| Start / stop / restart services | `polkit/49-bystack-agent.rules` into `/etc/polkit-1/rules.d/` | The agent may manage units on that host |
+| Watch and signal processes | `systemd/bystack-agent-host.conf` into `/etc/systemd/system/bystack-agent.service.d/` | The agent may see other users' processes, and signal them |
+
+Without them nothing breaks and nothing is hidden: services still appear with
+their live state, and pressing a button reports systemd's own refusal rather
+than failing quietly. [ADR-0016](docs/adr/0016-watched-units-and-processes.md)
+is why the grants are separate, opt-in, and bounded by the list you chose.
 
 ---
 

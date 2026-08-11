@@ -16,6 +16,7 @@ from fastapi import Depends, Request
 from bystack.config import Settings
 from bystack.core.graph.store import GraphStore
 from bystack.core.ports.eventbus import EventBus
+from bystack.core.ports.watch import WatchStore
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
 from bystack.runtime.localagent import LocalAgent
@@ -37,6 +38,16 @@ class AppContext:
     Shared by both listeners, and it has to be: the operator mints a token on
     the browser port and the agent redeems it on the other one. One CA, one
     registry, one answer to "is this host allowed".
+    """
+
+    watchlist: WatchStore
+    """Which units and processes each host was asked to watch.
+
+    Configuration rather than discovery, and the only thing in this context
+    that cannot be rebuilt from the fleet: nothing out there knows what the
+    operator selected (ADR-0001's first durable category). Reached from the
+    API because editing it *is* the feature, and from the agent listener
+    because a connection is where a host is told.
     """
 
     local_agent: LocalAgent

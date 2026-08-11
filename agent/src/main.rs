@@ -19,12 +19,16 @@
 //! alongside it would be a second thing to deploy for no gain. The one thing
 //! it keeps on disk is its own certificate (ADR-0011).
 
+mod dbus;
 mod docker;
 mod enroll;
 mod hashset;
+mod host;
 mod informer;
 mod model;
+mod procfs;
 mod session;
+mod systemd;
 mod trust;
 mod wire;
 
@@ -252,6 +256,12 @@ async fn main() {
     }
 
     let mut state = informer::State::default();
+    // Outlives the connection, exactly as `state` does, and for a related
+    // reason: the bus connection it holds is expensive to establish and says
+    // nothing about the Controller. The *watch list* inside it does not
+    // survive -- every connection begins by being told what to watch, because
+    // the Controller may have changed it while this host was away.
+    let mut host = host::Host::new();
     let mut backoff = BACKOFF_MIN;
     // Registered once, before the first connection, and kept for the life of
     // the process. See `Shutdown` for why that is not a style choice.
@@ -268,7 +278,7 @@ async fn main() {
 
     loop {
         tokio::select! {
-            ended = session::run(&config, &engine, &mut state) => match ended {
+            ended = session::run(&config, &engine, &mut state, &mut host) => match ended {
                 Ended::Refused(reason) => {
                     // Not a condition that improves by reconnecting: a revoked
                     // certificate, or an identity we cannot prove.

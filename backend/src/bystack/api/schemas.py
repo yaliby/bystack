@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from bystack.core.graph.delta import GraphDelta, GraphSnapshot
 from bystack.core.graph.model import Edge, Node
+from bystack.core.identity import process_urn, unit_urn
 from bystack.core.ports.command import (
     AuditEntry,
     CommandKind,
@@ -24,7 +25,8 @@ from bystack.core.ports.command import (
     TargetOutcome,
 )
 from bystack.core.ports.provider import ProviderHealth
-from bystack.providers.agent.commands import LogsResult
+from bystack.core.ports.watch import MAX_PATTERN, MatchKind, WatchEntry, WatchKind
+from bystack.providers.agent.commands import InventoryResult, LogsResult
 from bystack.runtime.commands import AvailableActions
 
 
@@ -307,6 +309,144 @@ class ContainerLogsOut(BaseModel):
                 for line in result.lines
             ],
         )
+
+
+class InventoryItemOut(BaseModel):
+    """One thing that could be watched on a host."""
+
+    id: str = Field(description="What a watch entry would name: a unit name or an exec path")
+    name: str
+    description: str = ""
+    state: str = ""
+    detail: str = ""
+    pid: int = 0
+
+
+class InventoryOut(BaseModel):
+    """The picker's contents, or a reason there are none.
+
+    ``ok`` separates "this machine has no unit matching that text" from "the
+    agent is asleep", which render identically as an empty list and mean
+    nothing like the same thing to whoever is looking at it.
+    """
+
+    engine_id: str
+    kind: str
+    ok: bool
+    reason: str | None = None
+    items: list[InventoryItemOut] = []
+    total: int = 0
+    """Matches before the agent's cap, so a truncated list is never presented
+    as the whole truth."""
+
+    @classmethod
+    def of(cls, engine_id: str, kind: str, result: InventoryResult) -> InventoryOut:
+        return cls.model_construct(
+            engine_id=engine_id,
+            kind=kind,
+            ok=result.ok,
+            reason=result.reason,
+            items=[
+                InventoryItemOut.model_construct(
+                    id=item.id,
+                    name=item.name,
+                    description=item.description,
+                    state=item.state,
+                    detail=item.detail,
+                    pid=item.pid,
+                )
+                for item in result.items
+            ],
+            total=result.total,
+        )
+
+
+class WatchEntryIn(BaseModel):
+    """A thing to start watching.
+
+    Both shapes in one model, because the two differ by three fields and a
+    pair of endpoints would have to be kept in step forever. Which fields are
+    required is decided by ``kind`` in the kernel
+    (:func:`~bystack.core.ports.watch.normalize`), not here: a rule that lived
+    in Pydantic would be a second copy of it, and the copy that runs first
+    would win by accident.
+
+    ``id`` is deliberately absent. A client that could choose one could
+    overwrite somebody else's entry by guessing it, and it is free not to
+    allow.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    kind: WatchKind
+    name: str = Field(
+        default="",
+        max_length=MAX_PATTERN,
+        description="Unit name, for kind=unit. `.service` is appended if no suffix is given.",
+    )
+    match_kind: MatchKind | None = Field(
+        default=None, description="How to match, for kind=process"
+    )
+    pattern: str = Field(
+        default="",
+        max_length=MAX_PATTERN,
+        description=(
+            "What to match, for kind=process. A substring or an exact value, never a regex."
+        ),
+    )
+    label: str = Field(
+        default="",
+        max_length=100,
+        description="What to call it on the map. Optional; the name or pattern is used otherwise.",
+    )
+
+
+class WatchEntryOut(BaseModel):
+    """A stored watch entry, in the form the graph will speak about it."""
+
+    id: str
+    engine_id: str
+    kind: str
+    name: str = ""
+    match_kind: str | None = None
+    pattern: str = ""
+    label: str = ""
+    added_at: float = 0.0
+    urn: str = Field(description="The node this entry becomes, whether or not it exists yet")
+
+    @classmethod
+    def of(cls, entry: WatchEntry) -> WatchEntryOut:
+        return cls.model_construct(
+            id=entry.id,
+            engine_id=entry.engine_id,
+            kind=str(entry.kind),
+            name=entry.name,
+            match_kind=str(entry.match_kind) if entry.match_kind else None,
+            pattern=entry.pattern,
+            label=entry.label,
+            added_at=entry.added_at,
+            urn=str(
+                unit_urn(entry.engine_id, entry.name)
+                if entry.kind is WatchKind.UNIT
+                else process_urn(entry.engine_id, entry.id)
+            ),
+        )
+
+
+class WatchListOut(BaseModel):
+    """Everything one host is watching, and whether it has been told.
+
+    ``delivered`` is the honest half. The list is the Controller's and it is
+    durable, so an edit takes effect whether or not the host is reachable --
+    but an operator who just added a service is entitled to know that the
+    machine has not heard about it yet, rather than watching a card that never
+    appears.
+    """
+
+    engine_id: str
+    entries: list[WatchEntryOut] = []
+    delivered: bool = False
+    detail: str | None = None
 
 
 class AuditEntryOut(BaseModel):

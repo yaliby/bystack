@@ -70,6 +70,21 @@ def decode(raw: bytes) -> wire.Envelope:
     return envelope
 
 
+def _await_frame(socket: object, payload: str, limit: int = 5) -> wire.Envelope:
+    """Read until a frame of this kind arrives.
+
+    The handshake sends more than one thing after `HelloAck` -- a watch list
+    always, a renewal offer when one is due -- and their order is not part of
+    the contract. Bounded rather than unbounded: a test that never finds its
+    frame must fail rather than hang CI.
+    """
+    for _ in range(limit):
+        envelope = decode(socket.receive_bytes())  # type: ignore[attr-defined]
+        if envelope.WhichOneof("payload") == payload:
+            return envelope
+    raise AssertionError(f"no {payload} frame in the first {limit} frames")
+
+
 def refusal(
     controller: Controller,
     certificate: str | None,
@@ -518,7 +533,11 @@ def test_a_certificate_in_its_final_third_is_offered_a_renewal(tmp_path: Path) -
     with client, client.websocket_connect(AGENT_PATH) as socket:
         socket.send_bytes(hello())
         assert decode(socket.receive_bytes()).hello_ack.accepted
-        offer = decode(socket.receive_bytes()).renewal_offer
+        # The handshake also carries this host's watch list, which is empty
+        # here and is sent anyway (`routes/agents.py` says why). Read past it
+        # rather than asserting a frame order the protocol does not promise:
+        # what this test is about is that the offer arrives at all.
+        offer = _await_frame(socket, "renewal_offer").renewal_offer
         assert offer.not_after > int(time.time())
 
         # The agent answers with a CSR. No token: the connection it arrives on

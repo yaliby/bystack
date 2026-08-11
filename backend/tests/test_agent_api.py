@@ -126,7 +126,14 @@ def test_an_undecodable_frame_ends_the_connection(admitted: tuple[Controller, st
             socket.send_bytes(hello_frame())
             socket.receive_bytes()  # HelloAck
             socket.send_bytes(b"\xff\xff not protobuf \xff\xff")
-            socket.receive_bytes()
+            # Bounded, because the handshake queues frames behind the ack -- a
+            # watch list, and a renewal offer where one is due -- and they are
+            # already in flight when the garbage arrives. The close is what
+            # this is about, and it must arrive within a handful of frames
+            # rather than "eventually": an unbounded drain would hang CI on a
+            # regression instead of failing it.
+            for _ in range(5):
+                socket.receive_bytes()
 
 
 # --------------------------------------------------------------------------

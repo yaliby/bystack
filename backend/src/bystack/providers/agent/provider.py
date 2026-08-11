@@ -29,7 +29,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 from bystack.agent.v1 import agent_pb2 as wire
@@ -44,12 +44,18 @@ from bystack.core.ports.command import (
     TargetOutcome,
 )
 from bystack.core.ports.provider import GraphWriter, ProviderHealth, ProviderState
+from bystack.core.ports.watch import WatchEntry, WatchKind
 from bystack.providers.agent.commands import (
+    CAP_INVENTORY,
     CAP_LOGS,
     CAP_LOGS_STREAM,
+    CAP_PROCESSES,
+    CAP_UNITS,
     MAX_LOG_TAIL,
     SUPPORTED,
     CommandChannel,
+    InventoryChannel,
+    InventoryResult,
     LogsChannel,
     LogsResult,
     LogsStream,
@@ -66,6 +72,7 @@ from bystack.providers.agent.ingest import AgentIngest
 # vocabulary upward (§5) -- see the module docstring, which outlived the
 # provider it was written beside.
 from bystack.providers.docker.capability import supported_commands
+from bystack.providers.host.capability import supported_commands as host_supported_commands
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +106,8 @@ class AgentProvider:
         "_channel",
         "_logs",
         "_streams",
+        "_inventory",
+        "_watching",
         "_state",
         "_detail",
         "_connected_at",
@@ -116,6 +125,11 @@ class AgentProvider:
         self._channel = CommandChannel()
         self._logs = LogsChannel()
         self._streams = LogsSubscriptions()
+        self._inventory = InventoryChannel()
+        #: What this host was last *told* to watch, for the health line.
+        #: Not what it is watching -- that is the graph, and the two differing
+        #: is exactly the symptom of an agent too old to have the capability.
+        self._watching = 0
         self._state = ProviderState.STOPPED
         self._detail: str | None = None
         self._connected_at = 0.0
@@ -188,6 +202,7 @@ class AgentProvider:
                 "pending_commands": len(self._channel),
                 "pending_logs": len(self._logs),
                 "live_log_streams": len(self._streams),
+                "watching": self._watching,
                 "connected_for": int(time.time() - self._connected_at) if self.connected else 0,
             },
         )
@@ -212,6 +227,7 @@ class AgentProvider:
         self._channel = CommandChannel()
         self._logs = LogsChannel()
         self._streams = LogsSubscriptions()
+        self._inventory = InventoryChannel()
         self._connected_at = time.time()
         self._set(ProviderState.STARTING, None)
 
@@ -226,6 +242,7 @@ class AgentProvider:
         # its full deadline for a reply that provably cannot arrive.
         self._channel.abandon(reason)
         self._logs.abandon(reason)
+        self._inventory.abandon(reason)
         # Ends every live tail with a reason, so a browser watching a log gets
         # "the host went away" rather than a stream that silently stops.
         self._streams.abandon(reason)
@@ -281,6 +298,8 @@ class AgentProvider:
                 self._logs.resolve(envelope.logs_response)
             case "logs_chunk":
                 self._streams.deliver(envelope.logs_chunk)
+            case "inventory_response":
+                self._inventory.resolve(envelope.inventory_response)
             case other:
                 # Not an error. An agent from a later release may send frames
                 # this Controller predates, and mixed-version fleets are a
@@ -339,13 +358,30 @@ class AgentProvider:
         agent protocol does not implement cannot appear because Docker's
         state table permits it.
         """
-        if self._session is None or node.kind != NodeKind.CONTAINER:
+        session = self._session
+        if session is None:
             return frozenset()
-        if self._session.read_only:
+        if session.read_only:
             # Advertised at Hello, so the UI can disable the actions rather
             # than offer them and watch the agent bounce every one.
             return frozenset()
-        return SUPPORTED & supported_commands(node)
+
+        match node.kind:
+            case NodeKind.CONTAINER:
+                return SUPPORTED & supported_commands(node)
+            # The host kinds are gated on the capability that put them in the
+            # graph in the first place. A node can outlive it: an agent
+            # downgraded to a build without the unit half reconnects, stops
+            # reporting the slice, and the units disappear -- but between the
+            # `Hello` and that first frame there is a window in which the old
+            # cards are still drawn, and offering `restart` on one would send a
+            # frame the agent silently ignores.
+            case NodeKind.UNIT if CAP_UNITS in session.capabilities:
+                return host_supported_commands(node)
+            case NodeKind.PROCESS if CAP_PROCESSES in session.capabilities:
+                return host_supported_commands(node)
+            case _:
+                return frozenset()
 
     async def execute(self, request: CommandRequest, target: Node) -> TargetOutcome:
         session = self._session
@@ -358,7 +394,81 @@ class AgentProvider:
             raise refuse_read_only(self._id)
         return await self._channel.dispatch(session, request, target, COMMAND_TIMEOUT)
 
+    # -- the watch list ----------------------------------------------------
+
+    async def send_watchlist(self, entries: Sequence[WatchEntry]) -> bool:
+        """Tell the agent exactly what to observe. Complete, not incremental.
+
+        Sent after `HelloAck` on every connection and again on every edit. The
+        frame replaces whatever the agent was watching, for the same reason a
+        `Sync` replaces a slice: an incremental list would need removals, and a
+        removal that went missing is a host quietly doing work nobody asked for
+        until it is restarted.
+
+        **An empty list is sent, not skipped.** It is the state every host
+        starts in and the state a host returns to when the last entry is
+        removed, and "watch nothing" has to be sayable -- skipping the frame
+        would mean the only way to stop watching something is to reconnect.
+
+        Returns whether the agent could be told at all. A disconnected host is
+        not an error: the list is the Controller's, it is durable, and the next
+        connection begins by sending it. What would be an error is silence
+        towards an agent too old to understand the frame, so that case is
+        logged and reported as `False` -- the UI shows the entries as pending
+        rather than as watched.
+        """
+        session = self._session
+        if session is None:
+            return False
+
+        wanted = {
+            WatchKind.UNIT: CAP_UNITS,
+            WatchKind.PROCESS: CAP_PROCESSES,
+        }
+        missing = {
+            entry.kind for entry in entries if wanted[entry.kind] not in session.capabilities
+        }
+        if missing:
+            log.warning(
+                "agent %s (version %s) cannot watch %s; those entries will not be observed",
+                self._id,
+                session.agent_version or "unknown",
+                " or ".join(sorted(str(kind) for kind in missing)),
+            )
+
+        sendable = [
+            entry for entry in entries if wanted[entry.kind] in session.capabilities
+        ]
+        try:
+            await session.send(_watchlist_frame(sendable))
+        except AgentDisconnected:
+            # Routine, and not worth raising into an operator's edit: the entry
+            # is stored either way and the reconnect carries it.
+            return False
+        self._watching = len(sendable)
+        return not missing
+
     # -- reads -------------------------------------------------------------
+
+    async def inventory(self, kind: str, filter_text: str, limit: int) -> InventoryResult:
+        """What could be watched on this host.
+
+        A read, like :meth:`logs`, and refused with a reason rather than an
+        empty list for the same reason: "this machine has no unit matching
+        `ngin`" and "the agent is asleep" must not render identically.
+        """
+        session = self._session
+        if session is None:
+            return InventoryResult(
+                False, f"the agent on {self._id} is not currently connected"
+            )
+        if CAP_INVENTORY not in session.capabilities:
+            return InventoryResult(
+                False,
+                f"the agent on {self._id} (version {session.agent_version or 'unknown'}) "
+                f"cannot enumerate this host",
+            )
+        return await self._inventory.fetch(session, kind, filter_text, limit, LOGS_TIMEOUT)
 
     async def logs(self, container_id: str, tail: int) -> LogsResult:
         """The tail of one container's log.
@@ -466,3 +576,29 @@ class AgentProvider:
             log.info("agent %s -> %s%s", self._id, state, f" ({detail})" if detail else "")
         self._state = state
         self._detail = detail
+
+
+def _watchlist_frame(entries: Sequence[WatchEntry]) -> wire.Envelope:
+    """The operator's selection, in the agent's vocabulary.
+
+    The one place a Controller concept crosses the seam outbound, and it stays
+    on the right side of it: the agent is handed ids, names and patterns, and
+    is told nothing about what any of them becomes. It does not know that an
+    entry turns into a node, that the id is part of a URN, or that a `unit`
+    kind is drawn differently from a `process` one.
+    """
+    return wire.Envelope(
+        watch_list=wire.WatchList(
+            entries=[
+                wire.WatchEntry(
+                    id=entry.id,
+                    kind=str(entry.kind),
+                    name=entry.name,
+                    match_kind=str(entry.match_kind) if entry.match_kind else "",
+                    pattern=entry.pattern,
+                    label=entry.label,
+                )
+                for entry in entries
+            ]
+        )
+    )

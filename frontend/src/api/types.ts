@@ -16,7 +16,11 @@ export type NodeKind =
   | 'container'
   | 'network'
   | 'volume'
-  | 'image';
+  | 'image'
+  /** A systemd unit the operator selected. See `providers/host/mapper.py`. */
+  | 'unit'
+  /** A process watch rule — the rule, never the pid. Same file. */
+  | 'process';
 
 export type EdgeKind =
   | 'hosts'
@@ -26,7 +30,9 @@ export type EdgeKind =
   | 'exposed_on'
   | 'mounts'
   | 'uses_image'
-  | 'depends_on';
+  | 'depends_on'
+  /** process → the container or unit whose cgroup it is in. */
+  | 'runs_in';
 
 /** A stable entity identifier. See the backend's `core/identity.py`. */
 export type Urn = string;
@@ -282,4 +288,78 @@ export interface AuditEntry {
   readonly detail: string | null;
   readonly reason: string | null;
   readonly duration_ms: number;
+}
+
+// --------------------------------------------------------------------------
+// Watched units and processes
+//
+// The one part of this API that is *configuration* rather than observation.
+// Everything else here describes what the fleet reported; these describe what
+// the operator asked to be shown, which is the thing nothing out there knows
+// (the backend's `core/ports/watch.py` says why that has to be durable).
+// --------------------------------------------------------------------------
+
+export type WatchKind = 'unit' | 'process';
+
+/**
+ * How a process rule decides what it is looking at.
+ *
+ * Substring and equality only. There is deliberately no regex option: the
+ * pattern is evaluated inside a process on a machine we do not own, against
+ * every entry in /proc.
+ */
+export type MatchKind = 'name' | 'exec' | 'cmdline';
+
+export interface WatchEntry {
+  readonly id: string;
+  readonly engine_id: string;
+  readonly kind: WatchKind;
+  readonly name: string;
+  readonly match_kind: MatchKind | null;
+  readonly pattern: string;
+  readonly label: string;
+  readonly added_at: number;
+  /** The node this becomes, whether or not it exists on the host yet. */
+  readonly urn: Urn;
+}
+
+export interface WatchList {
+  readonly engine_id: string;
+  readonly entries: readonly WatchEntry[];
+  /**
+   * Whether the host currently holds this list.
+   *
+   * `false` is not an error: the list is the Controller's and it is durable,
+   * so a machine that is asleep learns about the edit when it reconnects. It
+   * is shown so an operator who just added a service knows why no card has
+   * appeared yet.
+   */
+  readonly delivered: boolean;
+  readonly detail: string | null;
+}
+
+/** One row of the picker: something that *could* be watched. */
+export interface InventoryItem {
+  /** What a watch entry would name — a unit name, or an executable path. */
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly state: string;
+  readonly detail: string;
+  readonly pid: number;
+}
+
+export interface Inventory {
+  readonly engine_id: string;
+  readonly kind: WatchKind;
+  readonly ok: boolean;
+  readonly reason: string | null;
+  readonly items: readonly InventoryItem[];
+  /**
+   * Matches before the agent's cap. Shown as "200 of 412" rather than
+   * presenting a truncated list as the whole machine — the operator whose
+   * service is number three hundred would otherwise conclude it is not
+   * installed.
+   */
+  readonly total: number;
 }

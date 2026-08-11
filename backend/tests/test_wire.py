@@ -108,6 +108,76 @@ def test_the_constants_mirrored_across_languages_still_agree() -> None:
         "the agent's inspect ceiling moved; the conformance check that asserts "
         "it would be asserting the old number"
     )
+    assert _rust_const("procfs.rs", "MAX_INVENTORY_ITEMS") == commands.MAX_INVENTORY, (
+        "the agent's inventory cap and the Controller's differ; the picker "
+        "would advertise a limit the agent silently truncates, and an operator "
+        "would read a short list as the whole machine"
+    )
+
+
+def test_every_host_field_the_mapper_reads_is_carried_on_the_wire() -> None:
+    """The §5 drift guard again, for systemd and /proc.
+
+    Same failure it exists to catch and a worse version of it: a Docker field
+    the agent stops sending shows up as one null attribute, while a unit field
+    that goes missing shows up as a *state* -- `active_state` silently empty
+    reads as a service nobody can say anything about, on a card an operator is
+    looking at during an incident.
+
+    Compared against the mapper's own key set rather than a hand-written list,
+    so adding `Fragment.Path` to `providers/host/mapper.py` and forgetting the
+    `.proto` fails here rather than in front of somebody.
+    """
+    source = (BACKEND / "src" / "bystack" / "providers" / "host" / "mapper.py").read_text()
+    read = set(_DOCKER_KEY.findall(source))
+
+    produced: set[str] = set()
+    _collect(ingest._unit(_full_unit()), produced)
+    _collect(ingest._process(_full_process()), produced)
+
+    missing = read - produced
+    assert not missing, (
+        f"providers/host/mapper.py reads fields the agent never sends: {sorted(missing)}. "
+        f"Add them to proto/bystack/agent/v1/agent.proto and to providers/agent/ingest.py."
+    )
+
+
+def _full_unit() -> wire.Unit:
+    """Every field set, so a field ingest forgets to translate is visible."""
+    return wire.Unit(
+        name="nginx.service",
+        description="A high performance web server",
+        load_state="loaded",
+        active_state="active",
+        sub_state="running",
+        unit_file_state="enabled",
+        main_pid=4242,
+        active_enter_timestamp=1_700_000_000_000_000,
+        n_restarts=3,
+        result="exit-code",
+        exec_main_status=137,
+        fragment_path="/usr/lib/systemd/system/nginx.service",
+    )
+
+
+def _full_process() -> wire.Process:
+    return wire.Process(
+        watch_id="w1",
+        match_kind="cmdline",
+        pattern="worker.py",
+        total=2,
+        instances=[
+            wire.ProcessInstance(
+                pid=4242,
+                comm="python3",
+                cmdline="python3 worker.py --queue=default",
+                state="S",
+                started_at=1_700_000_000,
+                uid=1000,
+                cgroup="0::/system.slice/worker.service",
+            )
+        ],
+    )
 
 
 def _rust_const(filename: str, name: str) -> int:

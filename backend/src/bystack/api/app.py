@@ -17,14 +17,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from bystack.api.deps import AppContext
 from bystack.api.routes import agents as agent_routes
 from bystack.api.routes import commands as commands_routes
-from bystack.api.routes import enrollment, graph, health, stream
+from bystack.api.routes import enrollment, graph, health, stream, watch
 from bystack.api.web import mount_web
 from bystack.config import Settings
 from bystack.core.graph.store import InMemoryGraphStore
 from bystack.core.ports.command import AuditLog
+from bystack.core.ports.watch import WatchStore
 from bystack.infra.audit.durable import DurableAuditLog
 from bystack.infra.audit.memory import InMemoryAuditLog
 from bystack.infra.eventbus.memory import InMemoryEventBus
+from bystack.infra.watch.durable import DurableWatchStore
+from bystack.infra.watch.memory import InMemoryWatchStore
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
 from bystack.runtime.localagent import LocalAgent
@@ -68,7 +71,30 @@ def build_context(settings: Settings) -> AppContext:
         # Constructed whether or not it can run, so that a Controller which
         # could not spawn one can say why rather than showing an empty fleet.
         local_agent=LocalAgent(settings),
+        watchlist=_watchlist(settings),
     )
+
+
+def _watchlist(settings: Settings) -> WatchStore:
+    """The operator's selection of units and processes, durable if it can be.
+
+    Same fallback as the audit log and for the same reason, with one
+    difference worth stating: losing this is more visible than losing that. An
+    audit ring that forgets costs history nobody is reading at the time; a
+    watch list that forgets costs the operator the six services they chose,
+    and the only symptom is a map that is missing things. So the failure is
+    logged at the moment it is *set up*, rather than at the moment it matters,
+    which is a restart away.
+    """
+    try:
+        return DurableWatchStore.open(settings.agents.state_dir)
+    except OSError as exc:
+        log.error(
+            "could not open the watch list in %s (%s); "
+            "selections will be kept in memory and lost on restart",
+            settings.agents.state_dir, exc,
+        )
+        return InMemoryWatchStore()
 
 
 def _audit(settings: Settings) -> AuditLog:
@@ -140,6 +166,10 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
     # The agent's side is `create_agent_app` and shares nothing but the
     # context.
     app.include_router(enrollment.router, prefix=API_PREFIX)
+    # Also under `/agents`, and a separate module on purpose: enrollment
+    # decides *whether* a host is managed, and this decides *what* is watched
+    # on one that already is. They share a path prefix and nothing else.
+    app.include_router(watch.router, prefix=API_PREFIX)
     # Last, and that ordering is load-bearing: Starlette matches in
     # registration order, so the dashboard's catch-all only sees paths no API
     # route claimed. See `api/web.py`.

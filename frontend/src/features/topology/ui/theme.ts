@@ -166,6 +166,8 @@ const EDGE_COLOR_DARK: Record<EdgeKind, string> = {
   attached_to: '#495d76',
   uses_image: '#3f5068',
   hosts: '#3a4a60',
+  // Containment, so it reads like `contains` rather than like a dependency.
+  runs_in: '#41597b',
 };
 
 const EDGE_COLOR_LIGHT: Record<EdgeKind, string> = {
@@ -177,6 +179,7 @@ const EDGE_COLOR_LIGHT: Record<EdgeKind, string> = {
   attached_to: '#7d8ea3',
   uses_image: '#8d9cb2',
   hosts: '#8d9cb2',
+  runs_in: '#8d9cb2',
 };
 
 /**
@@ -280,16 +283,45 @@ export function statusOf(node: GraphNode): StatusRole {
   switch (node.status) {
     case 'running':
     case 'up':
+    // systemd's word for the same thing. Kept as its own case rather than
+    // normalised on the way in: the graph speaks each source's vocabulary
+    // (ADR-0009 §1), and the mapping from vocabulary to colour is this
+    // function's whole job.
+    case 'active':
       return 'good';
     case 'restarting':
     case 'paused':
     case 'removing':
+    // A unit on its way up or down, and a process somebody has suspended.
+    case 'activating':
+    case 'deactivating':
+    case 'stopped':
       return 'warning';
     case 'created':
       return 'serious';
     case 'exited':
     case 'dead':
+    // `failed` is systemd's, and a zombie is a process that is present and
+    // will never do anything again -- both are the state an operator came to
+    // the map to find.
+    case 'failed':
+    case 'zombie':
       return 'critical';
+    // Neither running nor broken. A stopped unit and a rule matching nothing
+    // are the ordinary answer for something that is simply not there right
+    // now, and drawing either in red would cry wolf on every host that has a
+    // service it starts by hand.
+    case 'inactive':
+    case 'absent':
+      return 'neutral';
+    // The watch is stored and the thing is not there to watch. Serious rather
+    // than critical: nothing is broken, but nothing will ever be reported
+    // either, and that needs to be visible or the card reads as pending
+    // forever.
+    case 'not-found':
+    case 'masked':
+    case 'error':
+      return 'serious';
     default:
       return 'neutral';
   }
@@ -315,6 +347,8 @@ export const EDGE_DASH: Record<EdgeKind, readonly number[]> = {
   exposed_on: [7, 5],
   uses_image: [2, 5],
   hosts: [1, 8],
+  // Solid and short: this is containment, like `contains`, not a dependency.
+  runs_in: [],
 };
 
 export const EDGE_LABEL: Record<EdgeKind, string> = {
@@ -326,6 +360,7 @@ export const EDGE_LABEL: Record<EdgeKind, string> = {
   mounts: 'mounts',
   uses_image: 'uses image',
   depends_on: 'depends on',
+  runs_in: 'runs in',
 };
 
 export const KIND_LABEL: Record<NodeKind, string> = {
@@ -338,6 +373,8 @@ export const KIND_LABEL: Record<NodeKind, string> = {
   network: 'Network',
   volume: 'Volume',
   image: 'Image',
+  unit: 'Service',
+  process: 'Process',
 };
 
 /** Prefer attrs.image, else a short kind cue for the card subtitle. */
@@ -351,6 +388,22 @@ export function cardSubtitle(node: GraphNode): string {
   if (node.kind === 'network') {
     const driver = node.attrs.driver;
     return typeof driver === 'string' ? driver : 'network';
+  }
+  if (node.kind === 'unit') {
+    // The *problem* first where there is one. `sub_state` for a unit systemd
+    // could not load is `dead`, which is true and reads as "it stopped" — on a
+    // card for something that is not installed at all, and that an operator
+    // added precisely because they are waiting for it to exist.
+    const load = node.attrs.load_state;
+    if (typeof load === 'string' && load && load !== 'loaded') return load;
+    const sub = node.attrs.sub_state;
+    return typeof sub === 'string' && sub ? sub : 'unit';
+  }
+  if (node.kind === 'process') {
+    // What it is matching, not what matched: the rule is the identity, and a
+    // pid on a card would be the one number that is different every restart.
+    const pattern = node.attrs.pattern;
+    return typeof pattern === 'string' && pattern ? pattern : 'process';
   }
   if (node.kind === 'image') {
     const tags = node.attrs.tags;

@@ -45,6 +45,7 @@ from typing import Final
 
 from bystack.agent.v1 import agent_pb2 as wire
 from bystack.core.graph.model import Node
+from bystack.core.identity import NodeKind
 from bystack.core.ports.agent import AgentDisconnected, AgentSession
 from bystack.core.ports.command import (
     CommandKind,
@@ -78,6 +79,33 @@ CAP_LOGS: Final = "logs"
 #: one-shot reads perfectly well, and the UI falls back to those rather than
 #: waiting forever for a chunk that is never coming.
 CAP_LOGS_STREAM: Final = "logs-stream"
+
+#: Watching systemd units, and watching processes. Two capabilities rather than
+#: one, and not implied by each other: an agent on a machine with no systemd
+#: answers the process half perfectly well, and the two are separately
+#: compiled and separately privileged on the host (ADR-0016). A host that
+#: cannot do one of them must show the operator *which* one.
+CAP_UNITS: Final = "units"
+CAP_PROCESSES: Final = "processes"
+
+#: Answering "what could I watch here". Separate again, because it is the one
+#: frame that enumerates a whole machine and an agent is entitled to be built
+#: without it -- a fleet whose watch lists are managed by configuration wants
+#: the observation half and not the picker.
+CAP_INVENTORY: Final = "inventory"
+
+#: The most inventory rows an operator may ask for in one answer.
+#:
+#: Mirrors `MAX_INVENTORY_ITEMS` in `agent/src/host.rs`, which is where the
+#: real clamp is, for the same reason `MAX_LOG_TAIL` mirrors `MAX_LOG_LINES`:
+#: the agent holds the memory budget and must not trust a number we sent it.
+#: Kept in step by `test_wire.py::test_the_constants_mirrored_across_languages_
+#: still_agree`, which reads the literal out of the Rust source.
+MAX_INVENTORY: Final = 500
+
+#: What a caller gets who does not say. A picker shows a scrolling list and a
+#: filter box; two hundred rows is more than anyone reads before typing.
+DEFAULT_INVENTORY: Final = 200
 
 #: Lines a single live subscription will hold for a reader that is behind.
 #:
@@ -356,6 +384,110 @@ class LogsChannel:
 
 
 @dataclass(frozen=True, slots=True)
+class InventoryItem:
+    """One row in the picker.
+
+    Deliberately thin. This is a menu of things that *could* be watched, not an
+    observation of them: carrying a full unit payload for four hundred units so
+    that a list of names can be drawn would put the cost of watching everything
+    back on a host that has chosen to watch three things.
+    """
+
+    id: str
+    name: str
+    description: str = ""
+    state: str = ""
+    detail: str = ""
+    pid: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryResult:
+    """An answer, or a refusal that says why.
+
+    Same shape and same argument as :class:`LogsResult`: an empty list with no
+    reason renders as nothing at all, which an operator reads as a feature that
+    failed to load rather than as a machine with no matching units.
+    """
+
+    ok: bool
+    reason: str | None = None
+    items: tuple[InventoryItem, ...] = ()
+    total: int = 0
+    """Matches before the agent's cap, so the UI can say "200 of 412". An
+    operator whose service is number three hundred would otherwise conclude it
+    is not installed."""
+
+
+class InventoryChannel:
+    """Outstanding inventory reads for one agent connection.
+
+    The third user of :class:`ParkedRequests`, and a read like the second: it
+    enumerates and changes nothing, so a read-only Controller answers it
+    through a read-only agent. `CommandKind` is the closed set of mutations,
+    and asking a machine what it is running is not one.
+    """
+
+    __slots__ = ("_pending",)
+
+    def __init__(self) -> None:
+        self._pending: ParkedRequests[wire.InventoryResponse] = ParkedRequests("inventory")
+
+    def __len__(self) -> int:
+        return len(self._pending)
+
+    async def fetch(
+        self, session: AgentSession, kind: str, filter_text: str, limit: int, deadline: float
+    ) -> InventoryResult:
+        request_id = uuid.uuid4().hex[:16]
+        try:
+            response = await self._pending.request(
+                session,
+                request_id,
+                wire.Envelope(
+                    inventory_request=wire.InventoryRequest(
+                        request_id=request_id,
+                        kind=kind,
+                        filter=filter_text,
+                        limit=min(max(limit, 1), MAX_INVENTORY),
+                    )
+                ),
+                deadline,
+            )
+        except AgentDisconnected as exc:
+            return InventoryResult(False, str(exc))
+        except TimeoutError:
+            # Unlike a command, this changed nothing, so saying so plainly and
+            # letting the operator ask again is the whole of the right answer.
+            return InventoryResult(False, f"the agent did not answer within {deadline:.0f}s")
+
+        if not response.ok:
+            return InventoryResult(False, response.reason or "the agent could not enumerate")
+        return InventoryResult(
+            True,
+            None,
+            tuple(
+                InventoryItem(
+                    id=item.id,
+                    name=item.name,
+                    description=item.description,
+                    state=item.state,
+                    detail=item.detail,
+                    pid=item.pid,
+                )
+                for item in response.items
+            ),
+            response.total,
+        )
+
+    def resolve(self, response: wire.InventoryResponse) -> None:
+        self._pending.resolve(response.request_id, response)
+
+    def abandon(self, reason: str) -> None:
+        self._pending.abandon(reason)
+
+
+@dataclass(frozen=True, slots=True)
 class LogsEvent:
     """One thing that happened on a live tail.
 
@@ -523,10 +655,19 @@ def _command_envelope(
 ) -> wire.Envelope:
     """Build the frame.
 
-    The target is Docker's own container id, taken from the URN's last
-    segment. The agent does not know the URN scheme and must not learn it --
-    that is the line in ADR-0009 §1, and shipping a URN down the wire would be
-    the first crack in it.
+    The target is the id in the vocabulary of whatever owns it -- a container
+    id, a unit name, or the watch id of a process rule -- taken from the URN's
+    last segment, which is where all three of them live. The agent does not
+    know the URN scheme and must not learn it: that is the line in ADR-0009 §1,
+    and shipping a URN down the wire would be the first crack in it.
+
+    `target_kind` is what keeps the three apart at the far end. The agent must
+    not infer it from the shape of the string: `docker`-prefixed unit names
+    exist, container ids are hexadecimal and so are plenty of other things, and
+    an agent that guessed wrong would send a lifecycle command to the wrong
+    subsystem entirely. Empty means `container`, which is what every Controller
+    before the host slices sent -- so an old frame and a new agent agree
+    without a version check.
     """
     args: dict[str, str] = {}
     if request.timeout is not None:
@@ -539,9 +680,19 @@ def _command_envelope(
             command_id=command_id,
             verb=str(request.kind),
             target_id=target.urn.segments[-1],
+            target_kind=TARGET_KIND.get(target.kind, ""),
             args=args,
         )
     )
+
+
+#: Node kind -> the `target_kind` the agent reads. Absent for a container,
+#: because absent *is* container on the wire and adding a spelling for it would
+#: mean two Controllers could disagree about which one an old agent accepts.
+TARGET_KIND: Final[dict[str, str]] = {
+    NodeKind.UNIT: "unit",
+    NodeKind.PROCESS: "process",
+}
 
 
 def _outcome(target: Node, result: wire.CommandResult) -> TargetOutcome:

@@ -43,6 +43,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::model::{Container, Image, Network, Volume};
+use crate::wire;
 
 pub type Fingerprint = u64;
 
@@ -98,6 +99,73 @@ pub fn hash_volume(volume: &Volume) -> Fingerprint {
 
 pub fn hash_image(image: &Image) -> Fingerprint {
     hash_of(image)
+}
+
+/// Hash one watched unit over every field it carries.
+///
+/// **Including `active_enter_timestamp`, which looks like the `Status` trap
+/// above and is its opposite.** That field is a fixed instant that moves when
+/// the unit actually restarts; Docker's `Status` is a rendered duration that
+/// moves on a wall clock. The distinction is the same one `restart_count`
+/// turns on: an event, not a clock.
+///
+/// Leaving it out has a concrete cost, and it is not a small one. `NRestarts`
+/// counts only the restarts *systemd* performed under a `Restart=` policy — a
+/// `systemctl restart` by a person does not touch it. So for a manual restart
+/// the timestamp is the only field that moves at all: without it in the hash,
+/// the unit is byte-identical to the one we last sent, nothing is sent, and
+/// the map goes on claiming the service has been up since before the restart
+/// that somebody just performed.
+///
+/// Written out field by field rather than derived, for the reason at the top
+/// of this module: a derive would silently pick up whatever the struct gains
+/// next, and prost regenerates that struct from the `.proto`.
+pub fn hash_unit(unit: &wire::Unit) -> Fingerprint {
+    let mut hasher = DefaultHasher::new();
+    unit.name.hash(&mut hasher);
+    unit.description.hash(&mut hasher);
+    unit.load_state.hash(&mut hasher);
+    unit.active_state.hash(&mut hasher);
+    unit.sub_state.hash(&mut hasher);
+    unit.unit_file_state.hash(&mut hasher);
+    unit.main_pid.hash(&mut hasher);
+    unit.active_enter_timestamp.hash(&mut hasher);
+    unit.n_restarts.hash(&mut hasher);
+    unit.result.hash(&mut hasher);
+    unit.exec_main_status.hash(&mut hasher);
+    unit.fragment_path.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash one process watch over the rule and everything matching it.
+///
+/// The pids are in the hash, and that is the point rather than an oversight: a
+/// daemon that restarted has a new pid and nothing else worth reporting, and a
+/// watch that could not see that would be a watch that reports the one event
+/// it was added for as no event at all.
+///
+/// Nothing sampled is in here, because nothing sampled is carried: there is no
+/// CPU share and no memory figure anywhere in this slice. Per-process resource
+/// series belong to the systems that already do them well (ARCHITECTURE §12),
+/// and a number that moves every scan would put the whole slice on the wire
+/// every interval — which is how a control plane quietly becomes a metrics
+/// agent with a bad sampling rate.
+pub fn hash_process(process: &wire::Process) -> Fingerprint {
+    let mut hasher = DefaultHasher::new();
+    process.watch_id.hash(&mut hasher);
+    process.match_kind.hash(&mut hasher);
+    process.pattern.hash(&mut hasher);
+    process.total.hash(&mut hasher);
+    for instance in &process.instances {
+        instance.pid.hash(&mut hasher);
+        instance.comm.hash(&mut hasher);
+        instance.cmdline.hash(&mut hasher);
+        instance.state.hash(&mut hasher);
+        instance.started_at.hash(&mut hasher);
+        instance.uid.hash(&mut hasher);
+        instance.cgroup.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn hash_of<T: Hash>(value: &T) -> Fingerprint {

@@ -14,14 +14,18 @@ class Slice(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SLICE_NETWORK: _ClassVar[Slice]
     SLICE_VOLUME: _ClassVar[Slice]
     SLICE_IMAGE: _ClassVar[Slice]
+    SLICE_UNIT: _ClassVar[Slice]
+    SLICE_PROCESS: _ClassVar[Slice]
 SLICE_UNSPECIFIED: Slice
 SLICE_CONTAINER: Slice
 SLICE_NETWORK: Slice
 SLICE_VOLUME: Slice
 SLICE_IMAGE: Slice
+SLICE_UNIT: Slice
+SLICE_PROCESS: Slice
 
 class Envelope(_message.Message):
-    __slots__ = ("seq", "hello", "hello_ack", "sync", "delta", "command", "command_result", "resync_request", "logs_request", "logs_response", "logs_subscribe", "logs_chunk", "logs_cancel", "enroll_request", "enroll_response", "renewal_offer", "certificate_request", "certificate_issued")
+    __slots__ = ("seq", "hello", "hello_ack", "sync", "delta", "command", "command_result", "resync_request", "logs_request", "logs_response", "logs_subscribe", "logs_chunk", "logs_cancel", "enroll_request", "enroll_response", "renewal_offer", "certificate_request", "certificate_issued", "watch_list", "inventory_request", "inventory_response")
     SEQ_FIELD_NUMBER: _ClassVar[int]
     HELLO_FIELD_NUMBER: _ClassVar[int]
     HELLO_ACK_FIELD_NUMBER: _ClassVar[int]
@@ -40,6 +44,9 @@ class Envelope(_message.Message):
     RENEWAL_OFFER_FIELD_NUMBER: _ClassVar[int]
     CERTIFICATE_REQUEST_FIELD_NUMBER: _ClassVar[int]
     CERTIFICATE_ISSUED_FIELD_NUMBER: _ClassVar[int]
+    WATCH_LIST_FIELD_NUMBER: _ClassVar[int]
+    INVENTORY_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    INVENTORY_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     seq: int
     hello: Hello
     hello_ack: HelloAck
@@ -58,7 +65,10 @@ class Envelope(_message.Message):
     renewal_offer: RenewalOffer
     certificate_request: CertificateRequest
     certificate_issued: CertificateIssued
-    def __init__(self, seq: _Optional[int] = ..., hello: _Optional[_Union[Hello, _Mapping]] = ..., hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., sync: _Optional[_Union[Sync, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., command: _Optional[_Union[Command, _Mapping]] = ..., command_result: _Optional[_Union[CommandResult, _Mapping]] = ..., resync_request: _Optional[_Union[ResyncRequest, _Mapping]] = ..., logs_request: _Optional[_Union[LogsRequest, _Mapping]] = ..., logs_response: _Optional[_Union[LogsResponse, _Mapping]] = ..., logs_subscribe: _Optional[_Union[LogsSubscribe, _Mapping]] = ..., logs_chunk: _Optional[_Union[LogsChunk, _Mapping]] = ..., logs_cancel: _Optional[_Union[LogsCancel, _Mapping]] = ..., enroll_request: _Optional[_Union[EnrollRequest, _Mapping]] = ..., enroll_response: _Optional[_Union[EnrollResponse, _Mapping]] = ..., renewal_offer: _Optional[_Union[RenewalOffer, _Mapping]] = ..., certificate_request: _Optional[_Union[CertificateRequest, _Mapping]] = ..., certificate_issued: _Optional[_Union[CertificateIssued, _Mapping]] = ...) -> None: ...
+    watch_list: WatchList
+    inventory_request: InventoryRequest
+    inventory_response: InventoryResponse
+    def __init__(self, seq: _Optional[int] = ..., hello: _Optional[_Union[Hello, _Mapping]] = ..., hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., sync: _Optional[_Union[Sync, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., command: _Optional[_Union[Command, _Mapping]] = ..., command_result: _Optional[_Union[CommandResult, _Mapping]] = ..., resync_request: _Optional[_Union[ResyncRequest, _Mapping]] = ..., logs_request: _Optional[_Union[LogsRequest, _Mapping]] = ..., logs_response: _Optional[_Union[LogsResponse, _Mapping]] = ..., logs_subscribe: _Optional[_Union[LogsSubscribe, _Mapping]] = ..., logs_chunk: _Optional[_Union[LogsChunk, _Mapping]] = ..., logs_cancel: _Optional[_Union[LogsCancel, _Mapping]] = ..., enroll_request: _Optional[_Union[EnrollRequest, _Mapping]] = ..., enroll_response: _Optional[_Union[EnrollResponse, _Mapping]] = ..., renewal_offer: _Optional[_Union[RenewalOffer, _Mapping]] = ..., certificate_request: _Optional[_Union[CertificateRequest, _Mapping]] = ..., certificate_issued: _Optional[_Union[CertificateIssued, _Mapping]] = ..., watch_list: _Optional[_Union[WatchList, _Mapping]] = ..., inventory_request: _Optional[_Union[InventoryRequest, _Mapping]] = ..., inventory_response: _Optional[_Union[InventoryResponse, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("agent_version", "engine_id", "engine", "read_only", "capabilities", "unix_time")
@@ -165,18 +175,22 @@ class Delta(_message.Message):
     def __init__(self, slice: _Optional[_Union[Slice, str]] = ..., ids: _Optional[_Iterable[str]] = ..., changed: _Optional[_Iterable[_Union[Entity, _Mapping]]] = ...) -> None: ...
 
 class Entity(_message.Message):
-    __slots__ = ("id", "container", "network", "volume", "image")
+    __slots__ = ("id", "container", "network", "volume", "image", "unit", "process")
     ID_FIELD_NUMBER: _ClassVar[int]
     CONTAINER_FIELD_NUMBER: _ClassVar[int]
     NETWORK_FIELD_NUMBER: _ClassVar[int]
     VOLUME_FIELD_NUMBER: _ClassVar[int]
     IMAGE_FIELD_NUMBER: _ClassVar[int]
+    UNIT_FIELD_NUMBER: _ClassVar[int]
+    PROCESS_FIELD_NUMBER: _ClassVar[int]
     id: str
     container: Container
     network: Network
     volume: Volume
     image: Image
-    def __init__(self, id: _Optional[str] = ..., container: _Optional[_Union[Container, _Mapping]] = ..., network: _Optional[_Union[Network, _Mapping]] = ..., volume: _Optional[_Union[Volume, _Mapping]] = ..., image: _Optional[_Union[Image, _Mapping]] = ...) -> None: ...
+    unit: Unit
+    process: Process
+    def __init__(self, id: _Optional[str] = ..., container: _Optional[_Union[Container, _Mapping]] = ..., network: _Optional[_Union[Network, _Mapping]] = ..., volume: _Optional[_Union[Volume, _Mapping]] = ..., image: _Optional[_Union[Image, _Mapping]] = ..., unit: _Optional[_Union[Unit, _Mapping]] = ..., process: _Optional[_Union[Process, _Mapping]] = ...) -> None: ...
 
 class EngineInfo(_message.Message):
     __slots__ = ("id", "name", "server_version", "operating_system", "kernel_version", "architecture", "ncpu", "mem_total", "containers_running", "containers_total")
@@ -354,8 +368,134 @@ class Image(_message.Message):
     labels: _containers.ScalarMap[str, str]
     def __init__(self, id: _Optional[str] = ..., repo_tags: _Optional[_Iterable[str]] = ..., repo_digests: _Optional[_Iterable[str]] = ..., size: _Optional[int] = ..., created: _Optional[int] = ..., labels: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
+class WatchList(_message.Message):
+    __slots__ = ("entries",)
+    ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    entries: _containers.RepeatedCompositeFieldContainer[WatchEntry]
+    def __init__(self, entries: _Optional[_Iterable[_Union[WatchEntry, _Mapping]]] = ...) -> None: ...
+
+class WatchEntry(_message.Message):
+    __slots__ = ("id", "kind", "name", "match_kind", "pattern", "label")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    MATCH_KIND_FIELD_NUMBER: _ClassVar[int]
+    PATTERN_FIELD_NUMBER: _ClassVar[int]
+    LABEL_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    kind: str
+    name: str
+    match_kind: str
+    pattern: str
+    label: str
+    def __init__(self, id: _Optional[str] = ..., kind: _Optional[str] = ..., name: _Optional[str] = ..., match_kind: _Optional[str] = ..., pattern: _Optional[str] = ..., label: _Optional[str] = ...) -> None: ...
+
+class Unit(_message.Message):
+    __slots__ = ("name", "description", "load_state", "active_state", "sub_state", "unit_file_state", "main_pid", "active_enter_timestamp", "n_restarts", "result", "exec_main_status", "fragment_path")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
+    LOAD_STATE_FIELD_NUMBER: _ClassVar[int]
+    ACTIVE_STATE_FIELD_NUMBER: _ClassVar[int]
+    SUB_STATE_FIELD_NUMBER: _ClassVar[int]
+    UNIT_FILE_STATE_FIELD_NUMBER: _ClassVar[int]
+    MAIN_PID_FIELD_NUMBER: _ClassVar[int]
+    ACTIVE_ENTER_TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    N_RESTARTS_FIELD_NUMBER: _ClassVar[int]
+    RESULT_FIELD_NUMBER: _ClassVar[int]
+    EXEC_MAIN_STATUS_FIELD_NUMBER: _ClassVar[int]
+    FRAGMENT_PATH_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    description: str
+    load_state: str
+    active_state: str
+    sub_state: str
+    unit_file_state: str
+    main_pid: int
+    active_enter_timestamp: int
+    n_restarts: int
+    result: str
+    exec_main_status: int
+    fragment_path: str
+    def __init__(self, name: _Optional[str] = ..., description: _Optional[str] = ..., load_state: _Optional[str] = ..., active_state: _Optional[str] = ..., sub_state: _Optional[str] = ..., unit_file_state: _Optional[str] = ..., main_pid: _Optional[int] = ..., active_enter_timestamp: _Optional[int] = ..., n_restarts: _Optional[int] = ..., result: _Optional[str] = ..., exec_main_status: _Optional[int] = ..., fragment_path: _Optional[str] = ...) -> None: ...
+
+class Process(_message.Message):
+    __slots__ = ("watch_id", "match_kind", "pattern", "instances", "total", "label")
+    WATCH_ID_FIELD_NUMBER: _ClassVar[int]
+    MATCH_KIND_FIELD_NUMBER: _ClassVar[int]
+    PATTERN_FIELD_NUMBER: _ClassVar[int]
+    INSTANCES_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_FIELD_NUMBER: _ClassVar[int]
+    LABEL_FIELD_NUMBER: _ClassVar[int]
+    watch_id: str
+    match_kind: str
+    pattern: str
+    instances: _containers.RepeatedCompositeFieldContainer[ProcessInstance]
+    total: int
+    label: str
+    def __init__(self, watch_id: _Optional[str] = ..., match_kind: _Optional[str] = ..., pattern: _Optional[str] = ..., instances: _Optional[_Iterable[_Union[ProcessInstance, _Mapping]]] = ..., total: _Optional[int] = ..., label: _Optional[str] = ...) -> None: ...
+
+class ProcessInstance(_message.Message):
+    __slots__ = ("pid", "comm", "cmdline", "state", "started_at", "uid", "cgroup")
+    PID_FIELD_NUMBER: _ClassVar[int]
+    COMM_FIELD_NUMBER: _ClassVar[int]
+    CMDLINE_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    STARTED_AT_FIELD_NUMBER: _ClassVar[int]
+    UID_FIELD_NUMBER: _ClassVar[int]
+    CGROUP_FIELD_NUMBER: _ClassVar[int]
+    pid: int
+    comm: str
+    cmdline: str
+    state: str
+    started_at: int
+    uid: int
+    cgroup: str
+    def __init__(self, pid: _Optional[int] = ..., comm: _Optional[str] = ..., cmdline: _Optional[str] = ..., state: _Optional[str] = ..., started_at: _Optional[int] = ..., uid: _Optional[int] = ..., cgroup: _Optional[str] = ...) -> None: ...
+
+class InventoryRequest(_message.Message):
+    __slots__ = ("request_id", "kind", "filter", "limit")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    FILTER_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    kind: str
+    filter: str
+    limit: int
+    def __init__(self, request_id: _Optional[str] = ..., kind: _Optional[str] = ..., filter: _Optional[str] = ..., limit: _Optional[int] = ...) -> None: ...
+
+class InventoryResponse(_message.Message):
+    __slots__ = ("request_id", "ok", "reason", "items", "total")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    OK_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    ITEMS_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    ok: bool
+    reason: str
+    items: _containers.RepeatedCompositeFieldContainer[InventoryItem]
+    total: int
+    def __init__(self, request_id: _Optional[str] = ..., ok: _Optional[bool] = ..., reason: _Optional[str] = ..., items: _Optional[_Iterable[_Union[InventoryItem, _Mapping]]] = ..., total: _Optional[int] = ...) -> None: ...
+
+class InventoryItem(_message.Message):
+    __slots__ = ("id", "name", "description", "state", "detail", "pid")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    DETAIL_FIELD_NUMBER: _ClassVar[int]
+    PID_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    name: str
+    description: str
+    state: str
+    detail: str
+    pid: int
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., description: _Optional[str] = ..., state: _Optional[str] = ..., detail: _Optional[str] = ..., pid: _Optional[int] = ...) -> None: ...
+
 class Command(_message.Message):
-    __slots__ = ("command_id", "verb", "target_id", "args")
+    __slots__ = ("command_id", "verb", "target_id", "target_kind", "args")
     class ArgsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -366,12 +506,14 @@ class Command(_message.Message):
     COMMAND_ID_FIELD_NUMBER: _ClassVar[int]
     VERB_FIELD_NUMBER: _ClassVar[int]
     TARGET_ID_FIELD_NUMBER: _ClassVar[int]
+    TARGET_KIND_FIELD_NUMBER: _ClassVar[int]
     ARGS_FIELD_NUMBER: _ClassVar[int]
     command_id: str
     verb: str
     target_id: str
+    target_kind: str
     args: _containers.ScalarMap[str, str]
-    def __init__(self, command_id: _Optional[str] = ..., verb: _Optional[str] = ..., target_id: _Optional[str] = ..., args: _Optional[_Mapping[str, str]] = ...) -> None: ...
+    def __init__(self, command_id: _Optional[str] = ..., verb: _Optional[str] = ..., target_id: _Optional[str] = ..., target_kind: _Optional[str] = ..., args: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class CommandResult(_message.Message):
     __slots__ = ("command_id", "ok", "detail", "unchanged")

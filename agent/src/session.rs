@@ -22,7 +22,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::docker::{ActionResult, Engine, LogLine};
-use crate::informer::{self, State, ALL_SLICES};
+use crate::host::Host;
+use crate::informer::{self, State, ALL_SLICES, HOST_SLICES};
+use crate::systemd::{Applied, Systemd};
 use crate::trust::{self, Credentials};
 use crate::wire::{self, envelope::Payload, Slice};
 use crate::{Config, Endpoint};
@@ -34,6 +36,28 @@ use crate::{Config, Endpoint};
 /// becomes a polling loop.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How often watched processes are re-read.
+///
+/// The one poll in this agent, and it exists because there is nothing to
+/// subscribe to: the kernel's process events are on netlink, behind
+/// `CAP_NET_ADMIN` and an address family the agent's unit does not permit
+/// (ADR-0016). ARCHITECTURE §11's preference order is satisfied rather than
+/// broken — native event stream, push, incremental sync, *periodic reconcile*
+/// — because the first three are unavailable here at these privileges.
+///
+/// Ten seconds is chosen against what the answer is used for. A watched daemon
+/// dying is not a thing an operator finds out about in under a second from a
+/// topology map; it is a thing they see when they look, and a shorter interval
+/// buys latency nobody is measuring at the cost of a walk of `/proc` on every
+/// managed host, forever.
+///
+/// The timer runs whether or not anything is watched, and does nothing when
+/// nothing is. That is a wakeup every ten seconds in a process that already
+/// wakes every thirty to ping — measurable against zero, invisible against the
+/// budget, and the alternative is arming and disarming a timer from two places
+/// that can both be wrong.
+const PROCESS_POLL: Duration = Duration::from_secs(10);
+
 pub enum Ended {
     /// Routine. Reconnect after a backoff.
     Disconnected(String),
@@ -42,7 +66,12 @@ pub enum Ended {
 }
 
 /// Run until the connection ends.
-pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
+pub async fn run(
+    config: &Config,
+    engine: &Engine,
+    state: &mut State,
+    host: &mut Host,
+) -> Ended {
     // The Controller drops its view of us when we disconnect, so anything we
     // remembered about what it already knows is now wrong. Clearing here is
     // what makes the first frame of every connection a genuine full Sync.
@@ -75,10 +104,7 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
         // arrives on the wire; telling the Controller lets the UI disable the
         // actions rather than offer them and watch every one bounce.
         read_only: config.read_only,
-        capabilities: vec![
-            "commands".into(), "resync".into(), "renewal".into(),
-            "logs".into(), "logs-stream".into(),
-        ],
+        capabilities: capabilities(host).await,
         // Our clock, so the Controller can name a skew as a skew. Certificate
         // validation is time-sensitive and a badly wrong clock otherwise
         // surfaces as a generic TLS error that sends whoever is debugging it
@@ -140,6 +166,10 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
     let since = unix_time();
 
     let (event_tx, mut event_rx) = mpsc::channel::<String>(256);
+    // Cloned before the Docker watcher takes ownership: the systemd watcher
+    // feeds the same channel, so a bus signal and a daemon event land in the
+    // same coalescing window and produce one round of frames rather than two.
+    let unit_events = event_tx.clone();
     let watch_socket = engine.socket().to_path_buf();
     let watcher = tokio::spawn(async move {
         Engine::new(watch_socket).watch(since, event_tx).await
@@ -195,6 +225,20 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
     //: backpressure arriving where it can actually be applied.
     let (chunk_tx, mut chunk_rx) = mpsc::channel::<LogsChunk>(CHUNK_QUEUE);
 
+    //: The bus connection that turns systemd's signals into dirty slices.
+    //:
+    //: Started when a watch list with units in it arrives, and stopped when
+    //: one without them does — so a host nobody has selected a service on
+    //: holds no bus connection, has asked systemd for no subscription, and is
+    //: woken by nothing. That is the same promise the process poll makes by
+    //: doing nothing on its tick, kept here by not existing.
+    let mut unit_watcher: Option<Watcher> = None;
+
+    //: The one poll. Fires regardless; does nothing unless something is
+    //: watched. See `PROCESS_POLL`.
+    let mut processes = tokio::time::interval(PROCESS_POLL);
+    processes.tick().await;
+
     loop {
         tokio::select! {
             // Events from the daemon, coalesced into a set of dirty slices.
@@ -203,9 +247,36 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
                     watcher.abort();
                     return Ended::Disconnected("event stream ended".into());
                 };
-                if let Err(reason) = push(engine, state, &mut sink, &mut seq, dirty, false).await {
+                if let Err(reason) =
+                    push(engine, state, &mut sink, &mut seq, &dirty, false).await
+                {
                     watcher.abort();
                     return Ended::Disconnected(reason);
+                }
+                // The same burst may have carried a bus signal: a `compose up`
+                // that starts a container and a `systemctl restart` a second
+                // later coalesce into one window, and both slices are answered
+                // from it.
+                if let Err(reason) =
+                    push_host(host, state, &mut sink, &mut seq, &dirty, false).await
+                {
+                    watcher.abort();
+                    return Ended::Disconnected(reason);
+                }
+            }
+
+            // The one poll. `/proc` has no event stream at these privileges,
+            // so watched processes are re-read on a timer -- and only when
+            // there are any.
+            _ = processes.tick() => {
+                if host.watching_processes() {
+                    let dirty: HashSet<Slice> = [Slice::Process].into_iter().collect();
+                    if let Err(reason) =
+                        push_host(host, state, &mut sink, &mut seq, &dirty, false).await
+                    {
+                        watcher.abort();
+                        return Ended::Disconnected(reason);
+                    }
                 }
             }
 
@@ -215,7 +286,19 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
             // nothing and costs nothing.
             _ = resync.tick() => {
                 let all: HashSet<Slice> = ALL_SLICES.into_iter().collect();
-                if let Err(reason) = push(engine, state, &mut sink, &mut seq, all, false).await {
+                if let Err(reason) = push(engine, state, &mut sink, &mut seq, &all, false).await {
+                    watcher.abort();
+                    return Ended::Disconnected(reason);
+                }
+                // The host slices are re-read too, and for the same reason the
+                // Docker ones are: this repairs *our* hash map, not the
+                // Controller's graph. It also covers the one thing the bus
+                // cannot tell us about -- a signal dropped while we were busy
+                // -- at a cost of nothing on a host that watches nothing.
+                let host_slices: HashSet<Slice> = HOST_SLICES.into_iter().collect();
+                if let Err(reason) =
+                    push_host(host, state, &mut sink, &mut seq, &host_slices, false).await
+                {
                     watcher.abort();
                     return Ended::Disconnected(reason);
                 }
@@ -283,8 +366,55 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
                 };
 
                 match payload {
+                    // The operator changed what this machine should watch.
+                    // Authoritative and complete, exactly like a Sync in the
+                    // other direction: what is not in it stops being watched.
+                    Some(Payload::WatchList(list)) => {
+                        let count = host.set_watchlist(&list);
+                        log(&format!("watching {count} unit(s) and process(es)"));
+
+                        // Forget both slices, so what follows is a full Sync
+                        // rather than a delta. The Controller has just changed
+                        // the question, and a membership set naming an entry it
+                        // has never held a payload for is one it can only drop.
+                        for slice in HOST_SLICES {
+                            state.forget(slice);
+                        }
+
+                        // Started or stopped to match the list. A host with no
+                        // watched units holds no bus connection at all.
+                        if host.watching_units() && unit_watcher.is_none() {
+                            unit_watcher = spawn_unit_watcher(unit_events.clone());
+                        } else if !host.watching_units() {
+                            // Dropped, which aborts it: see `Watcher`.
+                            unit_watcher = None;
+                        }
+
+                        let all: HashSet<Slice> = HOST_SLICES.into_iter().collect();
+                        if let Err(reason) =
+                            push_host(host, state, &mut sink, &mut seq, &all, true).await
+                        {
+                            watcher.abort();
+                            return Ended::Disconnected(reason);
+                        }
+                    }
+
+                    // What could be watched here. A read, like a log: it
+                    // mutates nothing, so `read_only` does not gate it.
+                    Some(Payload::InventoryRequest(request)) => {
+                        let response = host.inventory(&request).await;
+                        if sink.send(WsMessage::Binary(
+                            send(Payload::InventoryResponse(response), &mut seq)
+                        )).await.is_err() {
+                            watcher.abort();
+                            return Ended::Disconnected(
+                                "controller closed during an inventory read".into()
+                            );
+                        }
+                    }
+
                     Some(Payload::Command(command)) => {
-                        let result = execute(engine, config, command).await;
+                        let result = execute(engine, host, config, command).await;
                         if sink.send(WsMessage::Binary(
                             send(Payload::CommandResult(result), &mut seq)
                         )).await.is_err() {
@@ -338,7 +468,11 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
                     }
                     Some(Payload::ResyncRequest(request)) => {
                         let slices: HashSet<Slice> = if request.slices.is_empty() {
-                            ALL_SLICES.into_iter().collect()
+                            // Proto3 cannot tell an empty list from an unset
+                            // one, and the Controller reads that as "all of
+                            // them" -- which now means the host slices too.
+                            // They cost nothing on a host watching nothing.
+                            ALL_SLICES.into_iter().chain(HOST_SLICES).collect()
                         } else {
                             request.slices.iter().filter_map(|s| slice_from(*s)).collect()
                         };
@@ -346,7 +480,13 @@ pub async fn run(config: &Config, engine: &Engine, state: &mut State) -> Ended {
                             state.forget(*slice);
                         }
                         if let Err(reason) =
-                            push(engine, state, &mut sink, &mut seq, slices, false).await
+                            push(engine, state, &mut sink, &mut seq, &slices, false).await
+                        {
+                            watcher.abort();
+                            return Ended::Disconnected(reason);
+                        }
+                        if let Err(reason) =
+                            push_host(host, state, &mut sink, &mut seq, &slices, false).await
                         {
                             watcher.abort();
                             return Ended::Disconnected(reason);
@@ -535,7 +675,7 @@ async fn push(
     state: &mut State,
     sink: &mut Sink,
     seq: &mut u64,
-    slices: HashSet<Slice>,
+    slices: &HashSet<Slice>,
     full: bool,
 ) -> Result<(), String> {
     for slice in ALL_SLICES {
@@ -562,6 +702,129 @@ async fn push(
     Ok(())
 }
 
+/// Look up the dirty host slices and send whatever moved.
+///
+/// The sibling of [`push`], and it takes the watch list rather than the engine.
+/// Both are called from the same places with the same dirty set, which is what
+/// lets a bus signal and a daemon event share one coalescing window.
+///
+/// A host watching nothing produces two empty diffs here, which are quiet, so
+/// nothing reaches the wire — the same zero bytes an idle Docker slice costs.
+async fn push_host(
+    host: &mut Host,
+    state: &mut State,
+    sink: &mut Sink,
+    seq: &mut u64,
+    slices: &HashSet<Slice>,
+    full: bool,
+) -> Result<(), String> {
+    for slice in HOST_SLICES {
+        if !slices.contains(&slice) {
+            continue;
+        }
+        if let Some(payload) = informer::scan_host(host, state, slice, full).await {
+            *seq += 1;
+            let frame = wire::envelope(*seq, payload).encode_to_vec();
+            if sink.send(WsMessage::Binary(frame)).await.is_err() {
+                return Err("controller closed while sending".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What this agent can do, here, on this machine.
+///
+/// The set is what the Controller checks before sending a frame an older build
+/// would silently ignore (ARCHITECTURE §9), and `units` deliberately widens
+/// what a capability answers: not "was this compiled in" but "can this be done
+/// at all". A machine with no systemd would otherwise accept a watch on
+/// `nginx.service` and report an error card forever, when the honest moment to
+/// say so is while the operator is still looking at the box they typed it in.
+///
+/// `processes` is unconditional because `/proc` is Linux and this agent is
+/// Linux. What varies there is *visibility* rather than availability --
+/// `ProtectProc=invisible` hides other users' processes -- and that is a
+/// per-rule answer, not a per-host one: it shows up as a rule matching
+/// nothing, which is a state the graph already has a word for.
+async fn capabilities(host: &mut Host) -> Vec<String> {
+    let mut set = vec![
+        "commands".to_string(),
+        "resync".into(),
+        "renewal".into(),
+        "logs".into(),
+        "logs-stream".into(),
+        "processes".into(),
+        "inventory".into(),
+    ];
+    if host.systemd_available().await {
+        set.push("units".into());
+    } else {
+        log("no reachable systemd on this machine; units cannot be watched here");
+    }
+    set
+}
+
+/// A spawned task that ends when this value is dropped.
+///
+/// Tokio detaches a task whose `JoinHandle` is dropped rather than cancelling
+/// it, which is the right default and the wrong one here: the systemd watcher
+/// spends its life blocked on a socket read, so a detached one would sit there
+/// holding a bus connection until a signal happened to arrive — once per
+/// reconnect, forever, on a machine we do not own.
+struct Watcher(tokio::task::JoinHandle<()>);
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Turn systemd's signals into dirty slices, on a connection of its own.
+///
+/// Its own connection because a D-Bus read is only cancel-safe between
+/// messages: a `select!` arm that dropped a half-read message would leave the
+/// socket at a byte offset nobody knows, and everything after it would decode
+/// as plausible rubbish. `Engine::watch` has the same shape for a weaker
+/// reason — an HTTP stream that loses its place merely ends.
+///
+/// A watcher that dies is logged and not replaced. The 15-minute resync
+/// re-reads every watched unit regardless, so the failure costs latency rather
+/// than correctness, and a bus that has gone away is usually a machine where
+/// something larger is happening.
+fn spawn_unit_watcher(events: mpsc::Sender<String>) -> Option<Watcher> {
+    Some(Watcher(tokio::spawn(async move {
+        let mut systemd = match Systemd::connect().await {
+            Ok(systemd) => systemd,
+            Err(error) => {
+                log(&format!("cannot watch systemd: {error}"));
+                return;
+            }
+        };
+        if let Err(error) = systemd.subscribe().await {
+            log(&format!("cannot subscribe to systemd: {error}"));
+            return;
+        }
+        loop {
+            match systemd.next_change().await {
+                // The signal says only that *something* changed; which units
+                // we care about is decided by re-reading the watch list, which
+                // is bounded and local. Carrying the unit name here would mean
+                // parsing a signal body to save a lookup of at most 64 things.
+                Ok(()) => {
+                    if events.send(wire::SYSTEMD_EVENT.to_string()).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    log(&format!("systemd signals ended: {error}; resync will cover it"));
+                    return;
+                }
+            }
+        }
+    })))
+}
+
 /// Execute one command against the local socket.
 ///
 /// **The second choke point.** The Controller already refused everything it
@@ -571,6 +834,7 @@ async fn push(
 /// it (ARCHITECTURE §9).
 async fn execute(
     engine: &Engine,
+    host: &mut Host,
     config: &Config,
     command: wire::Command,
 ) -> wire::CommandResult {
@@ -595,6 +859,26 @@ async fn execute(
             unchanged: false,
         };
     }
+
+    // Which subsystem the target names, said rather than inferred. The three
+    // namespaces overlap in shape -- a unit may legitimately be called
+    // `docker-abc123.scope` and a container id is hexadecimal like plenty of
+    // other things -- so an agent that guessed would eventually send a
+    // lifecycle command to the wrong one. Empty is `container`, which is what
+    // every Controller that predates the host slices sends.
+    match command.target_kind.clone().as_str() {
+        "" | "container" => {}
+        kind @ ("unit" | "process") => return host_command(host, kind, command).await,
+        other => {
+            return wire::CommandResult {
+                command_id: command.command_id,
+                ok: false,
+                detail: format!("unknown target kind {other:?}"),
+                unchanged: false,
+            }
+        }
+    }
+
     if command.target_id.is_empty()
         || !command.target_id.chars().all(|c| c.is_ascii_alphanumeric())
     {
@@ -629,6 +913,63 @@ async fn execute(
             command_id: command.command_id,
             ok: false,
             detail: e.to_string(),
+            unchanged: false,
+        },
+    }
+}
+
+/// Act on a watched unit or process.
+///
+/// The second choke point applies here exactly as it does to a container: the
+/// caller has already refused everything a read-only agent refuses, and this
+/// path is reached only past that check.
+///
+/// The target is validated for *shape* rather than for existence. A unit name
+/// goes to systemd, which will refuse a name it does not like far better than
+/// a character allow-list could; what must not happen is a name reaching the
+/// bus with a `/` or a NUL in it, or a watch id being taken for anything but a
+/// lookup in a list this agent already holds.
+async fn host_command(
+    host: &mut Host,
+    kind: &str,
+    command: wire::Command,
+) -> wire::CommandResult {
+    if command.target_id.is_empty()
+        || command.target_id.len() > 255
+        || command.target_id.contains('/')
+        || command.target_id.contains('\0')
+        || command.target_id.contains(char::is_whitespace)
+    {
+        return wire::CommandResult {
+            command_id: command.command_id,
+            ok: false,
+            detail: "target is not a unit name or a watch id".into(),
+            unchanged: false,
+        };
+    }
+
+    let signal = command.args.get("signal").map(String::as_str);
+    match host.act(kind, &command.target_id, &command.verb, signal).await {
+        Ok(Applied::Applied) => wire::CommandResult {
+            command_id: command.command_id,
+            ok: true,
+            detail: String::new(),
+            unchanged: false,
+        },
+        // Derived rather than reported by systemd, which has no equivalent of
+        // Docker's 304 -- see `systemd::Applied`. Kept distinct all the way to
+        // the audit log: a restart storm that changed nothing must not read as
+        // one that worked.
+        Ok(Applied::Unchanged) => wire::CommandResult {
+            command_id: command.command_id,
+            ok: true,
+            detail: String::new(),
+            unchanged: true,
+        },
+        Err(detail) => wire::CommandResult {
+            command_id: command.command_id,
+            ok: false,
+            detail,
             unchanged: false,
         },
     }
@@ -804,6 +1145,8 @@ fn slice_from(value: i32) -> Option<Slice> {
         2 => Some(Slice::Network),
         3 => Some(Slice::Volume),
         4 => Some(Slice::Image),
+        5 => Some(Slice::Unit),
+        6 => Some(Slice::Process),
         _ => None,
     }
 }

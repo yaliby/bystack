@@ -31,8 +31,24 @@ import type { GraphEdge, GraphNode, Urn } from '../../../api/types';
  */
 const LAYOUT_EDGE_KINDS: ReadonlySet<string> = new Set(['depends_on', 'mounts', 'exposed_on']);
 
-/** Leaf kinds that earn a card once they survive folding and filtering. */
-const LEAF_KINDS: ReadonlySet<string> = new Set(['host', 'service', 'container', 'volume']);
+/**
+ * Leaf kinds that earn a card once they survive folding and filtering.
+ *
+ * `unit` and `process` are here on the same terms as `container`, and that is
+ * the whole point of the feature rather than a detail of it: a watched service
+ * is a workload on a host, it has a state, it can be started and stopped, and
+ * an operator reads it the same way. Anything selected is drawn — unlike a
+ * volume, there is no "dangling and therefore not topology" case to filter,
+ * because somebody chose it by hand (ADR-0016).
+ */
+const LEAF_KINDS: ReadonlySet<string> = new Set([
+  'host',
+  'service',
+  'container',
+  'volume',
+  'unit',
+  'process',
+]);
 
 export interface TopologyGraph {
   /** Stacks that have at least one member, drawn as compound group frames. */

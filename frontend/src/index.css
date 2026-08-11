@@ -1758,3 +1758,131 @@ body {
   }
 }
 
+
+/* -- watched units and processes ----------------------------------------
+   The panel is two things joined on purpose: what was *asked for*, and what
+   the host said about it. The join is what makes "stored, not yet observed"
+   a state somebody can see rather than a silence they have to interpret. */
+
+.watch__add {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.watch__add .action {
+  flex: 1;
+}
+
+.watch__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.watch__target {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.watch__target:disabled {
+  cursor: default;
+}
+
+.watch__target strong {
+  font-size: 13px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watch__sub {
+  font-size: 11px;
+  color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watch__state {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Waiting on the host, which is not a fault and must not be dressed as one:
+   the entry is stored, and the machine has simply not spoken yet. */
+.watch__state--pending {
+  color: var(--ink-muted);
+  font-style: italic;
+}
+
+.watch__filter,
+.watch__manual input {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.watch__filter {
+  margin: 12px 0;
+}
+
+.watch__results {
+  max-height: 40vh;
+  overflow-y: auto;
+  margin-bottom: 14px;
+}
+
+.watch__result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.watch__result:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.watch__manual {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.watch__manual > span {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}

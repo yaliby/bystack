@@ -47,6 +47,7 @@ use tokio::sync::mpsc;
 
 use crate::docker::{Engine, EngineError};
 use crate::hashset::{self, SliceState};
+use crate::host::Host;
 use crate::model::Container;
 use crate::wire::{self, entity, Slice};
 
@@ -63,6 +64,8 @@ pub struct State {
     networks: SliceState,
     volumes: SliceState,
     images: SliceState,
+    units: SliceState,
+    processes: SliceState,
 }
 
 impl State {
@@ -72,14 +75,23 @@ impl State {
         self.networks.clear();
         self.volumes.clear();
         self.images.clear();
+        self.units.clear();
+        self.processes.clear();
     }
 
     /// How many entities this agent is currently tracking, across all slices.
     ///
     /// The agent's entire working set, and the number the resource budget is
-    /// about: roughly 12 KB of fingerprints for a hundred containers.
+    /// about: roughly 12 KB of fingerprints for a hundred containers. The two
+    /// host slices add at most one entry per thing an operator selected, which
+    /// is bounded by the Controller at 64 per host and is usually zero.
     pub fn tracked(&self) -> usize {
-        self.containers.len() + self.networks.len() + self.volumes.len() + self.images.len()
+        self.containers.len()
+            + self.networks.len()
+            + self.volumes.len()
+            + self.images.len()
+            + self.units.len()
+            + self.processes.len()
     }
 
     /// Forget one slice, so the next scan re-sends all of it.
@@ -87,6 +99,11 @@ impl State {
     /// Used when the Controller asks for a resync: it asked because it
     /// believes we disagree, and answering "nothing changed" out of a hash map
     /// it has just told us to distrust would be useless.
+    ///
+    /// Also used when a new watch list arrives, for a different reason with the
+    /// same shape: the Controller has just changed what it is asking about, and
+    /// an entry it has never seen a payload for cannot be reconciled out of a
+    /// membership set alone.
     pub fn forget(&mut self, slice: Slice) {
         self.of(slice).clear();
     }
@@ -96,18 +113,29 @@ impl State {
             Slice::Container => &mut self.containers,
             Slice::Network => &mut self.networks,
             Slice::Volume => &mut self.volumes,
+            Slice::Unit => &mut self.units,
+            Slice::Process => &mut self.processes,
             _ => &mut self.images,
         }
     }
 }
 
-/// Every slice, in the order a first Sync should send them.
+/// Every Docker slice, in the order a first Sync should send them.
 ///
 /// Containers first because they are what the operator is waiting to see; the
 /// Controller reconciles each slice independently, so a partially-arrived
 /// picture is never inconsistent, only incomplete.
 pub const ALL_SLICES: [Slice; 4] =
     [Slice::Container, Slice::Network, Slice::Volume, Slice::Image];
+
+/// The two slices whose membership is the operator's watch list rather than
+/// whatever a daemon happens to be running.
+///
+/// Kept as a separate list rather than appended to [`ALL_SLICES`] because they
+/// are driven by something else entirely: `ALL_SLICES` is what a resync
+/// re-Lists from the engine, and these come from `host.rs` and are empty on a
+/// host nobody has selected anything on.
+pub const HOST_SLICES: [Slice; 2] = [Slice::Unit, Slice::Process];
 
 /// Fill in `restart_count` for the containers that are actually looping.
 ///
@@ -269,6 +297,86 @@ pub async fn scan(
         ids: change.ids,
         changed,
     })))
+}
+
+/// Look up one host slice and diff it, producing the frame to send.
+///
+/// The sibling of [`scan`], and separate from it for the reason
+/// [`HOST_SLICES`] is separate from [`ALL_SLICES`]: this one asks the operator's
+/// watch list rather than a daemon's inventory, so there is no List, no
+/// membership to discover, and nothing at all to do on a host where the list is
+/// empty.
+///
+/// It cannot fail upward. A daemon that will not answer is a reason to drop the
+/// connection and re-Sync; a bus that will not answer is a *fact about a
+/// watched unit*, and `host.rs` reports it as one — `load_state: error` on the
+/// card, rather than silence and a host that looks fine.
+pub async fn scan_host(
+    host: &mut Host,
+    state: &mut State,
+    slice: Slice,
+    full: bool,
+) -> Option<wire::envelope::Payload> {
+    let (ids, fingerprints, entities): (Vec<String>, Vec<u64>, Vec<wire::Entity>) = match slice {
+        Slice::Unit => {
+            let units = host.units().await;
+            (
+                units.iter().map(|u| u.name.clone()).collect(),
+                units.iter().map(hashset::hash_unit).collect(),
+                units
+                    .into_iter()
+                    .map(|u| entity(u.name.clone(), entity::Body::Unit(u)))
+                    .collect(),
+            )
+        }
+        _ => {
+            let processes = host.processes().await;
+            (
+                // The watch id, never a pid. A pid is recycled by the kernel
+                // and changes on exactly the event being watched for, so an
+                // entity keyed by one would be a different entity after every
+                // restart -- and the Controller would draw a new card and lose
+                // the history attached to the old one.
+                processes.iter().map(|p| p.watch_id.clone()).collect(),
+                processes.iter().map(hashset::hash_process).collect(),
+                processes
+                    .into_iter()
+                    .map(|p| entity(p.watch_id.clone(), entity::Body::Process(p)))
+                    .collect(),
+            )
+        }
+    };
+
+    let pairs: Vec<(&str, u64)> = ids
+        .iter()
+        .map(String::as_str)
+        .zip(fingerprints.iter().copied())
+        .collect();
+    let change = state.of(slice).diff(pairs);
+
+    if full {
+        return Some(wire::envelope::Payload::Sync(wire::Sync {
+            slice: slice as i32,
+            entities,
+        }));
+    }
+    if change.is_quiet() {
+        return None;
+    }
+
+    let mut changed = Vec::with_capacity(change.changed.len());
+    let mut wanted: HashSet<usize> = change.changed.iter().copied().collect();
+    for (index, item) in entities.into_iter().enumerate() {
+        if wanted.remove(&index) {
+            changed.push(item);
+        }
+    }
+
+    Some(wire::envelope::Payload::Delta(wire::Delta {
+        slice: slice as i32,
+        ids: change.ids,
+        changed,
+    }))
 }
 
 /// Collapse a burst of dirty slices into one set.
