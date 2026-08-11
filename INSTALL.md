@@ -7,6 +7,9 @@ ByStack has two parts:
 
 Install the Controller, open the dashboard, then add your servers one by one.
 
+**Already running it?** You want [Upgrading](#upgrading) — the Controller and
+every agent, in that order.
+
 Everything below is meant to be pasted as-is. The only thing you have to
 supply is a machine with Docker on it:
 
@@ -148,7 +151,7 @@ docker compose up -d
 It looks like this:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.1.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443 --token bst1.…
 ```
 
@@ -183,7 +186,7 @@ ssh you@newserver 'sudo sh /tmp/install-agent.sh --binary /tmp/bystack-agent-x86
 | `ssh: Could not resolve hostname http://…` | `ssh` takes `user@host`, not a URL. Drop the `http://` and the trailing slash. |
 | Browser cannot connect at all | The port is on loopback. See Step 2. |
 | The map is completely empty | The Docker socket group. See below. |
-| The pasted `curl` in Step 3 returns 404 | No release has been published for this Controller's version yet. Tag one (`git tag v0.1.0 && git push origin v0.1.0`) or use the `--binary` form above. |
+| The pasted `curl` in Step 3 returns 404 | No release has been published for this Controller's version yet. Tag one (`git tag v0.2.0 && git push origin v0.2.0`) or use the `--binary` form above. |
 | Agent says the certificate name does not match | The address it dialled is not in `server_names`. Step 3a. |
 
 **The empty map is worth its own paragraph**, because nothing else reports it.
@@ -272,6 +275,103 @@ python3 -m venv /opt/bystack
 **Systemd**, from the units in `packaging/systemd/`.
 
 Building from a checkout without Docker is in the [README](README.md).
+
+---
+
+## Upgrading
+
+Two steps, in this order: the Controller, then each server. What is in each
+release is [CHANGELOG.md](CHANGELOG.md).
+
+**The order is not arbitrary.** An agent asks the Controller what it can do,
+not the other way round, so a new Controller with old agents is a working
+fleet with fewer features on the hosts you have not got to yet. The reverse —
+new agents, old Controller — is not tested and is not the path.
+
+### The Controller
+
+From the clone, on the machine it runs on:
+
+```bash
+cd bystack
+git pull
+docker compose up -d --build
+```
+
+**`--build` is load-bearing.** `compose.yaml` names both a published image and
+a way to build one, so without it `docker compose up -d` finds the `:latest`
+image already on this machine, uses it, and reports success — you get `Started`
+and the old software. (`docker compose up -d --pull always` is the other
+correct answer, if you would rather take the published image than build.)
+
+Your data is a named volume and is not touched: the CA, the enrolment
+registry, the audit log and your watch lists all survive. `.env` is not tracked
+by git, so `DOCKER_GID` and `BYSTACK_BIND` survive too.
+
+One thing does collide. If you turned on the fleet listener in Step 3a, you
+edited `packaging/bystack.container.yaml`, which *is* tracked — so `git pull`
+can stop with `Your local changes to the following files would be overwritten`.
+Keep your version and take the new one's additions by hand:
+
+```bash
+git stash                       # your edit, set aside
+git pull
+git stash pop                   # re-apply it; resolve if it conflicts
+docker compose up -d --build
+```
+
+Then confirm you are running what you think you are:
+
+```bash
+curl -s localhost:8000/api/v1/healthz
+```
+
+The `version` in that answer is the Controller's, and it is the same string the
+**Add host** command points at.
+
+### Each server
+
+You do not have to compose this yourself. Once the Controller is upgraded,
+**Hosts** names the hosts that are behind and shows the exact line to run, and
+so does `bystack-ctl hosts`. It is the command that installed the agent, with
+the new tag in the URL and **no `--token`**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+  | sudo sh -s -- --controller wss://10.0.0.5:8443
+```
+
+Leaving the token out is what makes this an upgrade instead of a second host.
+The certificate under `/var/lib/bystack-agent` is this machine's identity to
+the Controller and stays where it is; a token sitting beside a stored
+certificate makes the agent enrol again and appear as a stranger waiting for
+your approval, while the host you actually have goes quiet.
+
+You do not need to stop anything first. The new binary replaces the old file
+rather than being written through it, so the running agent finishes on the one
+it started with and the change takes effect at the restart the script does at
+the end. The host drops off the map for a second or two and comes back.
+
+Flags you passed the first time — `--read-only`, `--socket` — are kept without
+being repeated, and the script prints which ones it carried over. Passing one
+again still wins, which is how you change your mind.
+
+**On a host with no route to GitHub**, the offline form from Step 3b upgrades
+just as well: build or download the binary once, copy it over, and pass
+`--binary` with no token.
+
+Afterwards, **Hosts** shows each agent's version, so a host you missed is
+visible rather than merely quiet.
+
+### If you installed the wheel instead
+
+```bash
+/opt/bystack/bin/pip install --upgrade bystack-0.2.0-*.whl   # from the release
+sudo systemctl restart bystack-controller                    # if it runs as a unit
+```
+
+The wheel carries the matching agent binary, so a Controller upgraded this way
+also hands out the right version to new hosts.
 
 ---
 

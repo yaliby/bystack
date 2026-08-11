@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from bystack import __version__
 from bystack.api.deps import AppContext
 from bystack.api.routes import agents as agent_routes
 from bystack.api.routes import commands as commands_routes
@@ -143,7 +144,7 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
 
     app = FastAPI(
         title="ByStack Control Plane",
-        version="0.1.0",
+        version=__version__,
         summary="Infrastructure discovery, correlation and operations for Docker",
         lifespan=lifespan,
     )
@@ -194,7 +195,7 @@ def create_agent_app(context: AppContext) -> FastAPI:
     """
     app = FastAPI(
         title="ByStack Agent Listener",
-        version="0.1.0",
+        version=__version__,
         summary="Mutually-authenticated agent connections (ADR-0011)",
         # No schema endpoints. They document nothing an agent reads -- the
         # contract is the `.proto` -- and an unauthenticated GET that
@@ -222,7 +223,7 @@ def create_local_agent_app(context: AppContext) -> FastAPI:
     """
     app = FastAPI(
         title="ByStack Local Agent Listener",
-        version="0.1.0",
+        version=__version__,
         summary="The bundled agent, over a unix socket",
         openapi_url=None,
     )

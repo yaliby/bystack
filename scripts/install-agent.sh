@@ -2,7 +2,7 @@
 #
 # Put the ByStack agent on this machine.
 #
-#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.1.0/scripts/install-agent.sh \
+#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
 #       | sudo sh -s -- --controller wss://controller:8443 --token bst1.<ca>.<secret>
 #
 # That is the command the dashboard hands out. Everything below is what it
@@ -10,6 +10,22 @@
 # environment file, install one unit, start it. There is no package manager
 # involved, no repository to add and no daemon to configure, because the agent
 # is one file and its whole configuration is four environment variables.
+#
+# ## Upgrading a host that already has an agent
+#
+# The same command with the new tag in the URL and *no* `--token`:
+#
+#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+#       | sudo sh -s -- --controller wss://controller:8443
+#
+# Dropping the token is what makes it an upgrade rather than a second host.
+# The certificate under /var/lib/bystack-agent stays where it is, so the
+# Controller sees the machine it already knows come back with a new version
+# rather than a stranger asking to be approved -- and a token sitting beside a
+# stored certificate would make the agent re-enrol and mint a fresh identity
+# for a host that already has one. The binary is replaced with `install`, which
+# swaps the inode, so the running process keeps the file it started with and
+# the change takes effect at the restart below.
 #
 # ## Offline, and on a machine that cannot reach GitHub
 #
@@ -36,7 +52,7 @@
 set -eu
 
 REPO="${BYSTACK_REPO:-yaliby/bystack}"
-VERSION="${BYSTACK_VERSION:-v0.1.0}"
+VERSION="${BYSTACK_VERSION:-v0.2.0}"
 
 BIN_DIR="${BYSTACK_BIN_DIR:-/usr/local/bin}"
 CONF_DIR=/etc/bystack
@@ -114,6 +130,44 @@ command -v systemctl >/dev/null 2>&1 ||
   copy it to ${BIN_DIR}/bystack-agent and run it under whatever supervises
   services on this machine. packaging/systemd/bystack-agent.service documents
   what it wants."
+
+# --------------------------------------------------------------------------
+# What this host was already installed with
+# --------------------------------------------------------------------------
+#
+# An upgrade is this script run a second time, and everything below rewrites
+# `agent.env` from the flags it was given -- so a host deliberately installed
+# with `--read-only` would come back able to mutate, silently, because the
+# operator pasted the upgrade line and that line has no reason to carry a
+# decision made months ago on one machine out of forty.
+#
+# So an *absent* flag on a host that already has an agent means "leave it as it
+# was". Passing one still wins, which is how an operator changes their mind,
+# and the carried-over settings are printed rather than assumed: a mode this
+# script chose for you and did not mention is the same problem in a quieter
+# form.
+existing="${CONF_DIR}/agent.env"
+if [ -f "$existing" ]; then
+	kept=""
+	if [ -z "$docker_socket" ]; then
+		docker_socket="$(sed -n 's/^BYSTACK_DOCKER_SOCKET=//p' "$existing" | tail -n 1)"
+		[ -n "$docker_socket" ] && kept="${kept} --socket ${docker_socket}"
+	fi
+	if [ -z "$read_only" ]; then
+		case "$(sed -n 's/^BYSTACK_READ_ONLY=//p' "$existing" | tail -n 1)" in
+		true | TRUE | True | 1 | yes) read_only=true; kept="${kept} --read-only" ;;
+		esac
+	fi
+	# An `if` and not `[ -n "$kept" ] && echo`, which is the same shape the
+	# environment file below has to end with `true` to survive: a trailing
+	# AND-list whose test is false is a failed command under `set -e`, and the
+	# shells this runs on do not agree about whether that ends the script. An
+	# installer that exits silently just before installing anything is not a
+	# bug worth being clever for.
+	if [ -n "$kept" ]; then
+		echo "==> keeping this host's existing settings:${kept}"
+	fi
+fi
 
 # --------------------------------------------------------------------------
 # The binary

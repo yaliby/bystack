@@ -121,7 +121,7 @@ docker compose up -d --build
 
 # 2. A wheel. Carries the agent binary and the dashboard; nothing else needed.
 python3 -m venv /opt/bystack
-/opt/bystack/bin/pip install bystack-0.1.0-py3-none-manylinux*_x86_64*.whl
+/opt/bystack/bin/pip install bystack-0.2.0-py3-none-manylinux*_x86_64*.whl
 /opt/bystack/bin/bystack                        # manages this machine
 
 # 3. From a checkout. `scripts/build-agent.sh` produces the static binaries.
@@ -133,7 +133,7 @@ Adding a host is one command on that host, and the dashboard composes it with
 the token already in it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.1.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://controller:8443 --token bst1.…
 ```
 
@@ -141,6 +141,12 @@ It fetches one static binary, checks it against the release's `SHA256SUMS`,
 installs a hardened systemd unit and starts it. `--binary` skips the download
 for a network with no egress; `--uninstall` removes everything except the
 certificate, because that is this host's identity and not ours to discard.
+
+Upgrading an existing install is `git pull && docker compose up -d --build`
+followed by the same line above on each host, without the token — the missing
+token is what makes it an upgrade rather than a second host.
+[`INSTALL.md`](INSTALL.md#upgrading) has the order and the two things that
+collide; [`CHANGELOG.md`](CHANGELOG.md) has what each release changed.
 
 Everything an operator can do in the dashboard is also in `bystack-ctl`:
 
