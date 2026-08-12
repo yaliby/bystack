@@ -163,6 +163,10 @@
       <span class="pill"><span class="dot" style="background:var(--accent)"></span><span data-lang="he">בלי הגדרות מסובכות</span><span data-lang="en">No complex config</span></span>
       <span class="pill"><span class="dot" style="background:var(--accent-2)"></span><span data-lang="he">בלי לפתוח פורטים בשרתים</span><span data-lang="en">No open ports on servers</span></span>
     </div>
+    <p class="lede" style="font-size:15px">
+      <span data-lang="he">כבר מריצים את ByStack? מה שאתם מחפשים הוא <a href="#upgrade">עדכון גרסה</a> — המרכז ואז כל שרת, בסדר הזה.</span>
+      <span data-lang="en">Already running ByStack? What you want is <a href="#upgrade">Upgrading</a> — the Controller, then each server, in that order.</span>
+    </p>
   </section>
 
   <!-- TWO ROLES -->
@@ -315,11 +319,18 @@ docker compose up -d --build</pre>
         <div><span data-lang="he">מדביקים ומריצים את הפקודה <b>על השרת שמוסיפים</b>.</span><span data-lang="en">Paste and run it <b>on the server you're adding</b>.</span></div></div>
     </div>
 
-    <p style="margin-top:18px"><span data-lang="he">הפקודה נראית ככה:</span><span data-lang="en">The command looks like this:</span></p>
+    <p style="margin-top:18px">
+      <span data-lang="he">הפקודה נראית ככה — <b>אל תעתיקו את זו</b>, היא דוגמה. זו שבדשבורד נושאת את הכתובת שלכם, את הטוקן שלכם ואת הגרסה שהמרכז שלכם באמת מריץ:</span>
+      <span data-lang="en">It looks like this — <b>don't copy this one</b>, it's an example. The one in the dashboard carries your address, your token, and the version your Controller is actually running:</span>
+    </p>
     <div class="code" data-lang="both">
-      <pre>curl -fsSL https://.../install-agent.sh | sudo sh -s -- \
-  --controller ... --token ...</pre>
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+  | sudo sh -s -- --controller wss://10.0.0.5:8443 --token bys_&lt;your-token&gt;</pre>
     </div>
+    <p>
+      <span data-lang="he">הטוקן מוצג <b>פעם אחת</b> — המרכז שומר ממנו רק טביעת אצבע, אז סגירת החלון מאבדת אותו. אם איבדתם, פשוט מוסיפים שרת שוב ומקבלים טוקן חדש. הוא חד־פעמי ופג מעצמו.</span>
+      <span data-lang="en">The token is shown <b>once</b> — the Controller keeps only a digest of it, so closing the dialog loses it. If you lose it, add the host again and get a new one. It is single use and expires on its own.</span>
+    </p>
 
     <div class="callout">
       <span class="ico">🟢</span>
@@ -331,6 +342,85 @@ docker compose up -d --build</pre>
     <p>
       <span data-lang="he">חוזרים על צעד 3 לכל שרת. זהו.</span>
       <span data-lang="en">Repeat Step 3 for every server. That's it.</span>
+    </p>
+  </section>
+
+  <!-- UPGRADING -->
+  <section class="step" id="upgrade">
+    <h2 style="display:block;margin-bottom:6px"><span data-lang="he">עדכון גרסה</span><span data-lang="en">Upgrading</span></h2>
+    <p>
+      <span data-lang="he">שני שלבים, <b>בסדר הזה</b>: קודם המרכז, ואז כל שרת. הסוכן שואל את המרכז מה מותר לו ולא להפך — אז מרכז חדש עם סוכנים ישנים הוא צי עובד שפשוט יש בו פחות יכולות בשרתים שעוד לא הגעתם אליהם. הכיוון ההפוך, סוכנים חדשים מול מרכז ישן, לא נבדק ואינו הדרך.</span>
+      <span data-lang="en">Two steps, <b>in this order</b>: the Controller, then each server. An agent asks the Controller what it can do, not the other way round — so a new Controller with old agents is a working fleet with fewer features on the hosts you haven't got to yet. The reverse, new agents against an old Controller, is not tested and is not the path.</span>
+    </p>
+
+    <p style="margin-top:18px;color:var(--text);font-weight:600">
+      <span data-lang="he">1. המרכז — מתוך אותה תיקייה שבה התקנתם:</span>
+      <span data-lang="en">1. The Controller — from the directory you installed it in:</span>
+    </p>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>cd bystack
+git pull
+docker compose up -d --build</pre>
+    </div>
+
+    <div class="callout">
+      <span class="ico">⚠️</span>
+      <span>
+        <span data-lang="he"><code>--build</code> אינו קישוט. <code class="inline">compose.yaml</code> מציין גם image מפורסם וגם דרך לבנות אחד, אז בלי הדגל הזה <code class="inline">docker compose up -d</code> מוצא את ה‑<code class="inline">:latest</code> שכבר על המכונה, משתמש בו, ומדווח <code class="inline">Started</code> — קיבלתם הצלחה על תוכנה ישנה. (<code class="inline">--pull always</code> היא התשובה הנכונה השנייה, אם אתם מעדיפים לקחת את ה‑image המפורסם במקום לבנות.)</span>
+        <span data-lang="en"><code>--build</code> is not dressing. <code class="inline">compose.yaml</code> names both a published image and a way to build one, so without it <code class="inline">docker compose up -d</code> finds the <code class="inline">:latest</code> already on the machine, uses it, and reports <code class="inline">Started</code> — success on the old software. (<code class="inline">--pull always</code> is the other correct answer, if you would rather take the published image than build.)</span>
+      </span>
+    </div>
+
+    <div class="callout">
+      <span class="ico">📌</span>
+      <span>
+        <span data-lang="he">אם הפעלתם את המאזין בצעד 3, ערכתם את <code class="inline">packaging/bystack.container.yaml</code> — קובץ שכן נמצא ב‑git, אז <code class="inline">git pull</code> עלול לעצור עם <code class="inline">Your local changes would be overwritten</code>. שומרים על העריכה שלכם: <code class="inline">git stash</code>, אחר כך <code class="inline">git pull</code>, אחר כך <code class="inline">git stash pop</code>, ורק אז <code class="inline">docker compose up -d --build</code>.</span>
+        <span data-lang="en">If you turned the listener on in Step 3, you edited <code class="inline">packaging/bystack.container.yaml</code> — a tracked file, so <code class="inline">git pull</code> may stop with <code class="inline">Your local changes would be overwritten</code>. Keep your edit: <code class="inline">git stash</code>, then <code class="inline">git pull</code>, then <code class="inline">git stash pop</code>, and only then <code class="inline">docker compose up -d --build</code>.</span>
+      </span>
+    </div>
+
+    <p>
+      <span data-lang="he">הנתונים שלכם ב‑volume ולא נגעו בהם — ה‑CA, רשימת השרתים הרשומים, יומן הפעולות ורשימות המעקב שורדים. גם <code class="inline">.env</code> שורד, כי הוא לא ב‑git. לוודא שאתם באמת מריצים את מה שחשבתם:</span>
+      <span data-lang="en">Your data is a named volume and is not touched — the CA, the enrolment registry, the audit log and your watch lists all survive. <code class="inline">.env</code> survives too, since git does not track it. Confirm you are running what you think you are:</span>
+    </p>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>curl -s localhost:8000/api/v1/healthz</pre>
+    </div>
+    <p>
+      <span data-lang="he">ה‑<code class="inline">version</code> שבתשובה הוא של המרכז, והוא אותה מחרוזת שאליה פקודת <b>Add host</b> מצביעה.</span>
+      <span data-lang="en">The <code class="inline">version</code> in that answer is the Controller's, and it is the same string the <b>Add host</b> command points at.</span>
+    </p>
+
+    <p style="margin-top:18px;color:var(--text);font-weight:600">
+      <span data-lang="he">2. כל שרת — לא צריך להרכיב את זה לבד</span>
+      <span data-lang="en">2. Each server — you don't have to compose this yourself</span>
+    </p>
+    <p>
+      <span data-lang="he">אחרי שהמרכז עודכן, פאנל <b>Hosts</b> בדשבורד מציין אילו שרתים נשארו מאחור ומראה את השורה המדויקת להריץ (וגם <code class="inline">bystack-ctl hosts</code> עושה את זה). זו אותה פקודה שהתקינה את הסוכן, עם התג החדש ב‑URL ו<b>בלי <code>--token</code></b>:</span>
+      <span data-lang="en">Once the Controller is upgraded, the <b>Hosts</b> panel names the servers that are behind and shows the exact line to run (so does <code class="inline">bystack-ctl hosts</code>). It is the command that installed the agent, with the new tag in the URL and <b>no <code>--token</code></b>:</span>
+    </p>
+    <div class="code" data-lang="both">
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+  | sudo sh -s -- --controller wss://10.0.0.5:8443</pre>
+    </div>
+
+    <div class="callout">
+      <span class="ico">🔑</span>
+      <span>
+        <span data-lang="he">היעדר הטוקן הוא מה שהופך את זה לעדכון ולא לשרת שני. התעודה ב‑<code class="inline">/var/lib/bystack-agent</code> היא הזהות של המכונה הזו מול המרכז והיא נשארת במקום; טוקן שיושב ליד תעודה קיימת גורם לסוכן להירשם שוב, והשרת חוזר כזר שממתין לאישור בזמן שזה שיש לכם נאלם.</span>
+        <span data-lang="en">Leaving the token out is what makes this an upgrade instead of a second host. The certificate under <code class="inline">/var/lib/bystack-agent</code> is this machine's identity to the Controller and stays where it is; a token beside a stored certificate makes the agent enrol again and appear as a stranger awaiting approval, while the host you actually have goes quiet.</span>
+      </span>
+    </div>
+
+    <p>
+      <span data-lang="he">לא צריך לעצור כלום מראש. הבינארי החדש מחליף את הקובץ הישן במקום להיכתב דרכו, אז הסוכן הרץ מסיים על זה שאיתו התחיל והשינוי תופס בהפעלה מחדש שהסקריפט עושה בסוף — השרת נעלם מהמפה לשנייה־שתיים וחוזר. דגלים שהעברתם בפעם הראשונה, כמו <code class="inline">--read-only</code> או <code class="inline">--socket</code>, נשמרים בלי לחזור עליהם, והסקריפט מדפיס אילו נשמרו. העברה מחדש של דגל עדיין גוברת — ככה משנים דעה.</span>
+        <span data-lang="en">You do not need to stop anything first. The new binary replaces the old file rather than being written through it, so the running agent finishes on the one it started with and the change takes effect at the restart the script does at the end — the host drops off the map for a second or two and comes back. Flags you passed the first time, like <code class="inline">--read-only</code> or <code class="inline">--socket</code>, are kept without being repeated, and the script prints which ones it carried over. Passing one again still wins, which is how you change your mind.</span>
+    </p>
+    <p>
+      <span data-lang="he">בשרת בלי גישה ל‑GitHub: מורידים או בונים את הבינארי פעם אחת, מעתיקים אותו, ומריצים את הסקריפט עם <code class="inline">--binary</code> ובלי טוקן. אחר כך <b>Hosts</b> מציג את הגרסה של כל סוכן, אז שרת שפספסתם נראה לעין ולא רק שקט.</span>
+      <span data-lang="en">On a server with no route to GitHub: download or build the binary once, copy it over, and run the script with <code class="inline">--binary</code> and no token. Afterwards <b>Hosts</b> shows each agent's version, so a server you missed is visible rather than merely quiet.</span>
     </p>
   </section>
 
@@ -365,11 +455,16 @@ docker compose up -d --build</pre>
   <!-- REMOVE -->
   <section class="step">
     <h2 style="display:block;margin-bottom:6px"><span data-lang="he">הסרת שרת בהמשך</span><span data-lang="en">Removing a server later</span></h2>
-    <p><span data-lang="he">מריצים על אותו שרת:</span><span data-lang="en">Run this on that server:</span></p>
+    <p><span data-lang="he">מריצים על אותו שרת — אותו סקריפט שהתקין, עם דגל אחד ובלי כתובת ובלי טוקן:</span><span data-lang="en">Run this on that server — the same script that installed it, with one flag and neither an address nor a token:</span></p>
     <div class="code" data-lang="both">
       <button class="copy" onclick="copyCode(this)">Copy</button>
-      <pre>sudo sh install-agent.sh --uninstall</pre>
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+  | sudo sh -s -- --uninstall</pre>
     </div>
+    <p>
+      <span data-lang="he">התעודה ב‑<code class="inline">/var/lib/bystack-agent</code> נשארת בכוונה: היא מה שהמרכז מזהה בו את המכונה הזו, ומחיקתה הופכת "התקנתי מחדש את הסוכן" ל"שרת חדש הופיע והישן נאלם". למחוק אותה במפורש אם זו הכוונה.</span>
+      <span data-lang="en">The certificate under <code class="inline">/var/lib/bystack-agent</code> is left behind on purpose: it is what the Controller knows this machine as, and removing it turns "I reinstalled the agent" into "a new host appeared and the old one went quiet". Delete it deliberately if that is what you mean.</span>
+    </p>
   </section>
 
   <footer>

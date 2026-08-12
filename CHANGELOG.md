@@ -82,6 +82,16 @@ host returns as a stranger awaiting approval while the one you had goes quiet.
 - INSTALL.md and the install page say which of the two numbers in
   `ssh -L 8080:127.0.0.1:8000` belongs to which machine, and why
   `ExitOnForwardFailure=yes` is not optional dressing.
+- **The install page covers upgrading**, which it did not: the order, the
+  `--build` that decides whether `docker compose up -d` upgrades anything at
+  all, the `git stash` that Step 3's own edit to a tracked file makes necessary,
+  and the per-server line without a token. The "add a server" command is a real
+  pinned URL there rather than `https://.../install-agent.sh`, marked as an
+  example so nobody pastes it instead of the one the dashboard composes.
+- **The uninstall line assumed a file that is not on the host.** Both documents
+  said `sudo sh install-agent.sh --uninstall`, on a machine where the installer
+  arrived through a pipe and was never written down. It is fetched the same way
+  it was the first time.
 
 ---
 

@@ -377,11 +377,20 @@ also hands out the right version to new hosts.
 
 ## Removing things
 
-One server, run on that server:
+One server, run on that server. The installer was piped from a URL rather than
+left on the host, so fetch it the same way — `--uninstall` needs neither a
+controller nor a token:
 
 ```bash
-sudo sh install-agent.sh --uninstall
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+  | sudo sh -s -- --uninstall
 ```
+
+(`sudo sh install-agent.sh --uninstall` if you do have the file on that host.)
+Either form keeps `/var/lib/bystack-agent` — the certificate in there is what
+this machine is to the Controller, and removing it turns "I reinstalled the
+agent" into "a new host appeared and the old one went quiet". Delete it by hand
+if that is what you mean.
 
 The Controller, from the clone:
 
