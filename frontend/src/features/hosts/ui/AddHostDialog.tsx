@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { JoinToken } from '../../../api/types';
 import { tokenLife } from '../model/hosts';
 
@@ -68,7 +69,16 @@ export function AddHostDialog({ token, autoApprove, onClose }: Props) {
     }
   };
 
-  return (
+  /**
+   * Portalled to the body, and it has to be.
+   *
+   * This dialog is rendered from inside the Hosts panel, and that panel has a
+   * `backdrop-filter` — which makes it the containing block for every
+   * `position: fixed` descendant. Left in place, the modal laid itself out
+   * inside a 340px column and clipped the install command at its edge: the one
+   * string this whole screen exists to hand over, cut in half.
+   */
+  return createPortal(
     <div className="modal" role="dialog" aria-modal="true" aria-label="Add a host">
       <div className="modal__card">
         <header className="modal__head">
@@ -147,11 +157,12 @@ export function AddHostDialog({ token, autoApprove, onClose }: Props) {
         </div>
 
         <footer className="modal__foot">
-          <button type="button" className="action action--safe" onClick={onClose}>
+          <button type="button" className="action action--primary" onClick={onClose}>
             Done — discard this token
           </button>
         </footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

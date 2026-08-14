@@ -8,6 +8,7 @@
  */
 
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { GraphNode, InventoryItem, Urn, WatchKind } from '../../../api/types';
 import type { Watching } from '../model/useWatch';
 import { useInventory } from '../model/useWatch';
@@ -193,7 +194,11 @@ function PickerDialog({
     if (ok) onClose();
   };
 
-  return (
+  // Portalled for the same reason as the join-token dialog: this is rendered
+  // from inside a panel that has a `backdrop-filter`, which makes that panel
+  // the containing block for `position: fixed` and would lay the picker out
+  // inside a 340px column.
+  return createPortal(
     <div className="modal">
       <div className="modal__card">
         <header className="hosts__head">
@@ -260,6 +265,7 @@ function PickerDialog({
           Watch it
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -30,6 +30,26 @@ export function useHealth(baseUrl: string): HealthState {
   const [state, setState] = useState<HealthState>({ kind: 'pending' });
 
   useEffect(() => {
+    // Dev mock canvas — invent a healthy Controller so the banner stays quiet.
+    if (
+      import.meta.env.DEV &&
+      new URLSearchParams(window.location.search).get('mock') !== '0'
+    ) {
+      setState({
+        kind: 'reached',
+        health: {
+          status: 'ok',
+          version: 'mock',
+          seq: 1,
+          node_count: 0,
+          edge_count: 0,
+          read_only: true,
+          providers: [],
+        },
+      });
+      return;
+    }
+
     let disposed = false;
     let timer: number | undefined;
     const controllers = new Set<AbortController>();

@@ -89,7 +89,7 @@ export function HostsPanel({
 
       <button
         type="button"
-        className="action action--safe hosts__add"
+        className="action action--primary hosts__add"
         disabled={minting || listenerOff}
         onClick={() => void addHost()}
       >
@@ -368,7 +368,7 @@ function HostCard({
           {status === 'pending' ? (
             <button
               type="button"
-              className="action action--safe"
+              className="action action--primary"
               disabled={busy}
               onClick={onApprove}
             >

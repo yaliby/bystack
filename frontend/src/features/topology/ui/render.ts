@@ -25,6 +25,7 @@ import {
   statusOf,
 } from './theme';
 import { sizeOf } from '../layout/geometry';
+import { placePortLabels, type Rect } from './portLabels';
 
 export interface Viewport {
   readonly x: number;
@@ -85,26 +86,8 @@ const DRAWN_EDGES = new Set(['depends_on', 'mounts', 'exposed_on']);
  * glance. Stepping each chip further back along its own wire spreads fan-ins
  * on the host instead of stacking them in one column.
  */
-const PORT_CHIP_H = 15;
-const PORT_CHIP_PAD_X = 5;
-/**
- * Where the chip sits on its link, measured back from the host card.
- *
- * Links converging on one host arrive nearly parallel — on the demo stacks all
- * six land inside a 42px band — so anchoring every chip at the same distance
- * would pile them up. Stepping each one further back along its own wire
- * spreads them across the approach instead, and every chip stays on the line
- * it describes rather than floating beside it.
- */
-/**
- * Far enough back to clear the card it points at: the path ends at the node's
- * centre, not its edge, and the host card is ~96 world units of half-width, so
- * a smaller inset parks the number underneath the card.
- */
-const PORT_CHIP_INSET = 118;
-const PORT_CHIP_STEP = 34;
-/** Never past the midpoint — a chip belongs to the host end of the link. */
-const PORT_CHIP_MAX_FRACTION = 0.45;
+const PORT_CHIP_H = 16;
+const PORT_CHIP_PAD_X = 6;
 
 /**
  * Flow-dot params — dots travel along live dependency links.
@@ -146,9 +129,14 @@ export function draw(
   // Dots live in world space so panning reads as movement over a surface.
   drawDotGrid(ctx, size, viewport, palette);
   drawStackFrames(ctx, scene, viewport, palette);
-  drawEdges(ctx, scene, viewport, palette, timeMs);
+  const portChips = drawEdges(ctx, scene, viewport, palette, timeMs);
   drawHomeGhost(ctx, scene, viewport, palette);
   drawNodes(ctx, scene, viewport, palette);
+  // Ports last — cards used to paint over any chip that landed near them,
+  // which is how a middle link "lost" its number entirely.
+  drawLinkPorts(ctx, portChips, viewport, palette, collectOccupied(scene), [
+    ...drawnRoutes.values(),
+  ]);
   ctx.restore();
 }
 
@@ -236,7 +224,13 @@ function drawEdges(
   viewport: Viewport,
   palette: Palette,
   timeMs: number,
-): void {
+): {
+  key: string;
+  path: readonly Point[];
+  text: string;
+  color: string;
+  alpha: number;
+}[] {
   const baseWidth = 2.2 / viewport.zoom;
   const ordered = [...scene.edges].sort((a, b) => edgePriority(a.kind) - edgePriority(b.kind));
   const anchors = endpointAnchors(scene);
@@ -245,7 +239,13 @@ function drawEdges(
   drawnRoutes = routed;
 
   const flow: { key: string; path: Point[]; color: string; alpha: number }[] = [];
-  const portChips: { at: Point; text: string; color: string; alpha: number }[] = [];
+  const portChips: {
+    key: string;
+    path: readonly Point[];
+    text: string;
+    color: string;
+    alpha: number;
+  }[] = [];
 
   for (const edge of ordered) {
     if (!DRAWN_EDGES.has(edge.kind)) continue;
@@ -313,16 +313,14 @@ function drawEdges(
       flow.push({ key: edge.key, path, color, alpha });
     }
 
-    // Port numbers live on the wire — always visible for published links.
+    // Port numbers beside the wire, stepped back from the host so the host
+    // card never covers them. Drawn after nodes (see `draw`) for the same reason.
     if (edge.kind === 'exposed_on' && !dimmed && !edgeFocus) {
       const text = edgePortLabel(edge);
       if (text) {
-        const distance = Math.min(
-          PORT_CHIP_INSET + portChips.length * PORT_CHIP_STEP,
-          polylineLength(path) * PORT_CHIP_MAX_FRACTION,
-        );
         portChips.push({
-          at: pointBeforeEnd(path, distance),
+          key: edge.key,
+          path,
           text,
           color,
           alpha: asked ? 1 : Math.max(alpha, 0.95),
@@ -332,44 +330,29 @@ function drawEdges(
   }
 
   drawFlowDots(ctx, flow, viewport, timeMs);
-  drawLinkPorts(ctx, portChips, viewport, palette);
+  return portChips;
 }
 
 /**
- * A point measured back along the path from its final endpoint.
+ * Chips beside the published links.
  *
- * Anchoring to the end rather than to a fraction keeps the chip the same
- * distance from the host card whether the link crosses the whole canvas or
- * hops to the stack next door.
- */
-function pointBeforeEnd(path: readonly Point[], distance: number): Point {
-  let remaining = distance;
-  for (let i = path.length - 1; i > 0; i -= 1) {
-    const to = path[i];
-    const from = path[i - 1];
-    const segment = Math.hypot(to.x - from.x, to.y - from.y);
-    if (segment >= remaining) {
-      const t = remaining / (segment || 1);
-      return { x: to.x + (from.x - to.x) * t, y: to.y + (from.y - to.y) * t };
-    }
-    remaining -= segment;
-  }
-  return path[0];
-}
-
-/**
- * Chips on the published links, nudged apart where two still land together.
- *
- * Stepping the anchors along each wire handles the common fan-in; this is the
- * backstop for the layouts it does not — two links that happen to run on top
- * of each other. A nudged chip drifts off its wire, so the step is kept just
- * large enough to clear the overlap.
+ * Measuring the text needs a context, so the widths are taken here and the
+ * geometry is decided in `placePortLabels` — see that module for why a chip is
+ * always anchored to its own wire rather than to a free patch of canvas.
  */
 function drawLinkPorts(
   ctx: CanvasRenderingContext2D,
-  chips: readonly { at: Point; text: string; color: string; alpha: number }[],
+  chips: readonly {
+    key: string;
+    path: readonly Point[];
+    text: string;
+    color: string;
+    alpha: number;
+  }[],
   viewport: Viewport,
   palette: Palette,
+  occupied: { cards: readonly Rect[]; frames: readonly Rect[] },
+  wires: readonly (readonly Point[])[],
 ): void {
   if (chips.length === 0) return;
 
@@ -378,38 +361,75 @@ function drawLinkPorts(
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
 
-  const placed: { x: number; y: number; width: number }[] = [];
+  const widths = chips.map((chip) => ctx.measureText(chip.text).width + PORT_CHIP_PAD_X * 2);
+  const placements = placePortLabels(
+    chips.map((chip, i) => ({ key: chip.key, path: chip.path, width: widths[i] })),
+    occupied.cards,
+    occupied.frames,
+    wires,
+    PORT_CHIP_H,
+  );
 
-  for (const chip of chips) {
-    const width = ctx.measureText(chip.text).width + PORT_CHIP_PAD_X * 2;
-    let { x, y } = chip.at;
-    x -= width / 2;
+  chips.forEach((chip, i) => {
+    const width = widths[i];
+    const { at } = placements[i];
+    const x = at.x - width / 2;
+    const y = at.y;
 
-    for (let attempt = 0; attempt < placed.length; attempt += 1) {
-      const clash = placed.some(
-        (box) =>
-          Math.abs(box.y - y) < PORT_CHIP_H &&
-          box.x < x + width &&
-          x < box.x + box.width,
-      );
-      if (!clash) break;
-      y += PORT_CHIP_H + 3;
-    }
-    placed.push({ x, y, width });
-
-    ctx.globalAlpha = chip.alpha;
     roundedRectPath(ctx, x, y - PORT_CHIP_H / 2, width, PORT_CHIP_H, 4);
-    ctx.fillStyle = palette.surface;
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = palette.nodeFill;
     ctx.fill();
+    ctx.globalAlpha = chip.alpha;
     ctx.strokeStyle = chip.color;
-    ctx.lineWidth = 1 / viewport.zoom;
+    ctx.lineWidth = 1.15 / viewport.zoom;
     ctx.stroke();
 
-    ctx.fillStyle = chip.color;
+    ctx.fillStyle = palette.inkSecondary;
     ctx.fillText(chip.text, x + PORT_CHIP_PAD_X, y + 0.5);
-  }
+  });
 
   ctx.restore();
+}
+
+/** Air around a chip so it does not graze a glowing frame stroke. */
+const CHIP_CLEAR = 12;
+
+/**
+ * The two things a port chip has to keep off, kept apart.
+ *
+ * Cards are opaque and full of text; frames are a tinted outline with an empty
+ * middle. `placePortLabels` prices them very differently — see `W_FRAME`.
+ */
+function collectOccupied(scene: Scene): { cards: Rect[]; frames: Rect[] } {
+  const realized = realizedContainers(scene);
+  const folded = new Set([...realized.values()].map((c) => c.urn));
+  const cards: Rect[] = [];
+  const frames: Rect[] = [];
+
+  for (const node of scene.nodes) {
+    if (node.kind === 'stack' || node.kind === 'image' || node.kind === 'network') continue;
+    if (folded.has(node.urn)) continue;
+    const pos = scene.positions.get(node.urn);
+    if (!pos) continue;
+    const [hw, hh] = sizeOf(node.kind);
+    cards.push({
+      left: pos.x - hw - CHIP_CLEAR,
+      right: pos.x + hw + CHIP_CLEAR,
+      top: pos.y - hh - CHIP_CLEAR,
+      bottom: pos.y + hh + CHIP_CLEAR,
+    });
+  }
+
+  for (const box of scene.groupBounds.values()) {
+    frames.push({
+      left: box.x - CHIP_CLEAR,
+      right: box.x + box.width + CHIP_CLEAR,
+      top: box.y - CHIP_CLEAR,
+      bottom: box.y + box.height + CHIP_CLEAR,
+    });
+  }
+  return { cards, frames };
 }
 
 /**
@@ -497,6 +517,19 @@ function collectObstacles(scene: Scene): RouteObstacle[] {
     if (!pos) continue;
     const [hw, hh] = sizeOf(node.kind);
     out.push({ id: node.urn, x: pos.x, y: pos.y, hw, hh });
+  }
+
+  // Other stacks are solid: a host wire must not walk through a neighbouring
+  // assembly. The source stack is ignored automatically — the endpoint sits
+  // inside it (`covers` in liveEdges).
+  for (const [stackUrn, box] of scene.groupBounds) {
+    out.push({
+      id: `frame:${stackUrn}`,
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+      hw: box.width / 2,
+      hh: box.height / 2,
+    });
   }
   return out;
 }

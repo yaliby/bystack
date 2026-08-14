@@ -27,3 +27,6 @@ state/
 # a state directory with a CA key in it.
 .bystack-test/
 .bystack-test*.yaml
+
+# Browser profile used by the local screenshot lab — cookies, history, locks.
+.demo/lab/.chrome-profile/

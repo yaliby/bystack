@@ -249,7 +249,11 @@ export async function layoutPrepared(prepared: TopologyGraph): Promise<LayoutSna
       'elk.spacing.edgeEdge': '24',
       'elk.spacing.edgeNode': '28',
       'elk.spacing.componentComponent': '90',
-      'elk.layered.spacing.nodeNodeBetweenLayers': '80',
+      // The gap between a stack and the host is not slack — it is the lane the
+      // published wires run down and the only place their port chips can be
+      // read. Sized for a chip plus air on both sides; at the old 80 there was
+      // no room for one, and the labels had to be dumped somewhere arbitrary.
+      'elk.layered.spacing.nodeNodeBetweenLayers': '210',
       'elk.layered.spacing.edgeEdgeBetweenLayers': '28',
       'elk.layered.spacing.edgeNodeBetweenLayers': '36',
       'elk.layered.unnecessaryBendpoints': 'true',
@@ -293,6 +297,11 @@ export async function layoutPrepared(prepared: TopologyGraph): Promise<LayoutSna
     });
   }
 
+  // A published port has to leave the stack. Seating those cards on the
+  // host-facing column means the wire exits immediately instead of threading
+  // the assembly — volumes and un-published siblings sit inward.
+  seatPublishedNearHost(positions, groupBounds, prepared);
+
   const edgePaths = new Map<string, Point[]>();
   for (const [key, pts] of rawPaths) {
     edgePaths.set(
@@ -302,6 +311,67 @@ export async function layoutPrepared(prepared: TopologyGraph): Promise<LayoutSna
   }
 
   return { positions, groupBounds, edgePaths };
+}
+
+/**
+ * Move cards that publish to a host onto the stack column closest to that host.
+ *
+ * ELK places by internal structure (`depends_on`, `mounts`), which is right
+ * for reading the stack — and wrong for the dashed host wires, which then
+ * have to walk through a volume or a neighbour to get out. Swapping X only,
+ * among the x-slots ELK already chose, keeps everyone inside the frame and
+ * leaves vertical order (and the spring-home seats) alone.
+ */
+function seatPublishedNearHost(
+  positions: Map<Urn, Point>,
+  groupBounds: ReadonlyMap<Urn, { x: number; y: number; width: number; height: number }>,
+  prepared: TopologyGraph,
+): void {
+  const hosts = prepared.freeNodes.filter((node) => node.kind === 'host' && positions.has(node.urn));
+  if (hosts.length === 0) return;
+
+  let hostX = 0;
+  for (const host of hosts) hostX += positions.get(host.urn)!.x;
+  hostX /= hosts.length;
+
+  const hostUrns = new Set(hosts.map((host) => host.urn));
+  const published = new Set<Urn>();
+  for (const edge of prepared.edges) {
+    if (edge.kind !== 'exposed_on') continue;
+    if (hostUrns.has(edge.dst)) published.add(edge.src);
+    if (hostUrns.has(edge.src)) published.add(edge.dst);
+  }
+  if (published.size === 0) return;
+
+  for (const [stackUrn, members] of prepared.stackMembers) {
+    const seated = members.filter((member) => positions.has(member.urn));
+    if (seated.length < 2) continue;
+    const pubs = seated.filter((member) => published.has(member.urn));
+    if (pubs.length === 0) continue;
+
+    const box = groupBounds.get(stackUrn);
+    const stackCentre =
+      box != null
+        ? box.x + box.width / 2
+        : seated.reduce((sum, member) => sum + positions.get(member.urn)!.x, 0) / seated.length;
+    const towardHost = hostX >= stackCentre ? 1 : -1;
+
+    const byY = (a: GraphNode, b: GraphNode) => positions.get(a.urn)!.y - positions.get(b.urn)!.y;
+    const inner = seated.filter((member) => !published.has(member.urn));
+    const xs = seated.map((member) => positions.get(member.urn)!.x).sort((a, b) => towardHost * (b - a));
+
+    let slot = 0;
+    for (const member of [...pubs].sort(byY)) {
+      const at = positions.get(member.urn)!;
+      positions.set(member.urn, { x: xs[slot], y: at.y });
+      slot += 1;
+    }
+    for (const member of [...inner].sort(byY)) {
+      const at = positions.get(member.urn)!;
+      positions.set(member.urn, { x: xs[slot], y: at.y });
+      slot += 1;
+    }
+  }
 }
 
 function elkLeaf(node: GraphNode): ElkNode {
