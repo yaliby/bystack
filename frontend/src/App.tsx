@@ -2,7 +2,7 @@
  * Application shell — canvas-first, DockGraph-style minimal chrome.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CommandKind, GraphNode, Urn } from './api/types';
 import { prepareTopologyGraph } from './features/topology/layout/prepareTopology';
 import { neighborsOf } from './features/topology/model/graphStore';
@@ -35,6 +35,12 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? window.location.origin;
 const NARROW_QUERY = '(max-width: 720px)';
 const COARSE_POINTER_QUERY = '(pointer: coarse)';
 
+/** Dev mock canvas — see `useGraphStream`. Visible so this is never mistaken for prod. */
+function isMockCanvas(): boolean {
+  if (!import.meta.env.DEV) return false;
+  return new URLSearchParams(window.location.search).get('mock') !== '0';
+}
+
 const INSPECTOR_WIDTH = 320;
 /** The hosts panel, on the other side. Keep in step with `.hosts` in CSS. */
 const HOSTS_WIDTH = 340;
@@ -44,11 +50,18 @@ const HOSTS_WIDTH = 340;
  * the old 120 here let `fit` finish 11px underneath its first line.
  */
 const LEGEND_HEIGHT = 150;
-const LEGEND_HEIGHT_NARROW = 118;
+/** Measured, not guessed: the narrow legend is three wrapped columns, 148px. */
+const LEGEND_HEIGHT_NARROW = 148;
 /** The topbar floats over a full-bleed canvas, so `fit` has to allow for it. */
 const TOPBAR_HEIGHT = 58;
-/** Trace row + wrapped actions; keep in step with narrow `.topbar--slim`. */
-const TOPBAR_HEIGHT_NARROW = 132;
+/**
+ * The plate wraps on a phone — identity, actions, search, trace — and the
+ * tallest it gets is three rows ending at 169px, measured. The rest is the
+ * same clearance the wide value carries over its own 43px plate.
+ */
+const TOPBAR_HEIGHT_NARROW = 184;
+/** The trace rail's seats. Four values, so four seats — never a slider. */
+const TRACE_DEPTHS = [1, 2, 3, 4] as const;
 /** So does the banner, when there is one. Keep in step with `.banner` in CSS. */
 const BANNER_HEIGHT = 33;
 /** Docker's own networks. Present on every host, so counting them says nothing. */
@@ -71,6 +84,7 @@ export default function App() {
   const [watchingHost, setWatchingHost] = useState<string | null>(null);
   const narrow = useMediaQuery(NARROW_QUERY);
   const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const { graph, connection, resyncs } = useGraphStream(API_BASE);
   const health = useHealth(API_BASE);
@@ -83,8 +97,30 @@ export default function App() {
   // the delta stream like every other node.
   const watching = useWatch(API_BASE, watchingHost);
   const palette = dark ? DARK : LIGHT;
+  const mockCanvas = isMockCanvas();
 
-  const status = useMemo(() => deriveStatus(connection, health), [connection, health]);
+  // Mock invents a live socket and a read-only health answer so the canvas can
+  // paint. Surfacing those as "live · read-only" next to a separate "MOCK"
+  // badge is three answers to one question. One label, one tone.
+  const status = useMemo(() => {
+    if (mockCanvas) {
+      return {
+        tone: 'warn' as const,
+        label: 'mock',
+        detail: 'Canned demo graph — local Vite, not a Controller.',
+        banner: false,
+        ailing: [] as const,
+      };
+    }
+    return deriveStatus(connection, health);
+  }, [mockCanvas, connection, health]);
+
+  // Also on the document element, not only on the shell below. The join-token
+  // dialog is portalled to `body` to escape a `backdrop-filter` containing
+  // block, and a theme scoped to `.app` would leave it with no colours at all.
+  useEffect(() => {
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  }, [dark]);
 
   // One decision about what the canvas shows, shared with the canvas itself so
   // the counters below cannot describe a picture that was never drawn.
@@ -190,8 +226,11 @@ export default function App() {
       ? `${providers.length} sources`
       : (providers[0]?.id ??
         [...graph.nodes.values()].find((node) => node.kind === 'host')?.source ??
-        'local');
-  const readOnly = health.kind === 'reached' && health.health.read_only;
+        null);
+  // Never on the mock canvas: the canned health answer is read_only so the
+  // demo cannot pretend to mutate, but that is an implementation detail — not
+  // an operating mode the operator chose.
+  const readOnly = !mockCanvas && health.kind === 'reached' && health.health.read_only;
   const pending = pendingCount(fleet.agents);
 
   const inspectorOpen = selectedNode !== null || selectedLink !== null;
@@ -214,9 +253,23 @@ export default function App() {
     setZoomToken((n) => n + 1);
   }, []);
 
-  // Escape dismisses floating chrome the same way the sheet backdrop does.
+  // Escape dismisses floating chrome the same way the sheet backdrop does, and
+  // `/` reaches the search without the mouse. Both are on the window because
+  // the canvas holds focus for most of a session and neither should require
+  // finding the chrome first.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        // Not while someone is typing — in a field, `/` is a character.
+        const active = document.activeElement;
+        const tag = active?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || (active as HTMLElement)?.isContentEditable) {
+          return;
+        }
+        event.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
       if (event.key !== 'Escape') return;
       if (!hostsOpen && !activityOpen && !inspectorOpen) return;
       event.preventDefault();
@@ -259,119 +312,163 @@ export default function App() {
       className={`app${narrow ? ' app--narrow' : ''}`}
       data-theme={dark ? 'dark' : 'light'}
     >
-      <header className="topbar topbar--slim">
-        <div className="brand brand--mark">ByStack</div>
+      <header className="topbar">
+        {/* One plate. Separate floating capsules for brand, env, search and
+            trace is how a header turns into a row of badges. */}
+        <div className="topbar__plate">
+          <div className="topbar__identity" title={status.detail ?? undefined}>
+            <span className="brand">
+              <BrandMark />
+              <span className="brand__word">ByStack</span>
+            </span>
+            <span className="status-readout">
+              <span className={`live-dot live-dot--${status.tone}`} />
+              <span className="status-readout__text">
+                {mockCanvas || narrow || !providerLabel ? (
+                  status.label
+                ) : (
+                  <>
+                    {providerLabel}
+                    <span className="brand__sep">·</span>
+                    {status.label}
+                  </>
+                )}
+                {!narrow && readOnly ? (
+                  <>
+                    <span className="brand__sep">·</span>
+                    read-only
+                  </>
+                ) : null}
+                {!mockCanvas && resyncs > 0 ? (
+                  <>
+                    <span className="brand__sep">·</span>
+                    {resyncs} resync
+                  </>
+                ) : null}
+              </span>
+            </span>
+          </div>
 
-        <div className="status-pill" title={status.detail ?? undefined}>
-          <span className={`live-dot live-dot--${status.tone}`} />
-          <span className="status-pill__text">
-            {narrow ? status.label : (
-              <>
-                {providerLabel}
-                <span className="brand__sep">·</span>
-                {status.label}
-              </>
+          <div className="topbar__search">
+            <input
+              ref={searchRef}
+              className="search"
+              type="search"
+              placeholder="Search the map…"
+              title="Press / to focus"
+              enterKeyHint="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.stopPropagation();
+                  setQuery('');
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+
+            {matches.length > 0 && (
+              <ul className="search__results">
+                {matches.map((node) => (
+                  <li key={node.urn}>
+                    <button
+                      onClick={() => {
+                        setSelected(node.urn);
+                        setSelectedEdge(null);
+                        setQuery('');
+                        if (narrow) setHostsOpen(false);
+                      }}
+                    >
+                      {node.name} <span className="muted">{node.kind}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
-            {!narrow && readOnly ? (
+          </div>
+
+          <div className="spacer" />
+
+          {/* Depth is a hop count, not a tab strip. The active value is weight;
+              the inactive ones stay quiet text. */}
+          <div className="trace" role="group" aria-label="Trace depth">
+            <span className="trace__label" aria-hidden="true">
+              Trace
+            </span>
+            {TRACE_DEPTHS.map((depth) => (
+              <button
+                key={depth}
+                type="button"
+                className="trace__step"
+                aria-pressed={traceDepth === depth}
+                aria-label={`Trace ${depth} ${depth === 1 ? 'hop' : 'hops'}`}
+                onClick={() => setTraceDepth(depth)}
+              >
+                {depth}
+              </button>
+            ))}
+          </div>
+
+          <div className="topbar__actions">
+            {/* The count rides on the closed button on purpose: a host that has
+                just enrolled is waiting on a person, and it should not need the
+                panel to be open to say so. */}
+            <button
+              type="button"
+              className={`topbar__btn${pending > 0 ? ' topbar__btn--attention' : ''}`}
+              aria-pressed={hostsOpen}
+              onClick={openHosts}
+            >
+              Hosts
+              {pending > 0 ? <span className="topbar__count">{pending}</span> : null}
+            </button>
+            <button
+              type="button"
+              className="topbar__btn"
+              aria-pressed={activityOpen}
+              onClick={openActivity}
+            >
+              Activity
+            </button>
+            <span className="topbar__rule" aria-hidden="true" />
+            {narrow ? (
               <>
-                <span className="brand__sep">·</span>
-                read-only
+                <button
+                  type="button"
+                  className="topbar__btn topbar__btn--icon"
+                  aria-label="Zoom out"
+                  onClick={() => bumpZoom(1 / ZOOM_BUTTON_FACTOR)}
+                >
+                  −
+                </button>
+                <button
+                  type="button"
+                  className="topbar__btn topbar__btn--icon"
+                  aria-label="Zoom in"
+                  onClick={() => bumpZoom(ZOOM_BUTTON_FACTOR)}
+                >
+                  +
+                </button>
               </>
             ) : null}
-            {resyncs > 0 ? (
-              <>
-                <span className="brand__sep">·</span>
-                {resyncs} resync
-              </>
-            ) : null}
-          </span>
-        </div>
-
-        <div className="topbar__search">
-          <input
-            className="search"
-            type="search"
-            placeholder="Search…"
-            enterKeyHint="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-
-          {matches.length > 0 && (
-            <ul className="search__results">
-              {matches.map((node) => (
-                <li key={node.urn}>
-                  <button
-                    onClick={() => {
-                      setSelected(node.urn);
-                      setSelectedEdge(null);
-                      setQuery('');
-                      if (narrow) setHostsOpen(false);
-                    }}
-                  >
-                    {node.name} <span className="muted">{node.kind}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <label className="control control--trace">
-          Trace
-          <input
-            type="range"
-            min={1}
-            max={4}
-            value={traceDepth}
-            onChange={(event) => setTraceDepth(Number(event.target.value))}
-            aria-label="Trace depth"
-          />
-          <span>{traceDepth}</span>
-        </label>
-
-        <div className="spacer" />
-
-        <div className="topbar__actions">
-          {/* The count rides on the closed button on purpose: a host that has
-              just enrolled is waiting on a person, and it should not need the
-              panel to be open to say so. */}
-          <button
-            className={`control${pending > 0 ? ' control--attention' : ''}`}
-            onClick={openHosts}
-          >
-            Hosts
-            {pending > 0 ? <span className="control__badge">{pending}</span> : null}
-          </button>
-          <button className="control" onClick={openActivity}>
-            Activity
-          </button>
-          {narrow ? (
-            <>
-              <button
-                type="button"
-                className="control control--zoom"
-                aria-label="Zoom out"
-                onClick={() => bumpZoom(1 / ZOOM_BUTTON_FACTOR)}
-              >
-                −
-              </button>
-              <button
-                type="button"
-                className="control control--zoom"
-                aria-label="Zoom in"
-                onClick={() => bumpZoom(ZOOM_BUTTON_FACTOR)}
-              >
-                +
-              </button>
-            </>
-          ) : null}
-          <button className="control" onClick={() => setFitToken((n) => n + 1)}>
-            Fit
-          </button>
-          <button className="control" onClick={() => setDark((value) => !value)}>
-            {dark ? 'Light' : 'Dark'}
-          </button>
+            <button
+              type="button"
+              className="topbar__btn"
+              onClick={() => setFitToken((n) => n + 1)}
+            >
+              Fit
+            </button>
+            <button
+              type="button"
+              className="topbar__btn topbar__btn--icon"
+              aria-label={dark ? 'Switch to the light theme' : 'Switch to the dark theme'}
+              title={dark ? 'Light theme' : 'Dark theme'}
+              onClick={() => setDark((value) => !value)}
+            >
+              {dark ? <SunIcon /> : <MoonIcon />}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -488,18 +585,18 @@ export default function App() {
             }
           />
         ) : null}
-        <footer className="statusbar statusbar--hero">
+        <footer className="statusbar">
           <span className="stat">
-            <strong>{pad(counts.workloads)}</strong>
-            <span className="stat__label"> services</span>
+            <Reading value={counts.workloads} />
+            <span className="stat__label">services</span>
           </span>
           <span className="stat">
-            <strong>{pad(counts.stacks)}</strong>
-            <span className="stat__label"> stacks</span>
+            <Reading value={counts.stacks} />
+            <span className="stat__label">stacks</span>
           </span>
           <span className="stat">
-            <strong>{pad(counts.volumes)}</strong>
-            <span className="stat__label"> volumes</span>
+            <Reading value={counts.volumes} />
+            <span className="stat__label">volumes</span>
           </span>
           <span className="statusbar__hint">
             {counts.containers} containers · {counts.networks} networks discovered
@@ -510,6 +607,80 @@ export default function App() {
   );
 }
 
-function pad(n: number): string {
-  return String(n).padStart(2, '0');
+/**
+ * One figure off the canvas, padded to a fixed column.
+ *
+ * The pad is scaffolding and is drawn as such: it keeps `03` and `12` the same
+ * width so the row does not shuffle every time a container comes up, without
+ * `03` reading as a quantity somebody wrote down.
+ */
+function Reading({ value }: { value: number }) {
+  const text = String(value);
+  const pad = text.length < 2 ? '0'.repeat(2 - text.length) : '';
+  return (
+    <span className="stat__num">
+      {pad ? <span className="stat__pad">{pad}</span> : null}
+      {text}
+    </span>
+  );
+}
+
+/**
+ * The wordmark's glyph — a frame with two linked cards in it.
+ *
+ * Deliberately the canvas's own grammar rather than a logo: a stack frame, two
+ * nodes and the link between them is the whole of what this product draws.
+ */
+function BrandMark() {
+  return (
+    <svg
+      className="brand__mark"
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <rect
+        x="1.3"
+        y="1.3"
+        width="13.4"
+        height="13.4"
+        rx="4"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        opacity="0.45"
+      />
+      <path d="M6.5 6.5 9.5 9.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <circle cx="5.3" cy="5.3" r="1.75" fill="currentColor" />
+      <circle cx="10.7" cy="10.7" r="1.75" fill="currentColor" />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="3.1" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M8 1.2v1.6M8 13.2v1.6M14.8 8h-1.6M2.8 8H1.2M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1M12.8 12.8l-1.1-1.1M4.3 4.3 3.2 3.2"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M13.4 9.8A5.9 5.9 0 0 1 6.2 2.6a5.9 5.9 0 1 0 7.2 7.2Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
