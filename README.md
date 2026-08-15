@@ -121,7 +121,7 @@ docker compose up -d --build
 
 # 2. A wheel. Carries the agent binary and the dashboard; nothing else needed.
 python3 -m venv /opt/bystack
-/opt/bystack/bin/pip install bystack-0.2.0-py3-none-manylinux*_x86_64*.whl
+/opt/bystack/bin/pip install bystack-0.3.0-py3-none-manylinux*_x86_64*.whl
 /opt/bystack/bin/bystack                        # manages this machine
 
 # 3. From a checkout. `scripts/build-agent.sh` produces the static binaries.
@@ -133,7 +133,7 @@ Adding a host is one command on that host, and the dashboard composes it with
 the token already in it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://controller:8443 --token bst1.…
 ```
 

@@ -8,4 +8,4 @@
 #: without bumping it hands out the *previous* release to every new host.
 #: `scripts/install-agent.sh` carries the same number as its default and has
 #: to move with this one.
-__version__ = "0.2.0"
+__version__ = "0.3.0"

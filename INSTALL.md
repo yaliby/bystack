@@ -151,7 +151,7 @@ docker compose up -d
 It looks like this:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443 --token bst1.…
 ```
 
@@ -186,7 +186,7 @@ ssh you@newserver 'sudo sh /tmp/install-agent.sh --binary /tmp/bystack-agent-x86
 | `ssh: Could not resolve hostname http://…` | `ssh` takes `user@host`, not a URL. Drop the `http://` and the trailing slash. |
 | Browser cannot connect at all | The port is on loopback. See Step 2. |
 | The map is completely empty | The Docker socket group. See below. |
-| The pasted `curl` in Step 3 returns 404 | No release has been published for this Controller's version yet. Tag one (`git tag v0.2.0 && git push origin v0.2.0`) or use the `--binary` form above. |
+| The pasted `curl` in Step 3 returns 404 | No release has been published for this Controller's version yet. Tag one (`git tag v0.3.0 && git push origin v0.3.0`) or use the `--binary` form above. |
 | Agent says the certificate name does not match | The address it dialled is not in `server_names`. Step 3a. |
 
 **The empty map is worth its own paragraph**, because nothing else reports it.
@@ -337,7 +337,7 @@ so does `bystack-ctl hosts`. It is the command that installed the agent, with
 the new tag in the URL and **no `--token`**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443
 ```
 
@@ -366,7 +366,7 @@ visible rather than merely quiet.
 ### If you installed the wheel instead
 
 ```bash
-/opt/bystack/bin/pip install --upgrade bystack-0.2.0-*.whl   # from the release
+/opt/bystack/bin/pip install --upgrade bystack-0.3.0-*.whl   # from the release
 sudo systemctl restart bystack-controller                    # if it runs as a unit
 ```
 
@@ -382,7 +382,7 @@ left on the host, so fetch it the same way — `--uninstall` needs neither a
 controller nor a token:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
   | sudo sh -s -- --uninstall
 ```
 

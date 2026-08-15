@@ -2,7 +2,7 @@
 #
 # Put the ByStack agent on this machine.
 #
-#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
 #       | sudo sh -s -- --controller wss://controller:8443 --token bst1.<ca>.<secret>
 #
 # That is the command the dashboard hands out. Everything below is what it
@@ -15,7 +15,7 @@
 #
 # The same command with the new tag in the URL and *no* `--token`:
 #
-#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.2.0/scripts/install-agent.sh \
+#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
 #       | sudo sh -s -- --controller wss://controller:8443
 #
 # Dropping the token is what makes it an upgrade rather than a second host.
@@ -52,7 +52,7 @@
 set -eu
 
 REPO="${BYSTACK_REPO:-yaliby/bystack}"
-VERSION="${BYSTACK_VERSION:-v0.2.0}"
+VERSION="${BYSTACK_VERSION:-v0.3.0}"
 
 BIN_DIR="${BYSTACK_BIN_DIR:-/usr/local/bin}"
 CONF_DIR=/etc/bystack

@@ -10,6 +10,61 @@ to point at a release where the agent binary exists.
 
 ---
 
+## v0.3.0
+
+**Upgrade the Controller. The agents can follow whenever it suits you.**
+Nothing in this release is in the agent — its binary is the same software
+rebuilt under a new number. But one number covers everything published
+together, so hosts left on v0.2.0 report themselves as behind the moment the
+Controller moves, and the dashboard hands out the upgrade line for them. That
+report is right about the number and misleading about the software: there is
+no feature on the far side of it. Upgrade the fleet to quiet the report, not
+to make anything here work.
+
+### Watch one thing on many hosts at once ([ADR-0016](docs/adr/0016-watched-units-and-processes.md))
+
+Adding a watch now asks which *other* hosts should get it. **Hosts → a server →
+Services & processes → Add systemd unit** offers every connected machine
+beside the one you started from, and the panel afterwards says *also chosen on
+3 other hosts* on the entries that have siblings.
+
+What that does is add the same watch to each host you ticked. It is worth
+being plain about what it does not do, because the word "group" invites the
+other reading:
+
+- **The group is a label on N ordinary entries, not a rule over them.** Each
+  host holds its own entry and can lose it alone; there is no operation that
+  edits "the group", and nothing anywhere stores one. A group that owned its
+  members would be a second answer to "what is this machine watching", and the
+  machine would eventually hold entries nobody chose for it.
+- **One host's refusal does not unwind the others.** A duplicate or a bad
+  pattern is reported in that host's own words, beside the ones that took it —
+  which is why the request answers `200` with a row per host rather than
+  `201`. Up to 256 hosts in one act of selection, the fleet-wide counterpart
+  of the 64 entries one machine will hold.
+
+### Operating the selection from one button
+
+With something watched on several hosts selected, the operations bar offers
+the scope: **this host**, the hosts that share the selection, or all of them.
+Each runs as if you had clicked that host's own card — same read-only refusal,
+same audit — and **each host gets its own audit entry**, because these are N
+operations on N machines and one record claiming the group was restarted hides
+which machine actually took it. Nine successes read as success; eight and one
+sleeping machine reads as a failure.
+
+The scope resets to this host every time the selection moves. A scope that
+persisted is how somebody restarts nine machines meaning to restart one.
+
+### Fixed
+
+- **The inspector printed Docker's JSON at you.** A container's published
+  ports read `{"public":443,"private":443}` under Attributes, while the card
+  and the wire beside it said `:443 → 443`. The inspector now uses the same
+  words as the map it is describing.
+
+---
+
 ## v0.2.0
 
 **Upgrade the Controller *and* every agent.** This release is mostly in the

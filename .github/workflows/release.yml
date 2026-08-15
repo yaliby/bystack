@@ -1,6 +1,6 @@
 # Cut a release: the binaries the installer fetches, the wheels, the image.
 #
-#     git tag v0.2.0 && git push origin v0.2.0
+#     git tag v0.3.0 && git push origin v0.3.0
 #
 # Everything an operator can reach is produced here, and the pieces are not
 # independent. `scripts/install-agent.sh` fetches `bystack-agent-<arch>` and
