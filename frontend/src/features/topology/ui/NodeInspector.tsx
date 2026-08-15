@@ -6,7 +6,7 @@
  */
 
 import type { GraphEdge, GraphNode, Urn } from '../../../api/types';
-import { EDGE_LABEL, KIND_LABEL, STATUS_LABEL, statusOf } from './theme';
+import { EDGE_LABEL, KIND_HINT, KIND_LABEL, edgeVerb, statusOf, statusText } from './theme';
 
 interface Props {
   readonly node: GraphNode | null;
@@ -81,9 +81,12 @@ export function NodeInspector({
           <h2>{node.name}</h2>
           <p className={`status status--${status}`}>
             <span className="status-dot" aria-hidden="true" />
-            {STATUS_LABEL[status]}
-            {node.status && status !== 'neutral' ? ` (${node.status})` : ''}
+            {statusText(node)}
           </p>
+          {/* The chip names the kind; this says what the kind is. Without it,
+              "Compose service" and "systemd unit" are the same word to anyone
+              who has not read the model. */}
+          <p className="kind-hint">{KIND_HINT[node.kind]}</p>
         </div>
         {onClose ? (
           <button type="button" className="inspector__close" onClick={onClose} aria-label="Close">
@@ -126,14 +129,24 @@ export function NodeInspector({
 
       <Section title={`Relationships (${edges.length})`}>
         {edges.map((rel) => {
-          const outgoing = rel.src === node.urn;
-          const other = outgoing ? rel.dst : rel.src;
+          const outward = rel.src === node.urn;
+          const other = outward ? rel.dst : rel.src;
           return (
-            <button key={rel.key} className="relationship" onClick={() => onNavigate(other)}>
-              <span className="relationship__verb">
-                {outgoing ? '→' : '←'} {EDGE_LABEL[rel.kind]}
+            <button
+              key={rel.key}
+              type="button"
+              className="relationship"
+              onClick={() => onNavigate(other)}
+            >
+              <span className="relationship__body">
+                <span className="relationship__verb">
+                  {edgeVerb(rel.kind, outward ? 'out' : 'in')}
+                </span>
+                <span className="relationship__target">{resolveName(other)}</span>
               </span>
-              <span className="relationship__target">{resolveName(other)}</span>
+              <span className="relationship__go" aria-hidden="true">
+                →
+              </span>
             </button>
           );
         })}
@@ -196,13 +209,23 @@ function EdgeInspector({
       )}
 
       <Section title="Navigate">
-        <button className="relationship" onClick={() => onNavigate(edge.src)}>
-          <span className="relationship__verb">← source</span>
-          <span className="relationship__target">{resolveName(edge.src)}</span>
+        <button type="button" className="relationship" onClick={() => onNavigate(edge.src)}>
+          <span className="relationship__body">
+            <span className="relationship__verb">source</span>
+            <span className="relationship__target">{resolveName(edge.src)}</span>
+          </span>
+          <span className="relationship__go" aria-hidden="true">
+            →
+          </span>
         </button>
-        <button className="relationship" onClick={() => onNavigate(edge.dst)}>
-          <span className="relationship__verb">→ target</span>
-          <span className="relationship__target">{resolveName(edge.dst)}</span>
+        <button type="button" className="relationship" onClick={() => onNavigate(edge.dst)}>
+          <span className="relationship__body">
+            <span className="relationship__verb">target</span>
+            <span className="relationship__target">{resolveName(edge.dst)}</span>
+          </span>
+          <span className="relationship__go" aria-hidden="true">
+            →
+          </span>
         </button>
       </Section>
     </aside>
@@ -229,6 +252,13 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
 
 function format(value: unknown): string {
   if (Array.isArray(value)) return value.map(format).join(', ');
-  if (value && typeof value === 'object') return JSON.stringify(value);
+  if (value && typeof value === 'object') {
+    // A port binding is the one attribute shape the map already has words for
+    // (`cardPorts`, `edgePortLabel`). Spelling it `{"public":443,...}` here
+    // makes the inspector the only place in the app that talks like Docker.
+    const row = value as Record<string, unknown>;
+    if (row.public != null && row.private != null) return `:${row.public} → ${row.private}`;
+    return JSON.stringify(value);
+  }
   return String(value);
 }
