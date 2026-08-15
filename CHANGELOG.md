@@ -58,6 +58,22 @@ persisted is how somebody restarts nine machines meaning to restart one.
 
 ### Fixed
 
+- **A stop arriving while the Controller was still starting killed it instead
+  of stopping it.** `systemctl stop` during startup — and each half of a
+  `systemctl restart` — reported the unit as killed by a signal, so a stop
+  that had done exactly what was asked of it read as a failure to the operator
+  and to anything watching unit state. For the moment between opening the
+  local agent's socket and taking ownership of SIGTERM, the signal met its
+  default disposition: the process died where it stood, and the shutdown it
+  runs on the way out never ran. Both signals are owned from before the
+  Controller opens anything now, and one that arrives during startup is
+  carried out as soon as there is something to carry it out on — startup
+  finishes, then shutdown runs down the ordinary path. One Ctrl-C still stops
+  all three listeners together and a second one still forces. The
+  `local-agent.sock` left in the state directory goes with it; that was the
+  visible trace rather than the damage, and it never blocked the next start,
+  because a Controller unlinks a stale one before it binds.
+
 - **The inspector printed Docker's JSON at you.** A container's published
   ports read `{"public":443,"private":443}` under Attributes, while the card
   and the wire beside it said `:443 → 443`. The inspector now uses the same

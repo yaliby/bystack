@@ -59,8 +59,8 @@ class _Managed(uvicorn.Server):
     Two `uvicorn.Server` instances in one loop both install a SIGINT handler,
     and the second one wins -- so Ctrl-C would stop one listener and leave the
     other running. Signals belong to :func:`serve`, which shuts all of them
-    down together; see :func:`_stop_on_signal` for why not even the primary
-    may keep uvicorn's own handling.
+    down together; see :class:`_StopSignal` for why not even the primary may
+    keep uvicorn's own handling.
     """
 
     @contextlib.contextmanager
@@ -68,7 +68,7 @@ class _Managed(uvicorn.Server):
         yield
 
 
-def _stop_on_signal(servers: Sequence[uvicorn.Server]) -> None:
+class _StopSignal:
     """Make SIGINT and SIGTERM an ordinary return from `Server.serve()`.
 
     uvicorn's own handling cannot do this job. `serve()` restores the handler
@@ -78,24 +78,76 @@ def _stop_on_signal(servers: Sequence[uvicorn.Server]) -> None:
     visible symptom was a SIGTERM leaving the local agent's socket in the
     state directory, and it is a systemd `stop` rather than an exotic case.
 
-    Owning the signal here makes the return from `serve()` an ordinary return,
-    so the cleanup in :func:`serve` runs. A second signal is the escape hatch
-    for a shutdown that is itself stuck, and keeps Ctrl-C twice meaning what
+    Owning the signal makes the return from `serve()` an ordinary return, so
+    the cleanup in :func:`serve` runs. A second signal is the escape hatch for
+    a shutdown that is itself stuck, and keeps Ctrl-C twice meaning what
     everyone expects it to mean.
+
+    Owning it has to begin before there is a list of servers to stop, which is
+    why this is armed and told what to stop in two steps rather than one.
+    :func:`serve` binds the local agent's socket -- the first thing about this
+    process anything outside it can see -- some tens of milliseconds before the
+    secondaries exist and one Ctrl-C can be made to stop all three. A signal in
+    between met the default disposition and killed the process where it stood,
+    so the `finally` never ran and a `systemctl stop` arriving while the unit
+    was still coming up reported a signal death rather than an exit.
+
+    A signal in that gap is **recorded rather than acted on**: nothing is
+    serving yet that could be asked to stop, and startup from there is a short
+    straight line with nothing to wait for. :meth:`stops` carries it out the
+    moment there is a list to carry it out with, so an interrupted startup
+    finishes starting and then unwinds down the path every other stop takes --
+    the only path that knows the child process and the socket are there. Ending
+    it from inside the handler instead would mean a second teardown that has to
+    know which half of the startup had happened, which is how the socket gets
+    left behind by the code written to stop leaving it behind.
     """
-    forcing = False
 
-    def request_stop(*_: object) -> None:
-        nonlocal forcing
-        for server in servers:
+    def __init__(self) -> None:
+        self._servers: Sequence[uvicorn.Server] = ()
+        self._requested = False
+
+    def arm(self) -> None:
+        """Own the signals, from before there is anything for one to stop."""
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, self._on_signal)
+
+    def stops(self, servers: Sequence[uvicorn.Server]) -> None:
+        """Say what a stop stops, and honour one that arrived before now.
+
+        The pending request is carried out as the *first* signal it was, not
+        escalated for having been kept waiting: an operator who sent one
+        SIGTERM asked for a graceful stop, and the millisecond it spent
+        recorded here is not their doing.
+        """
+        self._servers = servers
+        if self._requested:
+            self._stop(force=False)
+
+    def _on_signal(self, signum: int, _frame: object) -> None:
+        if not self._servers:
+            if self._requested:
+                # Twice, with nothing serving yet to stop. Startup from here is
+                # a short straight line, so a sender unwilling to wait for it is
+                # saying it believes we are stuck -- and there is no server to
+                # set `force_exit` on. The default disposition is what is left,
+                # and it is the honest report besides: this exit cleans nothing
+                # up, and an exit status that says the process was killed is
+                # the difference between that and a shutdown that ran.
+                signal.signal(signum, signal.SIG_DFL)
+                signal.raise_signal(signum)
+            self._requested = True
+            return
+
+        force = self._requested
+        self._requested = True
+        self._stop(force=force)
+
+    def _stop(self, *, force: bool) -> None:
+        for server in self._servers:
             server.should_exit = True
-            if forcing:
+            if force:
                 server.force_exit = True
-        if not forcing:
-            forcing = True
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, request_stop)
 
 
 def agent_listener(context: AppContext, log_level: str) -> _Managed:
@@ -171,6 +223,15 @@ async def serve(settings: Settings, host: str | None, port: int | None) -> None:
     servers: list[_Managed] = []
     log_level = settings.log_level.lower()
 
+    # Before the next statement, because the next statement binds a socket in
+    # the state directory and this process stops being private the moment it
+    # does. A service manager that stops a unit mid-startup is the ordinary
+    # case here -- `systemctl restart` is two of them -- and until this line
+    # ran, that signal killed the process outright and the cleanup below never
+    # happened.
+    stop = _StopSignal()
+    stop.arm()
+
     local = local_listener(context, log_level)
     if local is not None:
         server, listener = local
@@ -200,8 +261,10 @@ async def serve(settings: Settings, host: str | None, port: int | None) -> None:
             "/api/v1/agents/tokens",
         )
 
-    # After the secondaries exist, so one Ctrl-C stops all three.
-    _stop_on_signal([primary, *servers])
+    # After the secondaries exist, so one Ctrl-C stops all three -- and, if one
+    # arrived while they were being built, so that it is carried out here
+    # instead of being dropped on the floor by a startup that ignored it.
+    stop.stops([primary, *servers])
 
     try:
         await primary.serve()
