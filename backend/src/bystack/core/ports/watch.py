@@ -50,6 +50,15 @@ from typing import Final, Protocol, runtime_checkable
 #: is a promise to the managed host rather than a database limit.
 MAX_ENTRIES: Final = 64
 
+#: Hosts one act of selection may reach.
+#:
+#: The per-host ceiling above is a promise to one machine; this is the promise
+#: to the fleet, and it exists because "watch this everywhere" turns a single
+#: click into a store write, an fsync and a frame per host. Set well above any
+#: fleet a topology map is legible for and well below the number at which one
+#: request becomes a way to make the Controller unresponsive to every other.
+MAX_FANOUT: Final = 256
+
 #: Longest unit name or match pattern accepted.
 #:
 #: systemd's own limit is 255 bytes for a unit name, and a pattern longer than
@@ -135,6 +144,27 @@ class WatchEntry:
 
     kind: WatchKind
 
+    group_id: str = ""
+    """Which act of selection this entry came from.
+
+    Assigned once, by the Controller, and shared by every entry created in the
+    same request: watching `nginx.service` on one host mints a group of one,
+    and watching it across nine hosts mints one group with nine members.
+
+    **It is a label on the past, not a rule for the future.** Nothing consults
+    it when an entry is stored, sent to a host, or drawn — each entry stays
+    exactly as independent as it was before this field existed, and removing
+    one member leaves the other eight untouched. What it buys is that a UI can
+    say "you also asked for this on eight other machines", which an operator
+    otherwise has to reconstruct by reading nine lists.
+
+    That restraint is the whole design. A group that *enforced* membership
+    would be a second source of truth about what a host watches, and the
+    reconciliation between it and the per-host list is the part that goes
+    wrong — a host would acquire entries nobody selected on it, and the
+    ADR-0001 category this store belongs to is "user intent", not "policy".
+    """
+
     name: str = ""
     """systemd's own unit name, for :attr:`WatchKind.UNIT`. Empty otherwise."""
 
@@ -188,6 +218,7 @@ def normalize(entry: WatchEntry) -> WatchEntry:
             id=entry.id,
             engine_id=entry.engine_id,
             kind=WatchKind.UNIT,
+            group_id=entry.group_id,
             name=name,
             label=entry.label.strip(),
             added_at=entry.added_at,
@@ -209,6 +240,7 @@ def normalize(entry: WatchEntry) -> WatchEntry:
         id=entry.id,
         engine_id=entry.engine_id,
         kind=WatchKind.PROCESS,
+        group_id=entry.group_id,
         match_kind=entry.match_kind,
         pattern=pattern,
         label=entry.label.strip(),

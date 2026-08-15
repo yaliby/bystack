@@ -151,21 +151,22 @@ const GROUP_FRAME_LIGHT = { stroke: '#b4c1d2', fill: '#eff3f9', label: '#5a6d86'
 /**
  * Relationships — the middle rung.
  *
- * `exposed_on` is the exception that proves the ladder. It is the longest and
- * most numerous line on any real canvas and the least informative one: every
- * port it reports is already printed on the card it leaves. It keeps a colour
- * of its own so a trace can light it up, but at rest it is drawn as chrome —
- * see `EDGE_REST_ALPHA`.
+ * Four drawn kinds, four hues. Watch→host took teal; without a real colour of
+ * its own, `exposed_on` collapsed into "the grey leftover" next to it. Each
+ * wire now has a hue an operator can name, and rest alpha only ranks how loud
+ * they are — never whether they look coloured at all.
  */
 const EDGE_COLOR_DARK: Record<EdgeKind, string> = {
   contains: '#41597b',
   realized_by: '#41597b',
-  depends_on: '#a75ddd',
-  mounts: '#b07b02',
-  exposed_on: '#4d647e',
+  depends_on: '#c084fc',
+  mounts: '#e0a82e',
+  // Blue — published reachability. Distinct from teal (watch) and purple (depends).
+  exposed_on: '#6ba3f0',
   attached_to: '#495d76',
   uses_image: '#3f5068',
-  hosts: '#3a4a60',
+  // Teal — reserved for watch→host.
+  hosts: '#2ec4a7',
   // Containment, so it reads like `contains` rather than like a dependency.
   runs_in: '#41597b',
 };
@@ -173,33 +174,34 @@ const EDGE_COLOR_DARK: Record<EdgeKind, string> = {
 const EDGE_COLOR_LIGHT: Record<EdgeKind, string> = {
   contains: '#8d9cb2',
   realized_by: '#8d9cb2',
-  depends_on: '#9247c5',
-  mounts: '#956800',
-  exposed_on: '#6b7f97',
+  depends_on: '#9333ea',
+  mounts: '#b45309',
+  exposed_on: '#2563eb',
   attached_to: '#7d8ea3',
   uses_image: '#8d9cb2',
-  hosts: '#8d9cb2',
+  hosts: '#0d9488',
   runs_in: '#8d9cb2',
 };
 
 /**
  * What each relationship is worth before anyone touches it.
  *
- * Alpha and weight, not hue, are what build a foreground: the two links you
- * actually read the diagram for come forward, and the host wiring settles into
- * the background it belongs in. Ask about it — hover, select, trace — and it
- * comes back to full strength.
+ * Alpha ranks attention; hue carries identity. Structure (depends / mounts)
+ * leads, watch and published ports sit a step quieter — but none rest so low
+ * that their colour disappears.
  */
 export const EDGE_REST_ALPHA: Partial<Record<EdgeKind, number>> = {
   depends_on: 0.95,
-  mounts: 0.8,
-  exposed_on: 0.38,
+  mounts: 0.88,
+  exposed_on: 0.72,
+  hosts: 0.8,
 };
 
 export const EDGE_REST_WEIGHT: Partial<Record<EdgeKind, number>> = {
-  depends_on: 1.05,
-  mounts: 0.9,
-  exposed_on: 0.6,
+  depends_on: 1.1,
+  mounts: 1.0,
+  exposed_on: 0.85,
+  hosts: 0.95,
 };
 
 export const DARK: Palette = {
@@ -271,7 +273,23 @@ export function cardIdentityColor(node: Pick<GraphNode, 'urn' | 'name' | 'kind'>
   return hashHue(node.name || node.urn, CARD_IDENTITY);
 }
 
+/** Kinds that have no runtime of their own — a volume is not "running". */
+const STATELESS_KINDS: ReadonlySet<NodeKind> = new Set([
+  'volume',
+  'network',
+  'image',
+  'stack',
+  'host',
+  'engine',
+  'cluster',
+]);
+
 export function statusOf(node: GraphNode): StatusRole {
+  // Hosts, stacks, volumes and the like have no lifecycle to colour. The demo
+  // (and any stale payload) may still carry a leftover `running`; treating it
+  // as state paints a green LED on a disk and a "Running" label on a volume.
+  if (STATELESS_KINDS.has(node.kind)) return 'neutral';
+
   // A healthcheck's verdict outranks the state for one case only. `running`
   // is still true of a container failing its probe -- the engine has not
   // stopped it and the operations it offers are a running container's -- but
@@ -346,13 +364,13 @@ export const EDGE_DASH: Record<EdgeKind, readonly number[]> = {
   // read as another dependency between two things on the canvas.
   exposed_on: [7, 5],
   uses_image: [2, 5],
-  hosts: [1, 8],
+  hosts: [5, 4],
   // Solid and short: this is containment, like `contains`, not a dependency.
   runs_in: [],
 };
 
 export const EDGE_LABEL: Record<EdgeKind, string> = {
-  hosts: 'hosts',
+  hosts: 'watched on',
   contains: 'contains',
   realized_by: 'realized by',
   attached_to: 'attached to',
@@ -363,31 +381,116 @@ export const EDGE_LABEL: Record<EdgeKind, string> = {
   runs_in: 'runs in',
 };
 
+/**
+ * How an edge reads when the selected node is the *destination*.
+ *
+ * `EDGE_LABEL` is written from the source: `contains` means the stack contains
+ * the service. Looking at the service and printing the same word makes the
+ * child appear to contain its parent — which is what the inspector was doing.
+ */
+const EDGE_LABEL_INBOUND: Record<EdgeKind, string> = {
+  hosts: 'watches',
+  contains: 'in',
+  realized_by: 'realizes',
+  attached_to: 'has attached',
+  exposed_on: 'reached via',
+  mounts: 'mounted by',
+  uses_image: 'used by',
+  depends_on: 'depended on by',
+  runs_in: 'runs',
+};
+
+/** Verb for a relationship row, from the selected node's point of view. */
+export function edgeVerb(kind: EdgeKind, fromSelected: 'out' | 'in'): string {
+  return fromSelected === 'out' ? EDGE_LABEL[kind] : EDGE_LABEL_INBOUND[kind];
+}
+
+/**
+ * What each kind is called, everywhere a person reads it.
+ *
+ * **Every name is qualified by where the thing comes from**, because the
+ * unqualified words collide. "Service" means a compose service here, a
+ * `*.service` unit to systemd, and "the thing serving traffic" to the person
+ * looking at the screen — three different objects, all of which this canvas
+ * draws, on cards of the same shape. A card that says only `Service` cannot
+ * be told from the other two, and the operator has to open the URN to find
+ * out what they are about to restart.
+ */
 export const KIND_LABEL: Record<NodeKind, string> = {
   cluster: 'Cluster',
   host: 'Host',
-  engine: 'Engine',
-  stack: 'Stack',
-  service: 'Service',
+  engine: 'Container engine',
+  stack: 'Compose project',
+  service: 'Compose service',
   container: 'Container',
-  network: 'Network',
-  volume: 'Volume',
+  network: 'Docker network',
+  volume: 'Docker volume',
   image: 'Image',
-  unit: 'Service',
-  process: 'Process',
+  unit: 'systemd unit',
+  process: 'Process watch',
 };
 
-/** Prefer attrs.image, else a short kind cue for the card subtitle. */
-export function cardSubtitle(node: GraphNode): string {
+/** The same vocabulary, lowercased for the card's second line. */
+const CARD_KIND: Record<NodeKind, string> = {
+  cluster: 'cluster',
+  host: 'host',
+  engine: 'engine',
+  stack: 'compose project',
+  service: 'compose service',
+  container: 'container',
+  network: 'network',
+  volume: 'volume',
+  image: 'image',
+  unit: 'systemd unit',
+  process: 'process',
+};
+
+/**
+ * One line saying what sort of object this is, in the inspector.
+ *
+ * The chip names the kind; this says what the kind *is*. Both are needed
+ * because the names are only unambiguous to somebody who already knows the
+ * model — "Compose service" and "systemd unit" are the same word to an
+ * operator who has not read ADR-0016.
+ */
+export const KIND_HINT: Record<NodeKind, string> = {
+  cluster: 'a group of machines',
+  host: 'a machine running a ByStack agent',
+  engine: 'the container engine on this machine',
+  stack: 'a compose project — the frame around its services',
+  service: 'declared in docker compose; runs as containers',
+  container: 'one running container on this machine',
+  network: 'a docker network',
+  volume: 'docker storage — it has no runtime of its own',
+  image: 'a container image',
+  unit: 'a systemd unit on this host, watched because you chose it',
+  process: 'a process rule — identified by what it matches, never by pid',
+};
+
+/**
+ * The card's second line: the kind first, then what distinguishes this one.
+ *
+ * Kind first and never omitted. A compose service, a systemd unit and a
+ * process watch are drawn on identically shaped cards on purpose — they are
+ * all workloads and are operated the same way — so the word is the only thing
+ * separating `nginx` the compose service from `nginx.service` the unit.
+ *
+ * `detailFrom` exists for the folded service card: the kind comes from the
+ * service, the image from the container that realizes it.
+ */
+export function cardSubtitle(node: GraphNode, detailFrom: GraphNode = node): string {
+  const kind = CARD_KIND[node.kind];
+  const detail = cardDetail(detailFrom);
+  return detail && detail !== kind ? `${kind} · ${detail}` : kind;
+}
+
+/** Kind-specific detail without repeating the kind word. */
+export function cardDetail(node: GraphNode): string | null {
   const image = node.attrs.image;
   if (typeof image === 'string' && image) return image;
-  if (node.kind === 'volume') {
+  if (node.kind === 'volume' || node.kind === 'network') {
     const driver = node.attrs.driver;
-    return typeof driver === 'string' ? driver : 'volume';
-  }
-  if (node.kind === 'network') {
-    const driver = node.attrs.driver;
-    return typeof driver === 'string' ? driver : 'network';
+    return typeof driver === 'string' && driver ? driver : null;
   }
   if (node.kind === 'unit') {
     // The *problem* first where there is one. `sub_state` for a unit systemd
@@ -397,19 +500,55 @@ export function cardSubtitle(node: GraphNode): string {
     const load = node.attrs.load_state;
     if (typeof load === 'string' && load && load !== 'loaded') return load;
     const sub = node.attrs.sub_state;
-    return typeof sub === 'string' && sub ? sub : 'unit';
+    return typeof sub === 'string' && sub ? sub : null;
   }
   if (node.kind === 'process') {
-    // What it is matching, not what matched: the rule is the identity, and a
-    // pid on a card would be the one number that is different every restart.
-    const pattern = node.attrs.pattern;
-    return typeof pattern === 'string' && pattern ? pattern : 'process';
+    // How it matches, and the readable end of what it matches. Never a pid:
+    // the rule is the identity, and a pid is the one number that is different
+    // after every restart. The full pattern is in the inspector — on a card it
+    // would ellipsize to `/usr/local/b…`, which identifies nothing.
+    return processMatch(node);
   }
   if (node.kind === 'image') {
     const tags = node.attrs.tags;
     if (Array.isArray(tags) && typeof tags[0] === 'string') return tags[0];
   }
-  return node.kind;
+  if (node.kind === 'host' || node.kind === 'stack') return null;
+  return node.status;
+}
+
+function processMatch(node: GraphNode): string | null {
+  const pattern = typeof node.attrs.pattern === 'string' ? node.attrs.pattern : '';
+  const match = typeof node.attrs.match === 'string' ? node.attrs.match : '';
+  if (!pattern) return match ? `${match} match` : null;
+  const trimmed = pattern.replace(/\/+$/, '');
+  const short = trimmed.slice(trimmed.lastIndexOf('/') + 1) || trimmed;
+  return match ? `${match} ${short}` : short;
+}
+
+/**
+ * Status text for the inspector header — kind-aware so a unit is not "Running".
+ */
+export function statusText(node: GraphNode): string {
+  const role = statusOf(node);
+  if (STATELESS_KINDS.has(node.kind)) return STATUS_LABEL.neutral;
+
+  const raw = node.status;
+  if (node.kind === 'unit' && raw) {
+    // systemd's own words. Mapping them through the container vocabulary
+    // ("Running (active)") is how the two kinds look the same in the panel.
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+  if (node.kind === 'process' && raw) {
+    if (raw === 'running') return 'Running';
+    if (raw === 'absent') return 'Not running';
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+
+  const label = STATUS_LABEL[role];
+  if (!raw || role === 'neutral') return label;
+  if (raw.toLowerCase() === label.toLowerCase()) return label;
+  return `${label} (${raw})`;
 }
 
 /**

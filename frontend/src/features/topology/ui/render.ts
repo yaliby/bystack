@@ -8,6 +8,7 @@
 
 import type { GraphEdge, GraphNode, NodeKind, Urn } from '../../../api/types';
 import type { Point } from '../layout/elkLayout';
+import { isCanvasEdge } from '../layout/prepareTopology';
 import { routeDrawnEdges, type RouteObstacle } from '../layout/liveEdges';
 import { polylineLength, polylinePointAt } from '../layout/polyline';
 import {
@@ -50,6 +51,12 @@ export interface Scene {
   readonly selected: Urn | null;
   readonly selectedEdge: string | null;
   readonly highlighted: ReadonlySet<Urn> | null;
+  /**
+   * Nodes the current operation scope would reach — Choose / All peers.
+   * Drawn with a selection-style ring so they read as "also affected", not
+   * merely "not dimmed".
+   */
+  readonly marked: ReadonlySet<Urn> | null;
   readonly hovered: Urn | null;
   readonly hoveredEdge: string | null;
   readonly dragging: Urn | null;
@@ -74,10 +81,23 @@ const GAP_TITLE = 3;
 const GAP_CHIP = 7;
 
 /**
- * Dependency, volume and published-port edges are drawn.
- * Network membership is the stack frame — `attached_to` rails overlap badly.
+ * The edges that become wires on the canvas.
+ *
+ * Same rule as layout (`isCanvasEdge`): depends_on / mounts / exposed_on, plus
+ * `hosts` only when it points at a watched unit or process — the link between
+ * "the service I chose to watch" and "the host it runs on". A wholesale
+ * `hosts` rail from every container is refused there and here for the same
+ * reason.
  */
-const DRAWN_EDGES = new Set(['depends_on', 'mounts', 'exposed_on']);
+function drawnEdgesOf(scene: Scene): GraphEdge[] {
+  const byUrn = new Map(scene.nodes.map((node) => [node.urn, node]));
+  return scene.edges.filter((edge) => isCanvasEdge(edge, (urn) => byUrn.get(urn)?.kind));
+}
+
+/** Kind set for the router — whatever survived `drawnEdgesOf`. */
+function drawnKindsOf(edges: readonly GraphEdge[]): ReadonlySet<string> {
+  return new Set(edges.map((edge) => edge.kind));
+}
 
 /**
  * Port chip metrics — the `:18080` marker that sits on a published link.
@@ -232,10 +252,11 @@ function drawEdges(
   alpha: number;
 }[] {
   const baseWidth = 2.2 / viewport.zoom;
-  const ordered = [...scene.edges].sort((a, b) => edgePriority(a.kind) - edgePriority(b.kind));
+  const drawable = drawnEdgesOf(scene);
+  const ordered = [...drawable].sort((a, b) => edgePriority(a.kind) - edgePriority(b.kind));
   const anchors = endpointAnchors(scene);
   const obstacles = collectObstacles(scene);
-  const routed = routeDrawnEdges(scene.edges, anchors, DRAWN_EDGES, obstacles);
+  const routed = routeDrawnEdges(drawable, anchors, drawnKindsOf(drawable), obstacles);
   drawnRoutes = routed;
 
   const flow: { key: string; path: Point[]; color: string; alpha: number }[] = [];
@@ -248,8 +269,6 @@ function drawEdges(
   }[] = [];
 
   for (const edge of ordered) {
-    if (!DRAWN_EDGES.has(edge.kind)) continue;
-
     const path = routed.get(edge.key);
     if (!path || path.length < 2) continue;
 
@@ -609,6 +628,7 @@ function strokeRoundedOrtho(
 
 /** Draw order — later wins the overlap. Long host links go underneath. */
 function edgePriority(kind: string): number {
+  if (kind === 'hosts') return -2;
   if (kind === 'exposed_on') return -1;
   if (kind === 'mounts') return 0;
   if (kind === 'depends_on') return 1;
@@ -637,6 +657,7 @@ function drawNodes(
     const position = scene.positions.get(node.urn)!;
     const [halfWidth, halfHeight] = NODE_SIZE[shapeOf(node.kind)];
     const selected = scene.selected === node.urn;
+    const marked = !selected && (scene.marked?.has(node.urn) ?? false);
     const hovered = scene.hovered === node.urn;
     const dragged = scene.dragging === node.urn;
     const dimmed = isDimmed(scene, node.urn);
@@ -662,18 +683,18 @@ function drawNodes(
     ctx.fill();
     ctx.restore();
 
-    ctx.strokeStyle = selected
+    ctx.strokeStyle = selected || marked
       ? palette.selection
       : hovered || dragged
         ? identity ?? palette.inkMuted
         : identity
           ? hexAlpha(identity, 0.55)
           : palette.nodeStroke;
-    ctx.lineWidth = (selected ? 1.8 : identity ? 1.45 : 1.15) / viewport.zoom;
+    ctx.lineWidth = (selected || marked ? 1.8 : identity ? 1.45 : 1.15) / viewport.zoom;
     roundedRectPath(ctx, -halfWidth, -halfHeight, halfWidth * 2, halfHeight * 2, CARD_RADIUS);
     ctx.stroke();
 
-    if (selected || hovered || dragged) {
+    if (selected || marked || hovered || dragged) {
       roundedRectPath(
         ctx,
         -halfWidth - 5,
@@ -683,7 +704,7 @@ function drawNodes(
         CARD_RADIUS + 4,
       );
       ctx.strokeStyle = palette.selection;
-      ctx.globalAlpha = (dimmed ? 0.22 : 1) * (selected ? 0.55 : 0.28);
+      ctx.globalAlpha = (dimmed ? 0.22 : 1) * (selected ? 0.55 : marked ? 0.4 : 0.28);
       ctx.lineWidth = 1.4 / viewport.zoom;
       ctx.stroke();
       ctx.globalAlpha = dimmed ? 0.22 : 1;
@@ -860,9 +881,10 @@ function enrichCard(node: GraphNode, container: GraphNode | undefined): CardDisp
   if (node.kind === 'service' && container) {
     return {
       title: node.name,
-      // Image and ports still come from a container: they are facts about one
-      // process, and the service has no opinion about them.
-      subtitle: cardSubtitle(container),
+      // The kind word is the service's; the image is the container's. Both are
+      // needed, and neither is the other's: this card is a compose service,
+      // and what it runs is a fact about the container folded into it.
+      subtitle: cardSubtitle(node, container),
       ports: cardPorts(container),
       // The state does not. The Controller folds every replica's state into
       // the service (`mapper.py`), so this is the whole service rather than
@@ -876,7 +898,7 @@ function enrichCard(node: GraphNode, container: GraphNode | undefined): CardDisp
   if (node.kind === 'volume') {
     return {
       title: friendlyVolumeName(node),
-      subtitle: 'local',
+      subtitle: cardSubtitle(node),
       ports: null,
       statusNode: node,
     };
@@ -1052,14 +1074,19 @@ export function hitTestEdge(
 ): GraphEdge | null {
   if (hitTest(scene, world)) return null;
 
+  const drawable = drawnEdgesOf(scene);
   const paths = drawnRoutes.size
     ? drawnRoutes
-    : routeDrawnEdges(scene.edges, endpointAnchors(scene), DRAWN_EDGES, collectObstacles(scene));
+    : routeDrawnEdges(
+        drawable,
+        endpointAnchors(scene),
+        drawnKindsOf(drawable),
+        collectObstacles(scene),
+      );
   const threshold = hitPx / zoom;
   let best: { edge: GraphEdge; dist: number } | null = null;
 
-  for (const edge of scene.edges) {
-    if (!DRAWN_EDGES.has(edge.kind)) continue;
+  for (const edge of drawable) {
     const path = paths.get(edge.key);
     if (!path || path.length < 2) continue;
     const dist = distanceToPolyline(world, path);

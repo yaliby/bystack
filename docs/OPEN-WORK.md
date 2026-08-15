@@ -25,13 +25,13 @@ cd agent   && cargo build --release          # do this first; the suites below d
 cd ../backend
 .venv/bin/python -m ruff check src tests
 .venv/bin/python -m mypy src
-.venv/bin/python -m pytest -q                                     # 377 passed
+.venv/bin/python -m pytest -q                                     # 398 passed
 .venv/bin/python -m bystack.conformance       ../agent/target/release/bystack-agent   # 32/32
 .venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent   # 35/35
 .venv/bin/python -m bystack.conformance.local ../agent/target/release/bystack-agent   # 17/17
 
 cd ../agent    && cargo clippy --release --all-targets -- -D warnings && cargo test --release  # 49 passed
-cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 197 passed
+cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 243 passed
 ```
 
 Agent binary: **1.96 MiB** against a 12 MiB budget, RSS **~5.00 MiB** against
@@ -525,8 +525,9 @@ elkjs, because a warning that fires on every build is one nobody reads.
 (`core/ports/watch.py`, `infra/watch/`), two slices on the wire
 (`SLICE_UNIT`, `SLICE_PROCESS`), a D-Bus client and a `/proc` reader in the
 agent (`agent/src/dbus.rs`, `systemd.rs`, `procfs.rs`, `host.rs`), a mapper on
-the Controller (`providers/host/`), three routes (`api/routes/watch.py`) and a
-panel (`frontend/src/features/watch/`).
+the Controller (`providers/host/`), five routes (`api/routes/watch.py`), a
+scoped command (`api/routes/commands.py`) and a panel
+(`frontend/src/features/watch/`).
 
 Decisions that are settled — **do not reopen without the ADR**:
 
@@ -554,6 +555,47 @@ Decisions that are settled — **do not reopen without the ADR**:
   a lifecycle command for a unit that is not on this host's list. That is what
   makes `manage-units` grantable at all; see the ADR and the comment in
   `packaging/polkit/49-bystack-agent.rules`.
+- **A fan-out is N adds and a label, never a fleet rule.**
+  `POST /agents/watch` takes one draft and a list of hosts, mints one
+  `group_id`, and stores an ordinary independent entry on each. Nothing is
+  stored about the group itself: removing one member leaves the rest, and
+  there is no operation that edits "the group". The id exists so a panel can
+  say *also chosen on 3 other hosts* (`WatchEntryOut.group_hosts`, counted
+  fleet-wide by the route because a host's own list cannot know it).
+
+  The reason it stops there is the same reason membership is a selection at
+  all. A group that owned its members is a second source of truth about what a
+  host watches, and the reconciliation between it and the per-host list ends
+  with a machine holding entries nobody chose for it. Bounded by `MAX_FANOUT`,
+  which is the promise to the fleet that `MAX_ENTRIES` is to one machine.
+  One host's refusal — a duplicate, a bad pattern — does not unwind the
+  others; every host is reported in its own words, which is why the route
+  answers `200` with a per-host list rather than `201`.
+- **The scope is chosen at the button, and sent as a list.**
+  `POST /commands/group` takes a `group_id` and the hosts to act on, resolves
+  each to that host's node, and runs each through `CommandService` exactly as
+  a click on that card would — same read-only choke point, same expansion,
+  same audit. The route decides nothing, which is why it exists without
+  reopening ADR-0014.
+
+  Three UX modes (this host, these four, all nine) and **one mechanism**: the
+  client sends the list, never the word. A server-side "all" would act on a
+  host enrolled between the operator reading the screen and pressing the
+  button. `ActionBar` defaults the scope to this host on every selection and
+  resets it when the selection moves, because a scope that persisted is how
+  somebody restarts nine machines meaning to restart one.
+
+  **One audit entry per host, deliberately** — these are N operations on N
+  machines, and a single record claiming "restarted the group" would hide
+  which machine actually took it. Worst-wins across hosts, the same ordering
+  `CommandResult.status` uses across targets within one, so eight successes
+  and one sleeping machine reads as a failure. Bounded by `MAX_TARGETS`, not
+  `MAX_FANOUT`: the first governs how many machines one click may restart, the
+  second how much intent may be stored.
+
+  `GET /agents/watch` (fleet-wide) exists for this and only this: a host's own
+  list cannot say which *other* machines hold the selection, and the
+  operations bar needs that before it can offer a scope.
 
 Two things left deliberately undone, both cheap and neither obviously right:
 

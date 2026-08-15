@@ -32,6 +32,41 @@ import type { GraphEdge, GraphNode, Urn } from '../../../api/types';
 const LAYOUT_EDGE_KINDS: ReadonlySet<string> = new Set(['depends_on', 'mounts', 'exposed_on']);
 
 /**
+ * Leaf kinds a `hosts` edge is allowed to anchor to its machine.
+ *
+ * `hosts` cannot be taken as a kind the way the set above is. Providers emit it
+ * for every container, stack, network and volume on a machine, so admitting it
+ * wholesale would draw one line per container out of the host badge — the
+ * unreadable rail this module exists to avoid, and the reason `attached_to` and
+ * `contains` are already excluded.
+ *
+ * A watched unit or process is the one case with nothing else to anchor it. It
+ * joins no stack, carries no `depends_on`, and publishes no port, so without
+ * this edge it floats as its own component and the machine it runs on is
+ * nowhere in the picture — which is the whole claim the feature makes (ADR-0016).
+ */
+export const HOST_ANCHORED_KINDS: ReadonlySet<string> = new Set(['unit', 'process']);
+
+/**
+ * Whether an edge is part of the canvas topology — laid out *and* drawn.
+ *
+ * Same rule for both: a `hosts` edge reaches the canvas only when it points at
+ * a watched unit or process. That is the wire an operator expects between
+ * "the service I chose to watch" and "the host it runs on", and nothing else
+ * may borrow it.
+ */
+export function isCanvasEdge(
+  edge: GraphEdge,
+  kindOf: (urn: Urn) => string | undefined,
+): boolean {
+  if (LAYOUT_EDGE_KINDS.has(edge.kind)) return true;
+  if (edge.kind === 'hosts') {
+    return HOST_ANCHORED_KINDS.has(kindOf(edge.dst) ?? '');
+  }
+  return false;
+}
+
+/**
  * Leaf kinds that earn a card once they survive folding and filtering.
  *
  * `unit` and `process` are here on the same terms as `container`, and that is
@@ -84,6 +119,8 @@ export function prepareTopologyGraph(
   const resolve = (urn: Urn): Urn | null =>
     foldedContainers.has(urn) ? (containerToService.get(urn) ?? null) : urn;
 
+  const isLayoutEdge = (edge: GraphEdge): boolean =>
+    isCanvasEdge(edge, (urn) => byUrn.get(urn)?.kind);
   // --- stack membership -------------------------------------------------
   const allStacks = nodes.filter((n) => n.kind === 'stack');
   const members = new Map<Urn, GraphNode[]>();
@@ -141,7 +178,7 @@ export function prepareTopologyGraph(
   // --- free leaves ------------------------------------------------------
   const touchesLayoutEdge = (urn: Urn): boolean =>
     edges.some((edge) => {
-      if (!LAYOUT_EDGE_KINDS.has(edge.kind)) return false;
+      if (!isLayoutEdge(edge)) return false;
       return resolve(edge.src) === urn || resolve(edge.dst) === urn;
     });
 
@@ -159,7 +196,7 @@ export function prepareTopologyGraph(
   // --- edges ------------------------------------------------------------
   const layoutEdges: GraphEdge[] = [];
   for (const edge of edges) {
-    if (!LAYOUT_EDGE_KINDS.has(edge.kind)) continue;
+    if (!isLayoutEdge(edge)) continue;
 
     const src = resolve(edge.src);
     const dst = resolve(edge.dst);

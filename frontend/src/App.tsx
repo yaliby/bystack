@@ -3,7 +3,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CommandKind, GraphNode, Urn } from './api/types';
+import type { CommandKind, GraphNode, GroupCommandResult, Urn } from './api/types';
 import { prepareTopologyGraph } from './features/topology/layout/prepareTopology';
 import { neighborsOf } from './features/topology/model/graphStore';
 import { deriveStatus, explainEmpty } from './features/topology/model/status';
@@ -14,6 +14,7 @@ import { useActivity } from './features/activity/model/useActivity';
 import { ActivityPanel } from './features/activity/ui/ActivityPanel';
 import { WatchPanel } from './features/watch/ui/WatchPanel';
 import { useWatch } from './features/watch/model/useWatch';
+import { useGroups } from './features/watch/model/useGroups';
 import { useLogs } from './features/logs/model/useLogs';
 import { LogsPanel } from './features/logs/ui/LogsPanel';
 import { useOperations } from './features/operations/model/useOperations';
@@ -28,18 +29,13 @@ import { EDGE_HIT_PX, EDGE_HIT_PX_TOUCH } from './features/topology/ui/render';
 import { DARK, LIGHT } from './features/topology/ui/theme';
 import { ZOOM_BUTTON_FACTOR } from './features/topology/ui/viewport';
 import { useMediaQuery } from './lib/useMediaQuery';
+import { isMockMode } from './mock/demoMode';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? window.location.origin;
 
 /** Keep in step with the `@media (max-width: 720px)` chrome in `index.css`. */
 const NARROW_QUERY = '(max-width: 720px)';
 const COARSE_POINTER_QUERY = '(pointer: coarse)';
-
-/** Dev mock canvas — see `useGraphStream`. Visible so this is never mistaken for prod. */
-function isMockCanvas(): boolean {
-  if (!import.meta.env.DEV) return false;
-  return new URLSearchParams(window.location.search).get('mock') !== '0';
-}
 
 const INSPECTOR_WIDTH = 320;
 /** The hosts panel, on the other side. Keep in step with `.hosts` in CSS. */
@@ -66,6 +62,14 @@ const TRACE_DEPTHS = [1, 2, 3, 4] as const;
 const BANNER_HEIGHT = 33;
 /** Docker's own networks. Present on every host, so counting them says nothing. */
 const DEFAULT_NETWORKS = new Set(['bridge', 'host', 'none']);
+/**
+ * What the headline figure calls a workload.
+ *
+ * A watched unit and a watched process are drawn as containers and operated as
+ * containers, so leaving them out made the number disagree with the cards the
+ * operator can actually count on the canvas.
+ */
+const WORKLOAD_KINDS = new Set(['service', 'container', 'unit', 'process']);
 
 export default function App() {
   const [dark, setDark] = useState(true);
@@ -96,18 +100,26 @@ export default function App() {
   // the list changes when this operator changes it, and the *states* arrive on
   // the delta stream like every other node.
   const watching = useWatch(API_BASE, watchingHost);
+  // Fleet-wide, so a card on the map knows which other machines were chosen
+  // alongside it. Refetched when this operator edits a list and at no other
+  // time — see `useGroups`.
+  const [watchNonce, setWatchNonce] = useState(0);
+  const [groupResult, setGroupResult] = useState<GroupCommandResult | null>(null);
+  // Cards Choose / All would reach — lit on the canvas until the scope
+  // collapses back to this host or the selection moves.
+  const [affecting, setAffecting] = useState<readonly Urn[]>([]);
   const palette = dark ? DARK : LIGHT;
-  const mockCanvas = isMockCanvas();
+  const mockCanvas = isMockMode();
 
-  // Mock invents a live socket and a read-only health answer so the canvas can
-  // paint. Surfacing those as "live · read-only" next to a separate "MOCK"
-  // badge is three answers to one question. One label, one tone.
+  // Mock invents a live socket so the canvas can paint. Surfacing that as
+  // "live" next to a separate "MOCK" badge is two answers to one question.
   const status = useMemo(() => {
     if (mockCanvas) {
       return {
         tone: 'warn' as const,
         label: 'mock',
-        detail: 'Canned demo graph — local Vite, not a Controller.',
+        detail:
+          'Canned demo fleet — three hosts, watched units/processes, and group scope. Not a Controller.',
         banner: false,
         ailing: [] as const,
       };
@@ -159,6 +171,10 @@ export default function App() {
   // will act on get an action bar, and it decides which — not this component.
   const operations = useOperations(API_BASE, selected, graph.nodes);
 
+  // Declared after `resolveHostName` because it needs it: a group's members
+  // are engine ids, and an engine id is not a name.
+  const groups = useGroups(API_BASE, watchNonce, resolveHostName);
+
   // Reads nothing until the panel is opened. See `useLogs` — a fetch per
   // selection would put an agent round trip behind clicking through a canvas.
   const logs = useLogs(API_BASE, selected);
@@ -181,6 +197,23 @@ export default function App() {
   );
 
   /**
+   * The same, for a command aimed at more than one host.
+   *
+   * One audit entry per host, so the timeline gains N rows rather than one —
+   * which is the truth: these are N operations on N machines that happened to
+   * be asked for together.
+   */
+  const runGroupOperation = useCallback(
+    async (kind: CommandKind, engineIds: readonly string[]) => {
+      const target = groups.byUrn.get(selected ?? ('' as Urn));
+      if (!target) return;
+      setGroupResult(await groups.run(kind, target.groupId, engineIds));
+      activity.refresh();
+    },
+    [groups, selected, activity],
+  );
+
+  /**
    * Two different questions, kept visibly apart.
    *
    * The headline numbers count cards actually on the canvas. The muted line
@@ -193,7 +226,7 @@ export default function App() {
     let volumes = 0;
     const drawn = [...prepared.freeNodes, ...[...prepared.stackMembers.values()].flat()];
     for (const node of drawn) {
-      if (node.kind === 'service' || node.kind === 'container') workloads += 1;
+      if (WORKLOAD_KINDS.has(node.kind)) workloads += 1;
       else if (node.kind === 'volume') volumes += 1;
     }
 
@@ -240,6 +273,19 @@ export default function App() {
   const clearSelection = useCallback(() => {
     setSelected(null);
     setSelectedEdge(null);
+    setAffecting([]);
+  }, []);
+
+  const marked = useMemo(
+    () => (affecting.length > 0 ? new Set<Urn>(affecting) : null),
+    [affecting],
+  );
+
+  const onAffecting = useCallback((urns: readonly Urn[]) => {
+    setAffecting((prev) => {
+      if (prev.length === urns.length && prev.every((urn, i) => urn === urns[i])) return prev;
+      return urns;
+    });
   }, []);
 
   const closeSheets = useCallback(() => {
@@ -480,6 +526,7 @@ export default function App() {
           palette={palette}
           selected={selected}
           selectedEdge={selectedEdge}
+          marked={marked}
           traceDepth={traceDepth}
           onSelect={(node: GraphNode | null) => {
             setSelected(node?.urn ?? null);
@@ -546,6 +593,15 @@ export default function App() {
             hostName={resolveHostName(watchingHost) ?? watchingHost.slice(0, 12)}
             watching={watching}
             nodes={graph.nodes}
+            // The fleet, so one selection can reach more than one machine.
+            // Already polled for the hosts panel; the picker reads the same
+            // list rather than asking for its own.
+            hosts={fleet.agents}
+            resolveHostName={resolveHostName}
+            // An edit here is the only thing that changes a group, so it is
+            // the only thing that has to invalidate the fleet-wide index.
+            // Nothing polls for it.
+            onChanged={() => setWatchNonce((n) => n + 1)}
             onSelect={(urn) => {
               setSelected(urn);
               setSelectedEdge(null);
@@ -577,6 +633,21 @@ export default function App() {
                   resolveName={resolveName}
                   onRun={(kind) => void runOperation(kind)}
                   onDismiss={operations.dismiss}
+                  // Null for anything that was not chosen alongside other
+                  // machines, which is most of the map: a container has no
+                  // watch group at all, and a service chosen for one host is
+                  // a group of one. The bar offers a scope only when there is
+                  // genuinely more than one machine to choose between.
+                  group={selected ? (groups.byUrn.get(selected) ?? null) : null}
+                  groupBusy={groups.busy}
+                  groupResult={groupResult}
+                  groupError={groups.error}
+                  onRunGroup={(kind, engineIds) => void runGroupOperation(kind, engineIds)}
+                  onDismissGroup={() => {
+                    setGroupResult(null);
+                    groups.dismissError();
+                  }}
+                  onAffecting={onAffecting}
                 />
               ) : null
             }

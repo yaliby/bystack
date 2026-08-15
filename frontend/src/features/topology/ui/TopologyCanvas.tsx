@@ -46,6 +46,12 @@ interface Props {
   readonly palette: Palette;
   readonly selected: Urn | null;
   readonly selectedEdge: string | null;
+  /**
+   * Cards a Choose / All scope would reach. When non-empty, these replace the
+   * ordinary neighbour-trace highlight so the map answers "what does the next
+   * press hit" rather than "what is next to the selected card".
+   */
+  readonly marked?: ReadonlySet<Urn> | null;
   readonly traceDepth: number;
   readonly onSelect: (node: GraphNode | null) => void;
   readonly onSelectEdge: (key: string | null) => void;
@@ -103,6 +109,7 @@ export function TopologyCanvas({
   palette,
   selected,
   selectedEdge,
+  marked = null,
   traceDepth,
   onSelect,
   onSelectEdge,
@@ -150,10 +157,12 @@ export function TopologyCanvas({
   const allNodes = useMemo(() => [...graph.nodes.values()], [graph.nodes]);
   const allEdges = useMemo(() => [...graph.edges.values()], [graph.edges]);
 
-  const highlighted = useMemo(
-    () => (selected ? traceFrom(graph, selected, traceDepth) : null),
-    [graph, selected, traceDepth],
-  );
+  const highlighted = useMemo(() => {
+    // A multi-host scope owns the dimming: the press reaches specific cards,
+    // and the neighbour-trace would light the wrong neighbourhood.
+    if (marked && marked.size > 0) return marked;
+    return selected ? traceFrom(graph, selected, traceDepth) : null;
+  }, [graph, selected, traceDepth, marked]);
 
   const sceneLive = useRef({
     allNodes,
@@ -161,6 +170,7 @@ export function TopologyCanvas({
     selected,
     selectedEdge,
     highlighted,
+    marked,
     hovered: hoveredUrn,
     hoveredEdge,
   });
@@ -170,6 +180,7 @@ export function TopologyCanvas({
     selected,
     selectedEdge,
     highlighted,
+    marked,
     hovered: hoveredUrn,
     hoveredEdge,
   };
@@ -252,6 +263,7 @@ export function TopologyCanvas({
       selected: live.selected,
       selectedEdge: live.selectedEdge,
       highlighted: live.highlighted,
+      marked: live.marked,
       hovered: live.hovered,
       hoveredEdge: live.hoveredEdge,
       dragging: layout.held,

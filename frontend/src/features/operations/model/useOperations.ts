@@ -14,6 +14,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Actions, CommandKind, CommandResult, GraphNode, Urn } from '../../../api/types';
+import { isMockMode } from '../../../mock/demoMode';
+import { demoActions, demoRunCommand } from '../../../mock/demoWatch';
 import {
   CONFIRM_TIMEOUT_MS,
   OPERABLE_KINDS,
@@ -74,6 +76,12 @@ export function useOperations(
       return;
     }
 
+    if (isMockMode()) {
+      const node = nodesRef.current.get(target);
+      setActions(demoActions(target, node?.kind ?? kind, node?.status ?? null));
+      return;
+    }
+
     const controller = new AbortController();
     void (async () => {
       try {
@@ -91,7 +99,7 @@ export function useOperations(
     })();
 
     return () => controller.abort();
-  }, [baseUrl, target, revision, operable]);
+  }, [baseUrl, target, revision, operable, kind]);
 
   // Selecting something else abandons the previous command's result. It
   // belongs to that node, and carrying it across would attribute one node's
@@ -123,6 +131,11 @@ export function useOperations(
       setError(null);
       setConfirmation(null);
       try {
+        if (isMockMode()) {
+          const result = demoRunCommand(kind, target);
+          setConfirmation(witness(result, nodesRef.current, Date.now()));
+          return;
+        }
         const response = await fetch(new URL('/api/v1/commands', baseUrl), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },

@@ -149,6 +149,7 @@ def _as_json(entry: WatchEntry) -> dict[str, Any]:
         "id": entry.id,
         "engine_id": entry.engine_id,
         "kind": str(entry.kind),
+        "group_id": entry.group_id,
         "name": entry.name,
         "match_kind": str(entry.match_kind) if entry.match_kind else None,
         "pattern": entry.pattern,
@@ -163,6 +164,13 @@ def _from_json(raw: dict[str, Any]) -> WatchEntry:
         id=str(raw["id"]),
         engine_id=str(raw["engine_id"]),
         kind=WatchKind(str(raw["kind"])),
+        # A file written before groups existed holds entries that were each
+        # selected on their own, which is a group of one — so the entry's own
+        # id is the honest value and not a placeholder. Minting a fresh one
+        # here would be worse than it looks: this runs on every load, so a
+        # Controller that started and stopped without an edit would give the
+        # same entry a different group id each time.
+        group_id=str(raw.get("group_id") or raw["id"]),
         name=str(raw.get("name", "")),
         match_kind=MatchKind(str(match_kind)) if match_kind else None,
         pattern=str(raw.get("pattern", "")),

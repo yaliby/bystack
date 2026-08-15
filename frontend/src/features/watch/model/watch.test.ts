@@ -1,12 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import type { GraphNode, Inventory, InventoryItem, Urn, WatchEntry } from '../../../api/types';
-import { draftFrom, entrySubtitle, entryTitle, inventoryNotice, stateLabel, watchRows } from './watch';
+import type {
+  EnrolledAgent,
+  GraphNode,
+  Inventory,
+  InventoryItem,
+  Urn,
+  WatchEntry,
+  WatchFanout,
+} from '../../../api/types';
+import {
+  draftFrom,
+  entrySubtitle,
+  entryTitle,
+  fanoutCandidates,
+  fanoutSummary,
+  groupNote,
+  inventoryNotice,
+  stateLabel,
+  watchRows,
+} from './watch';
 
 function entry(overrides: Partial<WatchEntry> = {}): WatchEntry {
   return {
     id: 'w1',
     engine_id: 'ENGINE',
     kind: 'unit',
+    group_id: 'g1',
+    group_hosts: 1,
     name: 'nginx.service',
     match_kind: null,
     pattern: '',
@@ -135,5 +155,92 @@ describe('what the picker says above its rows', () => {
 
   it('says a list is truncated, because a short list reads as the whole truth', () => {
     expect(inventoryNotice({ ...base, items: [item(), item()], total: 412 })).toContain('2 of 412');
+  });
+});
+
+describe('one selection made on several hosts', () => {
+  function agent(overrides: Partial<EnrolledAgent> = {}): EnrolledAgent {
+    return {
+      engine_id: 'E1',
+      status: 'approved',
+      certificate_expires_at: 0,
+      enrolled_at: 0,
+      last_seen: 0,
+      agent_version: '0.2.0',
+      connected: true,
+      local: false,
+      ...overrides,
+    };
+  }
+
+  it('says nothing on a row that was only ever chosen here', () => {
+    // The ordinary case, and a note on every row is a note nobody reads.
+    expect(groupNote(entry({ group_hosts: 1 }))).toBeNull();
+  });
+
+  it('counts the other hosts and never this one', () => {
+    // Three hosts hold the group; the row is on one of them, so two are news.
+    expect(groupNote(entry({ group_hosts: 3 }))).toBe('also chosen on 2 other hosts');
+    expect(groupNote(entry({ group_hosts: 2 }))).toBe('also chosen on 1 other host');
+  });
+
+  it('offers no host whose agent would never be told', () => {
+    // Pending has no agent that will ever hear the list, and revoked has one
+    // we have decided not to listen to. Intent stored for either is durable,
+    // correct, and permanently unobserved.
+    const candidates = fanoutCandidates(
+      [
+        agent({ engine_id: 'HERE' }),
+        agent({ engine_id: 'PENDING', status: 'pending' }),
+        agent({ engine_id: 'GONE', status: 'revoked' }),
+        agent({ engine_id: 'OTHER' }),
+        agent({ engine_id: 'MINE', status: 'local' }),
+      ],
+      'HERE',
+      () => null,
+    );
+    expect(candidates.map((host) => host.engineId)).toEqual(['MINE', 'OTHER']);
+  });
+
+  it('leaves out the host being edited, which is not optional', () => {
+    expect(fanoutCandidates([agent({ engine_id: 'HERE' })], 'HERE', () => null)).toHaveLength(0);
+  });
+
+  it('names the hosts that need looking at rather than counting them', () => {
+    // "Stored on 2 of 3" sends an operator to find the third. This knows
+    // which one it is, and what it said.
+    const result: WatchFanout = {
+      group_id: 'g9',
+      stored: 2,
+      hosts: [
+        { engine_id: 'A', stored: true, delivered: true, detail: null },
+        { engine_id: 'B', stored: false, delivered: false, detail: "already watches 'nginx.service'" },
+        { engine_id: 'C', stored: true, delivered: false, detail: 'this host is not connected' },
+      ],
+    };
+    const { headline, problems } = fanoutSummary(result, (id) => `host-${id}`);
+    expect(headline).toBe('Stored on 2 of 3 hosts.');
+    // The undelivered host is listed beside the refused one: they are
+    // different facts and both end with a machine showing no card.
+    expect(problems).toEqual([
+      "host-B: already watches 'nginx.service'",
+      'host-C: this host is not connected',
+    ]);
+  });
+
+  it('has nothing to report when every host took it', () => {
+    const { headline, problems } = fanoutSummary(
+      {
+        group_id: 'g1',
+        stored: 2,
+        hosts: [
+          { engine_id: 'A', stored: true, delivered: true, detail: null },
+          { engine_id: 'B', stored: true, delivered: true, detail: null },
+        ],
+      },
+      (id) => id,
+    );
+    expect(headline).toBe('Watching this on 2 hosts.');
+    expect(problems).toEqual([]);
   });
 });

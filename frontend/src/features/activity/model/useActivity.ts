@@ -16,6 +16,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { AuditEntry } from '../../../api/types';
+import { isMockMode } from '../../../mock/demoMode';
+import { demoAudit } from '../../../mock/demoWatch';
 import { sameActivity } from './activity';
 
 const INTERVAL_MS = 5_000;
@@ -50,6 +52,12 @@ export function useActivity(baseUrl: string, open: boolean): Activity {
 
   useEffect(() => {
     if (!open) return;
+    if (isMockMode()) {
+      setUnreachable(false);
+      setLoaded(true);
+      setEntries([...demoAudit()]);
+      return;
+    }
     let disposed = false;
     let timer: number | undefined;
     const controller = new AbortController();

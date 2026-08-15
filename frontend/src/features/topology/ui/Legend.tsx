@@ -6,11 +6,13 @@ import type { EdgeKind } from '../../../api/types';
 import { EDGE_DASH, EDGE_LABEL, STATUS_LABEL } from './theme';
 import type { Palette, StatusRole } from './theme';
 
-const EDGES: readonly EdgeKind[] = ['depends_on', 'mounts', 'exposed_on'];
+const EDGES: readonly EdgeKind[] = ['depends_on', 'mounts', 'exposed_on', 'hosts'];
 
 const EDGE_CAPTION: Partial<Record<EdgeKind, string>> = {
   depends_on: 'depends on · flow',
+  mounts: 'mounts volume',
   exposed_on: 'published on host',
+  hosts: 'watched on host',
 };
 
 const STATUSES: readonly StatusRole[] = ['good', 'warning', 'serious', 'critical', 'neutral'];
@@ -62,11 +64,17 @@ export function Legend({ palette }: { readonly palette: Palette }) {
           exactly like a discovery bug. */}
       <div className="legend__group">
         <h4>Canvas</h4>
+        {/* The three workload kinds share a card shape on purpose, so the word
+            on the second line is the only thing telling them apart. Saying so
+            here is cheaper than an operator learning it by being surprised. */}
         <div className="legend__item legend__item--note">
-          A frame is a stack — its network is the frame
+          Every card names its kind on the second line
         </div>
         <div className="legend__item legend__item--note">
-          A card is a service; its containers fold into it
+          compose service · systemd unit · process
+        </div>
+        <div className="legend__item legend__item--note">
+          A frame is a compose project — its network is the frame
         </div>
         <div className="legend__item legend__item--note">
           Click a link · drag a card or a frame

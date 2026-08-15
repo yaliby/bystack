@@ -15,6 +15,9 @@
 
 import { useEffect, useState } from 'react';
 import type { Health } from '../../../api/types';
+import { isMockMode } from '../../../mock/demoMode';
+import { DEMO_SNAPSHOT } from '../../../mock/demoSnapshot';
+import { demoProviders } from '../../../mock/demoWatch';
 
 /** Slow enough to be free, fast enough that a dead provider is not news. */
 const POLL_INTERVAL_MS = 10_000;
@@ -31,20 +34,19 @@ export function useHealth(baseUrl: string): HealthState {
 
   useEffect(() => {
     // Dev mock canvas — invent a healthy Controller so the banner stays quiet.
-    if (
-      import.meta.env.DEV &&
-      new URLSearchParams(window.location.search).get('mock') !== '0'
-    ) {
+    if (isMockMode()) {
       setState({
         kind: 'reached',
         health: {
           status: 'ok',
-          version: 'mock',
+          version: '0.2.0',
           seq: 1,
-          node_count: 0,
-          edge_count: 0,
-          read_only: true,
-          providers: [],
+          node_count: DEMO_SNAPSHOT.nodes.length,
+          edge_count: DEMO_SNAPSHOT.edges.length,
+          // Writable in the demo so ActionBar / WatchPanel can be exercised;
+          // nothing here reaches a real host.
+          read_only: false,
+          providers: [...demoProviders()],
         },
       });
       return;

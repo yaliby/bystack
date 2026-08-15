@@ -85,6 +85,14 @@ class InMemoryWatchStore:
         gets to choose an id — a client-chosen id is a client that can
         overwrite somebody else's entry by guessing, and it is free not to
         allow.
+
+        The group id is the one thing a caller may bring, and only because a
+        fan-out has to: nine entries on nine hosts are nine calls to this
+        method, and the whole point is that they share a group. The rule the
+        paragraph above is really making still holds — the *client* cannot
+        choose one, because `WatchEntryIn` has no such field and the fan-out
+        route mints the value itself. A blank one becomes a fresh group of one,
+        which is what a plain per-host add is.
         """
         engine_id = engine_scope(entry.engine_id)
         if not engine_id:
@@ -95,6 +103,7 @@ class InMemoryWatchStore:
                 id=entry.id or uuid.uuid4().hex[:12],
                 engine_id=engine_id,
                 kind=entry.kind,
+                group_id=entry.group_id or uuid.uuid4().hex[:12],
                 name=entry.name,
                 match_kind=entry.match_kind,
                 pattern=entry.pattern,

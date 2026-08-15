@@ -17,10 +17,24 @@ from typing import Final
 
 from fastapi import APIRouter, HTTPException, Query
 
-from bystack.api.deps import Commands
-from bystack.api.schemas import ActionsOut, AuditEntryOut, CommandIn, CommandResultOut
-from bystack.core.identity import URN, URNError
-from bystack.core.ports.command import CommandRejected, CommandRequest, RejectionReason
+from bystack.api.deps import Commands, Context
+from bystack.api.schemas import (
+    ActionsOut,
+    AuditEntryOut,
+    CommandIn,
+    CommandResultOut,
+    GroupCommandHostOut,
+    GroupCommandIn,
+    GroupCommandOut,
+)
+from bystack.core.identity import URN, URNError, engine_scope, process_urn, unit_urn
+from bystack.core.ports.command import (
+    CommandRejected,
+    CommandRequest,
+    CommandStatus,
+    RejectionReason,
+)
+from bystack.core.ports.watch import WatchEntry, WatchKind
 
 router = APIRouter(prefix="/commands", tags=["operations"])
 
@@ -73,6 +87,160 @@ async def run_command(body: CommandIn, service: Commands) -> CommandResultOut:
         ) from exc
 
     return CommandResultOut.of(result)
+
+
+@router.post("/group", response_model=GroupCommandOut, summary="Run an operation across hosts")
+async def run_group_command(
+    body: GroupCommandIn, service: Commands, context: Context
+) -> GroupCommandOut:
+    """Run one lifecycle command on one watch group, across the hosts named.
+
+    **N ordinary commands, and nothing new underneath.** Each host resolves to
+    one node and goes through :class:`~bystack.runtime.commands.CommandService`
+    exactly as a click on that card would — same read-only choke point, same
+    expansion, same audit. This route resolves and aggregates; it decides
+    nothing, which is why it can exist without reopening ADR-0014.
+
+    **One audit entry per host, deliberately.** These are N operations on N
+    machines that happened to be asked for together, and a single record
+    claiming "restarted the group" would hide which machine actually took it —
+    the only thing worth knowing afterwards. The shared `group_id` is how they
+    are tied back together.
+
+    **One host's refusal is not the request's.** A machine that is asleep, or
+    that no longer holds an entry from this group, is reported in its own row
+    while the rest proceed. The exception is read-only, which is a fact about
+    this Controller rather than about any host: when it is the *only* thing
+    that happened, the whole request is a `403` and not eight identical rows.
+    """
+    targets = list(dict.fromkeys(engine_scope(engine_id) for engine_id in body.engine_ids))
+    hosts: list[GroupCommandHostOut] = []
+
+    for engine_id in targets:
+        entry = next(
+            (
+                candidate
+                for candidate in context.watchlist.entries(engine_id)
+                if candidate.group_id == body.group_id
+            ),
+            None,
+        )
+        if entry is None:
+            # Removed on that host since the operator's screen was drawn, or
+            # never there. Named rather than skipped: a host that silently
+            # disappears from the answer is indistinguishable from one that
+            # was never asked.
+            hosts.append(
+                GroupCommandHostOut(
+                    engine_id=engine_id,
+                    ran=False,
+                    status=str(RejectionReason.UNKNOWN_TARGET),
+                    detail="this host no longer watches anything from this selection",
+                )
+            )
+            continue
+
+        urn = _urn_of(entry)
+        try:
+            result = await service.execute(
+                CommandRequest(
+                    kind=body.kind,
+                    target=urn,
+                    timeout=body.timeout,
+                    signal=body.signal,
+                    reason=body.reason,
+                )
+            )
+        except CommandRejected as exc:
+            hosts.append(
+                GroupCommandHostOut(
+                    engine_id=engine_id,
+                    urn=str(urn),
+                    ran=False,
+                    status=str(exc.reason),
+                    detail=exc.detail,
+                )
+            )
+            continue
+
+        hosts.append(
+            GroupCommandHostOut(
+                engine_id=engine_id,
+                urn=str(urn),
+                ran=True,
+                status=str(result.status),
+                result=CommandResultOut.of(result),
+            )
+        )
+
+    if hosts and all(host.status == str(RejectionReason.READ_ONLY) for host in hosts):
+        # Not a partial anything. The control plane is read-only and no host
+        # was ever going to take this, so it gets the same answer a single
+        # command does rather than a body full of identical rows.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason": str(RejectionReason.READ_ONLY),
+                "message": hosts[0].detail or "the control plane is running read-only",
+            },
+        )
+
+    return GroupCommandOut(
+        kind=str(body.kind),
+        group_id=body.group_id,
+        status=_worst(hosts),
+        hosts=hosts,
+    )
+
+
+def _urn_of(entry: WatchEntry) -> URN:
+    """The node a watch entry becomes.
+
+    The same rule `WatchEntryOut.urn` applies, and it lives in both places for
+    the reason the frontend does not have a third copy: a unit is named by
+    systemd and a process has no name at all, so its identity is the *rule*
+    the operator wrote.
+    """
+    if entry.kind is WatchKind.UNIT:
+        return unit_urn(entry.engine_id, entry.name)
+    return process_urn(entry.engine_id, entry.id)
+
+
+#: Worst-wins, most severe first.
+#:
+#: Deliberately the same order `CommandResult.status` uses across the targets
+#: *within* one host, applied again across hosts. A second ordering here would
+#: mean a group of one could report differently from the same command sent to
+#: that host on its own.
+_SEVERITY: Final[tuple[CommandStatus, ...]] = (
+    CommandStatus.FAILED,
+    CommandStatus.REJECTED,
+    CommandStatus.TIMED_OUT,
+)
+
+
+def _worst(hosts: list[GroupCommandHostOut]) -> str:
+    """One answer for the whole scope, erring towards "go and look".
+
+    A group restart where eight machines succeeded and the ninth is asleep is
+    a failure. Reporting it as success because the majority worked is how an
+    operator walks away from a half-restarted fleet -- the same sentence the
+    per-host rule is written from, and the reason it is repeated rather than
+    softened at this level.
+    """
+    if not hosts:
+        return str(CommandStatus.NOOP)
+    # A host that never ran is a failure of the whole, whatever the reason:
+    # the operator asked for N machines and reached fewer.
+    if any(not host.ran for host in hosts):
+        return str(CommandStatus.FAILED)
+    seen = {host.status for host in hosts}
+    for status in _SEVERITY:
+        if str(status) in seen:
+            return str(status)
+    if seen == {str(CommandStatus.NOOP)}:
+        return str(CommandStatus.NOOP)
+    return str(CommandStatus.SUCCEEDED)
 
 
 @router.get("/actions", response_model=ActionsOut, summary="Available operations")

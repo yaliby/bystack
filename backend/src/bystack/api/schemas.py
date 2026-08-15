@@ -25,9 +25,15 @@ from bystack.core.ports.command import (
     TargetOutcome,
 )
 from bystack.core.ports.provider import ProviderHealth
-from bystack.core.ports.watch import MAX_PATTERN, MatchKind, WatchEntry, WatchKind
+from bystack.core.ports.watch import (
+    MAX_FANOUT,
+    MAX_PATTERN,
+    MatchKind,
+    WatchEntry,
+    WatchKind,
+)
 from bystack.providers.agent.commands import InventoryResult, LogsResult
-from bystack.runtime.commands import AvailableActions
+from bystack.runtime.commands import MAX_TARGETS, AvailableActions
 
 
 class NodeOut(BaseModel):
@@ -256,6 +262,73 @@ class CommandResultOut(BaseModel):
         )
 
 
+class GroupCommandIn(BaseModel):
+    """One lifecycle command, on the members of one watch group.
+
+    ``engine_ids`` *is* the scope, and it is explicit for a reason: the three
+    things an operator wants — this host, these four, all nine — are the same
+    request with a different list, so there is one mechanism and no mode. The
+    client already knows the group's membership (`GET /agents/watch`) and
+    sending it back is what makes "all of them" mean *the nine I was looking
+    at* rather than whatever the fleet happens to hold when the request lands.
+
+    That distinction is the whole safety of the thing. A server-side "all"
+    would act on a host enrolled between the operator reading the screen and
+    pressing the button.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    kind: CommandKind
+    group_id: str = Field(min_length=1, max_length=64, description="The act of selection to act on")
+    engine_ids: list[str] = Field(
+        min_length=1,
+        # The command bound, not the watch one. `MAX_FANOUT` governs how much
+        # intent may be stored; this governs how many machines one click may
+        # restart at once, which is the promise `CommandService` already makes
+        # to a stack.
+        max_length=MAX_TARGETS,
+        description="The hosts to act on. Duplicates are collapsed.",
+    )
+
+    timeout: float | None = Field(default=None, ge=0, le=600)
+    signal: str | None = Field(default=None, max_length=16)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class GroupCommandHostOut(BaseModel):
+    """What one host made of a group command."""
+
+    engine_id: str
+    urn: str = Field(default="", description="The node acted on. Empty if there was none.")
+    ran: bool = Field(description="False for a host that refused before anything was dispatched.")
+    status: str = Field(description="The per-host status, or `rejected`.")
+    detail: str | None = None
+    result: CommandResultOut | None = Field(
+        default=None, description="The full per-target answer, where the command ran."
+    )
+
+
+class GroupCommandOut(BaseModel):
+    """The outcome of one command across a chosen set of hosts.
+
+    ``status`` is worst-wins across the hosts, the same rule `CommandResult`
+    applies across the targets *within* one host — so a group restart where
+    eight machines succeeded and one is offline reads as `failed`, and the
+    operator goes and finds the ninth rather than believing the fleet is
+    consistent.
+
+    Every host is present, including the ones that refused. A response that
+    listed only what ran would make an unreachable machine indistinguishable
+    from one that was never asked.
+    """
+
+    kind: str
+    group_id: str
+    status: str
+    hosts: list[GroupCommandHostOut] = []
+
+
 class ActionsOut(BaseModel):
     """What an operator may do to a node, and why not, when nothing."""
 
@@ -401,12 +474,41 @@ class WatchEntryIn(BaseModel):
     )
 
 
+class WatchFanoutIn(WatchEntryIn):
+    """The same thing to watch, on several hosts at once.
+
+    Deliberately the draft plus a list of hosts, and *not* a new kind of
+    object. What this asks for is N ordinary entries — the fan-out is an act,
+    not a thing that continues to exist — and the only trace it leaves is the
+    group id every one of them is stamped with.
+
+    ``group_id`` is absent here for the reason ``id`` is absent above: the
+    Controller mints it, once, for this request.
+    """
+
+    engine_ids: list[str] = Field(
+        min_length=1,
+        max_length=MAX_FANOUT,
+        description="The hosts to watch this on. Duplicates are collapsed.",
+    )
+
+
 class WatchEntryOut(BaseModel):
     """A stored watch entry, in the form the graph will speak about it."""
 
     id: str
     engine_id: str
     kind: str
+    group_id: str = Field(
+        default="", description="Which act of selection this came from. See `WatchEntry`."
+    )
+    group_hosts: int = Field(
+        default=1,
+        description=(
+            "How many hosts hold an entry from that same act of selection, this one "
+            "included. 1 means it was chosen for this host alone."
+        ),
+    )
     name: str = ""
     match_kind: str | None = None
     pattern: str = ""
@@ -415,11 +517,20 @@ class WatchEntryOut(BaseModel):
     urn: str = Field(description="The node this entry becomes, whether or not it exists yet")
 
     @classmethod
-    def of(cls, entry: WatchEntry) -> WatchEntryOut:
+    def of(cls, entry: WatchEntry, group_hosts: int = 1) -> WatchEntryOut:
+        """``group_hosts`` is counted by the route, because it is fleet-wide.
+
+        An entry cannot know it: the list this row belongs to is one host's,
+        and the other eight members are in eight other partitions. Passing the
+        count in keeps the whole-store scan in the one place that already
+        holds the store, rather than making a serializer reach for it.
+        """
         return cls.model_construct(
             id=entry.id,
             engine_id=entry.engine_id,
             kind=str(entry.kind),
+            group_id=entry.group_id,
+            group_hosts=group_hosts,
             name=entry.name,
             match_kind=str(entry.match_kind) if entry.match_kind else None,
             pattern=entry.pattern,
@@ -447,6 +558,40 @@ class WatchListOut(BaseModel):
     entries: list[WatchEntryOut] = []
     delivered: bool = False
     detail: str | None = None
+
+
+class FanoutHostOut(BaseModel):
+    """What happened on one host of a fan-out.
+
+    Per host and never summarised into a single verdict, because the failures
+    this has are *partial* by nature and each one means something different to
+    the operator: a host that already watches the unit needs no action, a host
+    that is asleep needs none either, and a host that refused the pattern is
+    the only one worth looking at.
+    """
+
+    engine_id: str
+    stored: bool
+    delivered: bool = False
+    detail: str | None = Field(
+        default=None,
+        description="Why it was not stored, or why the host has not been told. Shown verbatim.",
+    )
+
+
+class WatchFanoutOut(BaseModel):
+    """The outcome of watching one thing across several hosts.
+
+    ``200`` rather than ``201`` even though this creates things, and the
+    reason is the shape of the answer rather than pedantry: a fan-out where
+    four hosts stored the entry and one already had it is neither a creation
+    nor a failure, and the only honest report is the per-host list. A status
+    code that claimed either would be a summary the client then has to ignore.
+    """
+
+    group_id: str = Field(description="Minted for this request and stamped on every entry stored.")
+    stored: int = Field(description="How many hosts now hold an entry from this selection.")
+    hosts: list[FanoutHostOut] = []
 
 
 class AuditEntryOut(BaseModel):

@@ -50,7 +50,13 @@ export const DESTRUCTIVE: ReadonlySet<CommandKind> = new Set<CommandKind>(['kill
 export const DISRUPTIVE: ReadonlySet<CommandKind> = new Set<CommandKind>(['stop', 'kill', 'pause']);
 
 /** Kinds whose nodes can be operated on at all. Everything else has no action bar. */
-export const OPERABLE_KINDS: ReadonlySet<string> = new Set(['container', 'service', 'stack']);
+export const OPERABLE_KINDS: ReadonlySet<string> = new Set([
+  'container',
+  'service',
+  'stack',
+  'unit',
+  'process',
+]);
 
 /**
  * Why the buttons are absent, in words an operator can act on.

@@ -8,7 +8,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { StreamMessage } from '../../../api/types';
-import { DEMO_SNAPSHOT } from '../../../mock/demoSnapshot';
+import { isMockMode } from '../../../mock/demoMode';
+import { demoGraphSnapshot, subscribeDemoGraph } from '../../../mock/demoGraph';
 import { clearStickyRoutes } from '../layout/liveEdges';
 import { EMPTY_GRAPH, applyDelta, applySnapshot, type GraphState } from './graphStore';
 
@@ -24,15 +25,6 @@ export interface GraphStream {
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 15_000;
 
-/** Dev mock: `?mock=1`, or `?mock=0` to force the real stream. */
-function useMockGraph(): boolean {
-  if (!import.meta.env.DEV) return false;
-  const flag = new URLSearchParams(window.location.search).get('mock');
-  if (flag === '0') return false;
-  // Default on in dev — there is often no Controller on the side.
-  return flag === null || flag === '1' || flag === '';
-}
-
 export function useGraphStream(baseUrl: string, sources?: readonly string[]): GraphStream {
   const [graph, setGraph] = useState<GraphState>(EMPTY_GRAPH);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
@@ -44,14 +36,20 @@ export function useGraphStream(baseUrl: string, sources?: readonly string[]): Gr
   graphRef.current = graph;
 
   const scope = sources?.join(',') ?? '';
-  const mock = useMockGraph();
+  const mock = isMockMode();
 
   useEffect(() => {
     if (mock) {
       clearStickyRoutes();
-      setGraph(applySnapshot(DEMO_SNAPSHOT));
+      setGraph(applySnapshot(demoGraphSnapshot()));
       setConnection('live');
-      return () => setConnection('offline');
+      const unsubscribe = subscribeDemoGraph((next) => {
+        setGraph(applySnapshot(next));
+      });
+      return () => {
+        unsubscribe();
+        setConnection('offline');
+      };
     }
 
     let socket: WebSocket | null = null;

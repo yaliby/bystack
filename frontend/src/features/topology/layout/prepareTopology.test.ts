@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GraphEdge, GraphNode } from '../../../api/types';
-import { prepareTopologyGraph } from './prepareTopology';
+import { isCanvasEdge, prepareTopologyGraph } from './prepareTopology';
 
 function node(partial: Partial<GraphNode> & Pick<GraphNode, 'urn' | 'kind' | 'name'>): GraphNode {
   return {
@@ -124,6 +124,74 @@ describe('prepareTopologyGraph', () => {
 
     expect(prepared.stacks).toHaveLength(0);
     expect(prepared.placed.size).toBe(0);
+  });
+
+  it('anchors a watched unit and process to the host that runs them', () => {
+    // Without this the pair joins no stack and touches no other layout edge, so
+    // each one lays out as its own free component and the canvas never says
+    // which machine it belongs to.
+    const f = demo();
+    const unit = node({ urn: 'bystack:unit:e1/nginx', kind: 'unit', name: 'nginx.service' });
+    const proc = node({ urn: 'bystack:process:e1/4021', kind: 'process', name: 'worker' });
+    const prepared = prepareTopologyGraph(
+      [...f.nodes, unit, proc],
+      [...f.edges, edge('hosts', f.host.urn, unit.urn), edge('hosts', f.host.urn, proc.urn)],
+    );
+
+    expect(prepared.placed.has(unit.urn)).toBe(true);
+    expect(prepared.placed.has(proc.urn)).toBe(true);
+    for (const dst of [unit.urn, proc.urn]) {
+      expect(prepared.edges).toContainEqual(
+        expect.objectContaining({ kind: 'hosts', src: f.host.urn, dst }),
+      );
+    }
+  });
+
+  it('treats host→unit as a canvas edge and host→container as not', () => {
+    // Drawn and laid out by the same rule: the wire an operator expects when
+    // watching nginx on lowserv, and never a rail from every container.
+    const kinds = new Map<string, string>([
+      ['bystack:host:e1', 'host'],
+      ['bystack:unit:e1/nginx', 'unit'],
+      ['bystack:container:e1/c', 'container'],
+    ]);
+    const kindOf = (urn: string) => kinds.get(urn);
+    expect(
+      isCanvasEdge(edge('hosts', 'bystack:host:e1', 'bystack:unit:e1/nginx'), kindOf),
+    ).toBe(true);
+    expect(
+      isCanvasEdge(edge('hosts', 'bystack:host:e1', 'bystack:container:e1/c'), kindOf),
+    ).toBe(false);
+  });
+
+  it('does not draw a rail from the host to every container it hosts', () => {
+    // Providers emit `hosts` for containers, stacks, networks and volumes too.
+    // Taking the kind wholesale would put one line per container into the host
+    // badge, which is the picture this module exists to prevent.
+    const f = demo();
+    const prepared = prepareTopologyGraph(f.nodes, [
+      ...f.edges,
+      edge('hosts', f.host.urn, f.webC.urn),
+      edge('hosts', f.host.urn, f.dbC.urn),
+      edge('hosts', f.host.urn, f.stack.urn),
+      edge('hosts', f.host.urn, f.vol.urn),
+      edge('hosts', f.host.urn, f.net.urn),
+    ]);
+
+    expect(prepared.edges.filter((e) => e.kind === 'hosts')).toHaveLength(0);
+  });
+
+  it('does not let a hosts edge alone keep a dangling volume on the canvas', () => {
+    // A volume earns a card by being mounted. `hosts` reaches every volume on
+    // the machine, so it must not count as the edge that rescues one.
+    const host = node({ urn: 'bystack:host:e1', kind: 'host', name: 'laptop' });
+    const orphan = node({ urn: 'bystack:volume:e1/stray', kind: 'volume', name: 'stray' });
+    const prepared = prepareTopologyGraph(
+      [host, orphan],
+      [edge('hosts', host.urn, orphan.urn)],
+    );
+
+    expect(prepared.placed.has(orphan.urn)).toBe(false);
   });
 
   it('survives an empty graph', () => {

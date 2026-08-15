@@ -324,6 +324,19 @@ export interface WatchEntry {
   readonly id: string;
   readonly engine_id: string;
   readonly kind: WatchKind;
+  /**
+   * Which act of selection this entry came from.
+   *
+   * Shared by everything chosen in one go, and by nothing else. It carries no
+   * authority: these entries are independent, and stopping one does not touch
+   * the others. It is here so the panel can say where a row came from.
+   */
+  readonly group_id: string;
+  /**
+   * How many hosts hold an entry from that same act of selection, this one
+   * included. `1` means it was chosen for this host alone.
+   */
+  readonly group_hosts: number;
   readonly name: string;
   readonly match_kind: MatchKind | null;
   readonly pattern: string;
@@ -346,6 +359,57 @@ export interface WatchList {
    */
   readonly delivered: boolean;
   readonly detail: string | null;
+}
+
+/** What one host made of a fan-out. */
+export interface FanoutHost {
+  readonly engine_id: string;
+  readonly stored: boolean;
+  readonly delivered: boolean;
+  /**
+   * Why it was not stored, or why the host has not been told. The
+   * Controller's own words, meant to be shown.
+   */
+  readonly detail: string | null;
+}
+
+/**
+ * The outcome of watching one thing across several hosts.
+ *
+ * Per host and never a single verdict, because the failures are partial by
+ * nature: eight machines storing the entry and one already holding it is not
+ * an error, and it is not a clean success either.
+ */
+export interface WatchFanout {
+  readonly group_id: string;
+  readonly stored: number;
+  readonly hosts: readonly FanoutHost[];
+}
+
+/** What one host made of a command sent to a whole group. */
+export interface GroupCommandHost {
+  readonly engine_id: string;
+  readonly urn: Urn | '';
+  /** False for a host that refused before anything was dispatched. */
+  readonly ran: boolean;
+  readonly status: string;
+  readonly detail: string | null;
+  readonly result: CommandResult | null;
+}
+
+/**
+ * One lifecycle command across a chosen set of hosts.
+ *
+ * `status` is worst-wins across the hosts, the same rule a single command
+ * applies across the targets within one host: eight machines restarted and
+ * one asleep is a failure, so the operator goes and finds the ninth instead
+ * of believing the fleet is consistent.
+ */
+export interface GroupCommandResult {
+  readonly kind: CommandKind;
+  readonly group_id: string;
+  readonly status: string;
+  readonly hosts: readonly GroupCommandHost[];
 }
 
 /** One row of the picker: something that *could* be watched. */

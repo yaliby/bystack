@@ -15,7 +15,22 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Inventory, MatchKind, WatchEntry, WatchKind, WatchList } from '../../../api/types';
+import type {
+  Inventory,
+  MatchKind,
+  WatchEntry,
+  WatchFanout,
+  WatchKind,
+  WatchList,
+} from '../../../api/types';
+import { isMockMode } from '../../../mock/demoMode';
+import {
+  demoAddAcross,
+  demoAddWatch,
+  demoInventory,
+  demoRemoveWatch,
+  watchListFor,
+} from '../../../mock/demoWatch';
 
 /**
  * How long to wait after a keystroke before asking the host again.
@@ -36,6 +51,15 @@ export interface Watching {
   readonly error: string | null;
   readonly busy: boolean;
   readonly add: (draft: Draft) => Promise<boolean>;
+  /**
+   * The same draft on several hosts, in one request and under one group id.
+   *
+   * Returns the per-host outcome rather than a boolean, because a fan-out has
+   * no single one: the caller has to be able to show that eight machines took
+   * it and the ninth already had it. `null` means the request itself failed,
+   * and then `error` says so.
+   */
+  readonly addAcross: (draft: Draft, engineIds: readonly string[]) => Promise<WatchFanout | null>;
   readonly remove: (entryId: string) => Promise<void>;
   readonly dismissError: () => void;
 }
@@ -56,6 +80,10 @@ export function useWatch(baseUrl: string, engineId: string | null): Watching {
   const load = useCallback(
     async (signal?: AbortSignal) => {
       if (engineId === null) return;
+      if (isMockMode()) {
+        setList(watchListFor(engineId));
+        return;
+      }
       try {
         const response = await fetch(
           new URL(`/api/v1/agents/${encodeURIComponent(engineId)}/watch`, baseUrl),
@@ -83,6 +111,10 @@ export function useWatch(baseUrl: string, engineId: string | null): Watching {
       setBusy(true);
       setError(null);
       try {
+        if (isMockMode()) {
+          setList(demoAddWatch(engineId, draft));
+          return true;
+        }
         const response = await fetch(
           new URL(`/api/v1/agents/${encodeURIComponent(engineId)}/watch`, baseUrl),
           {
@@ -110,11 +142,53 @@ export function useWatch(baseUrl: string, engineId: string | null): Watching {
     [baseUrl, engineId],
   );
 
+  const addAcross = useCallback(
+    async (draft: Draft, engineIds: readonly string[]): Promise<WatchFanout | null> => {
+      setBusy(true);
+      setError(null);
+      try {
+        if (isMockMode()) {
+          const fanout = demoAddAcross(draft, engineIds);
+          await load();
+          return fanout;
+        }
+        const response = await fetch(new URL('/api/v1/agents/watch', baseUrl), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...draft, engine_ids: engineIds }),
+        });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+          throw new Error(
+            typeof body?.detail === 'string' ? body.detail : `watch ${response.status}`,
+          );
+        }
+        const fanout = (await response.json()) as WatchFanout;
+        // The answer is fleet-wide and this hook holds one host's list, which
+        // the fan-out has very likely just changed. Re-read it rather than
+        // patching: the reload also brings back the group counts, which every
+        // *other* row's "also on N hosts" now depends on.
+        await load();
+        return fanout;
+      } catch (cause) {
+        setError(describe(cause));
+        return null;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [baseUrl, load],
+  );
+
   const remove = useCallback(
     async (entryId: string) => {
       if (engineId === null) return;
       setBusy(true);
       try {
+        if (isMockMode()) {
+          setList(demoRemoveWatch(engineId, entryId));
+          return;
+        }
         const response = await fetch(
           new URL(
             `/api/v1/agents/${encodeURIComponent(engineId)}/watch/${encodeURIComponent(entryId)}`,
@@ -141,6 +215,7 @@ export function useWatch(baseUrl: string, engineId: string | null): Watching {
     error,
     busy,
     add,
+    addAcross,
     remove,
     dismissError: () => setError(null),
   };
@@ -171,6 +246,14 @@ export function useInventory(
       setInventory(null);
       return;
     }
+    if (isMockMode()) {
+      setLoading(true);
+      const handle = window.setTimeout(() => {
+        setInventory(demoInventory(engineId, kind, filter));
+        setLoading(false);
+      }, FILTER_DEBOUNCE_MS);
+      return () => window.clearTimeout(handle);
+    }
     const controller = new AbortController();
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
@@ -180,7 +263,16 @@ export function useInventory(
       if (filter) url.searchParams.set('filter', filter);
       fetch(url, { signal: controller.signal })
         .then(async (response) => {
-          if (!response.ok) throw new Error(`inventory ${response.status}`);
+          if (!response.ok) {
+            // The Controller's own sentence, the way the add and remove paths
+            // above read it. A host that is enrolled but not connected answers
+            // 404 here, and that is the case this dialog most needs to explain
+            // -- `inventory 404` is the one reading of it nobody can act on.
+            const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
+            throw new Error(
+              typeof body?.detail === 'string' ? body.detail : `inventory ${response.status}`,
+            );
+          }
           setInventory((await response.json()) as Inventory);
         })
         .catch((cause: unknown) => {

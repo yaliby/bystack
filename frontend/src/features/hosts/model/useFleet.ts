@@ -13,6 +13,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { EnrolledAgent, EnrollmentTerms, JoinToken } from '../../../api/types';
+import { isMockMode } from '../../../mock/demoMode';
+import { demoAgents, demoTerms } from '../../../mock/demoWatch';
 import { sameFleet, sameTerms } from './hosts';
 
 /**
@@ -68,10 +70,14 @@ export interface Fleet {
 }
 
 export function useFleet(baseUrl: string, attentive: boolean): Fleet {
-  const [agents, setAgents] = useState<readonly EnrolledAgent[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [agents, setAgents] = useState<readonly EnrolledAgent[]>(() =>
+    isMockMode() ? demoAgents() : [],
+  );
+  const [loaded, setLoaded] = useState(() => isMockMode());
   const [unreachable, setUnreachable] = useState(false);
-  const [terms, setTerms] = useState<EnrollmentTerms | null>(null);
+  const [terms, setTerms] = useState<EnrollmentTerms | null>(() =>
+    isMockMode() ? demoTerms() : null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // Bumped by an action to re-poll at once rather than waiting out the
@@ -80,6 +86,8 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
+    if (isMockMode()) return;
+
     let disposed = false;
     let timer: number | undefined;
     const inFlight = new Set<AbortController>();
@@ -89,7 +97,7 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
       const controller = new AbortController();
       inFlight.add(controller);
       try {
-        const [listed, terms] = await Promise.all([
+        const [listed, termsResponse] = await Promise.all([
           fetch(new URL('/api/v1/agents', baseUrl), { signal: controller.signal }),
           fetch(new URL('/api/v1/agents/enrollment', baseUrl), { signal: controller.signal }),
         ]);
@@ -103,8 +111,8 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
         // it — to say that nothing happened.
         setAgents((previous) => (sameFleet(previous, next) ? previous : next));
 
-        if (terms.ok) {
-          const answer = (await terms.json()) as EnrollmentTerms;
+        if (termsResponse.ok) {
+          const answer = (await termsResponse.json()) as EnrollmentTerms;
           setTerms((previous) => (sameTerms(previous, answer) ? previous : answer));
         }
       } catch {
@@ -126,6 +134,19 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
 
   const act = useCallback(
     async (engineId: string, verb: 'approve' | 'revoke') => {
+      if (isMockMode()) {
+        setBusy(engineId);
+        setError(null);
+        setAgents((previous) =>
+          previous.map((agent) =>
+            agent.engine_id === engineId
+              ? { ...agent, status: verb === 'approve' ? 'approved' : 'revoked' }
+              : agent,
+          ),
+        );
+        setBusy(null);
+        return;
+      }
       setBusy(engineId);
       setError(null);
       try {
@@ -156,6 +177,16 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
   const revoke = useCallback((engineId: string) => act(engineId, 'revoke'), [act]);
 
   const mint = useCallback(async (): Promise<JoinToken | null> => {
+    if (isMockMode()) {
+      return {
+        token: 'mock-join-token-not-real',
+        expires_at: Date.now() / 1000 + TOKEN_TTL_MINUTES * 60,
+        ca_fingerprint: 'aa:bb:cc:dd:ee:ff',
+        install:
+          'curl -fsSL https://example.invalid/install-agent.sh | sudo sh -s -- --token mock-join-token-not-real',
+        manual: 'sudo bystack-agent enroll --token mock-join-token-not-real',
+      };
+    }
     setError(null);
     try {
       const response = await fetch(new URL('/api/v1/agents/tokens', baseUrl), {

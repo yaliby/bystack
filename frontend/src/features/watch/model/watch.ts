@@ -18,14 +18,17 @@
  */
 
 import type {
+  EnrolledAgent,
   GraphNode,
   Inventory,
   InventoryItem,
   MatchKind,
   Urn,
   WatchEntry,
+  WatchFanout,
   WatchKind,
 } from '../../../api/types';
+import { hostLabel } from '../../hosts/model/hosts';
 
 /** A row in the panel: what was asked for, beside what the host said. */
 export interface WatchRow {
@@ -154,6 +157,80 @@ export function draftFrom(
     match_kind: isPath ? 'exec' : 'name',
     pattern: item.id,
   };
+}
+
+/**
+ * What a row says about where it came from, or nothing.
+ *
+ * `null` for the ordinary case — one host, one decision — because a note on
+ * every row is a note nobody reads. It appears only when the entry has
+ * siblings, and it is phrased as history rather than as scope: this is a
+ * record of what was asked for elsewhere, not a claim that the panel can act
+ * on those machines from here.
+ */
+export function groupNote(entry: WatchEntry): string | null {
+  const others = entry.group_hosts - 1;
+  if (others < 1) return null;
+  return others === 1 ? 'also chosen on 1 other host' : `also chosen on ${others} other hosts`;
+}
+
+/**
+ * The hosts a selection may be fanned out to, in the order they are offered.
+ *
+ * Pending and revoked hosts are left out, and the distinction matters: a
+ * pending host has no agent that would ever be told, and a revoked one has an
+ * agent we have decided not to listen to. Storing intent for either would
+ * produce an entry that is correct, durable and permanently unobserved.
+ *
+ * The host being edited is excluded because it is not optional — the panel
+ * shows it as the fixed subject of the sentence, and a checkbox that cannot
+ * be unticked is a worse way to say so.
+ */
+export function fanoutCandidates(
+  agents: readonly EnrolledAgent[],
+  currentEngineId: string,
+  resolveName: (engineId: string) => string | null,
+): readonly { readonly engineId: string; readonly label: string }[] {
+  return agents
+    .filter(
+      (agent) =>
+        agent.engine_id !== currentEngineId &&
+        (agent.status === 'approved' || agent.status === 'local'),
+    )
+    .map((agent) => ({
+      engineId: agent.engine_id,
+      label: hostLabel(agent.engine_id, resolveName(agent.engine_id)),
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+/**
+ * What a finished fan-out has to say for itself.
+ *
+ * Two sentences at most, and the second one only when something needs
+ * looking at. The failures are named by host rather than counted: "4 of 5
+ * hosts" tells an operator to go and find the fifth, which is work this
+ * already did.
+ */
+export function fanoutSummary(
+  result: WatchFanout,
+  resolveLabel: (engineId: string) => string,
+): { readonly headline: string; readonly problems: readonly string[] } {
+  const total = result.hosts.length;
+  const headline =
+    result.stored === total
+      ? `Watching this on ${total === 1 ? '1 host' : `${total} hosts`}.`
+      : `Stored on ${result.stored} of ${total} hosts.`;
+
+  // Undelivered is listed beside refused, deliberately. They are different
+  // facts — one entry does not exist, the other exists and is not being
+  // looked at yet — and both end with a host that is not showing a card, which
+  // is the thing the operator is about to wonder about.
+  const problems = result.hosts
+    .filter((host) => host.detail !== null)
+    .map((host) => `${resolveLabel(host.engine_id)}: ${host.detail ?? ''}`);
+
+  return { headline, problems };
 }
 
 /**

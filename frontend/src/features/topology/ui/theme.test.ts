@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { GraphEdge, GraphNode } from '../../../api/types';
 import {
+  KIND_LABEL,
   cardIdentityColor,
   cardPorts,
+  cardSubtitle,
   edgePortLabel,
+  edgeVerb,
   stackIdentityColor,
   statusOf,
+  statusText,
 } from './theme';
 
 function container(ports: unknown): GraphNode {
@@ -114,10 +118,14 @@ describe('stackIdentityColor', () => {
 });
 
 describe('statusOf', () => {
-  function node(status: string, attrs: Record<string, unknown> = {}): GraphNode {
+  function node(
+    status: string | null,
+    attrs: Record<string, unknown> = {},
+    kind: GraphNode['kind'] = 'container',
+  ): GraphNode {
     return {
       urn: 'ctr:web',
-      kind: 'container',
+      kind,
       name: 'web',
       source: 'local',
       status,
@@ -148,5 +156,114 @@ describe('statusOf', () => {
 
   it('still reports a stopped container as critical, healthy or not', () => {
     expect(statusOf(node('exited', { health: 'healthy' }))).toBe('critical');
+  });
+
+  it('does not treat a volume as running even when status says so', () => {
+    expect(statusOf(node('running', {}, 'volume'))).toBe('neutral');
+  });
+});
+
+describe('cardSubtitle', () => {
+  function node(
+    kind: GraphNode['kind'],
+    name: string,
+    attrs: Record<string, unknown> = {},
+  ): GraphNode {
+    return {
+      urn: `bystack:${kind}:e1/${name}`,
+      kind,
+      name,
+      source: 'local',
+      status: null,
+      labels: {},
+      attrs,
+      observed_at: 0,
+      revision: 'r',
+    };
+  }
+
+  it('separates the three workload kinds that share a card shape', () => {
+    // `nginx` could be any of these three, and they are drawn identically.
+    // The word on the second line is the only thing that tells them apart.
+    expect(cardSubtitle(node('service', 'nginx', { image: 'nginx:1' }))).toBe(
+      'compose service · nginx:1',
+    );
+    expect(
+      cardSubtitle(node('unit', 'nginx.service', { sub_state: 'running', load_state: 'loaded' })),
+    ).toBe('systemd unit · running');
+    expect(
+      cardSubtitle(
+        node('process', 'worker', { pattern: '/usr/local/bin/order-worker', match: 'exec' }),
+      ),
+    ).toBe('process · exec order-worker');
+  });
+
+  it('keeps a process pattern readable instead of ellipsizing its useful end', () => {
+    const long = node('process', 'worker', {
+      pattern: '/opt/vendor/very/long/path/to/order-worker',
+      match: 'exec',
+    });
+    expect(cardSubtitle(long)).toBe('process · exec order-worker');
+  });
+
+  it('takes the kind from the service and the image from its container', () => {
+    // The folded card is a compose service; what it runs is the container's.
+    const service = node('service', 'caddy');
+    const container = node('container', 'edge-caddy-1', { image: 'caddy:2' });
+    expect(cardSubtitle(service, container)).toBe('compose service · caddy:2');
+  });
+
+  it('names a bare container as a container', () => {
+    expect(cardSubtitle(node('container', 'c', { image: 'caddy:2' }))).toBe('container · caddy:2');
+  });
+});
+
+describe('edgeVerb', () => {
+  it('reads contains from the child as membership, not ownership', () => {
+    expect(edgeVerb('contains', 'out')).toBe('contains');
+    expect(edgeVerb('contains', 'in')).toBe('in');
+  });
+
+  it('reads mounts from the volume as mounted by', () => {
+    expect(edgeVerb('mounts', 'out')).toBe('mounts');
+    expect(edgeVerb('mounts', 'in')).toBe('mounted by');
+  });
+});
+
+describe('statusText', () => {
+  function node(kind: GraphNode['kind'], status: string | null): GraphNode {
+    return {
+      urn: `bystack:${kind}:e1/x`,
+      kind,
+      name: 'x',
+      source: 'local',
+      status,
+      labels: {},
+      attrs: {},
+      observed_at: 0,
+      revision: 'r',
+    };
+  }
+
+  it('uses systemd vocabulary for units', () => {
+    expect(statusText(node('unit', 'active'))).toBe('Active');
+    expect(statusText(node('unit', 'not-found'))).toBe('Not-found');
+  });
+
+  it('does not call a volume Running', () => {
+    expect(statusText(node('volume', 'running'))).toBe('No state');
+  });
+});
+
+describe('KIND_LABEL', () => {
+  it('qualifies every name that would otherwise collide on "service"', () => {
+    expect(KIND_LABEL.unit).toBe('systemd unit');
+    expect(KIND_LABEL.service).toBe('Compose service');
+    expect(KIND_LABEL.container).toBe('Container');
+  });
+
+  it('never labels two kinds with the same word', () => {
+    const labels = Object.values(KIND_LABEL).map((label) => label.toLowerCase());
+    expect(new Set(labels).size).toBe(labels.length);
   });
 });

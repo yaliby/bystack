@@ -15,6 +15,7 @@ a case a live host produces on demand.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -33,6 +34,7 @@ from bystack.core.identity import (
 from bystack.core.ports.command import CommandKind, CommandRequest, CommandStatus
 from bystack.core.ports.watch import (
     MAX_ENTRIES,
+    MAX_FANOUT,
     MatchKind,
     WatchEntry,
     WatchKind,
@@ -45,6 +47,7 @@ from bystack.infra.watch.memory import InMemoryWatchStore
 from bystack.providers.agent.provider import AgentProvider
 from bystack.providers.host.capability import supported_commands
 from bystack.providers.host.mapper import map_process, map_unit
+from bystack.runtime.commands import MAX_TARGETS
 from bystack.runtime.writer import PartitionWriter
 
 C1 = "c" * 64
@@ -643,3 +646,360 @@ def test_the_inventory_is_a_404_for_a_host_no_agent_has_ever_dialled(controller:
     client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
     with client:
         assert client.get(f"/api/v1/agents/{ENGINE}/inventory").status_code == 404
+
+
+# --------------------------------------------------------------------------
+# One selection, several hosts
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_entry_chosen_on_its_own_is_a_group_of_one() -> None:
+    """Every entry has a group, including the ordinary per-host one, so a UI
+    never has to treat "no group" as a fourth case."""
+    store = InMemoryWatchStore()
+    first = await store.add(unit_entry("nginx"))
+    second = await store.add(unit_entry("redis"))
+    assert first.group_id
+    # Two separate acts of selection, two groups. Nothing joins entries that
+    # were merely added to the same host.
+    assert first.group_id != second.group_id
+
+
+@pytest.mark.asyncio
+async def test_a_group_is_a_label_and_never_a_membership() -> None:
+    """The whole design in one test. Removing one member leaves the others
+    exactly as they were: the group owns nothing, so there is nothing to
+    reconcile and no way for a host to acquire an entry nobody chose for it."""
+    store = InMemoryWatchStore()
+    here = await store.add(unit_entry("nginx", group_id="shared"))
+    there = await store.add(unit_entry("nginx", engine_id="OTHERENGINE", group_id="shared"))
+    assert here.group_id == there.group_id == "shared"
+
+    assert await store.remove(ENGINE, here.id)
+    survivor = store.entries("OTHERENGINE")
+    assert [entry.id for entry in survivor] == [there.id]
+    assert survivor[0].group_id == "shared"
+
+
+@pytest.mark.asyncio
+async def test_a_group_survives_the_restart_that_the_selection_survives(
+    tmp_path: Any,
+) -> None:
+    store = DurableWatchStore.open(tmp_path)
+    stored = await store.add(unit_entry("nginx", group_id="shared"))
+    assert DurableWatchStore.open(tmp_path).entries(ENGINE)[0].group_id == stored.group_id
+
+
+@pytest.mark.asyncio
+async def test_an_entry_written_before_groups_existed_becomes_a_group_of_one(
+    tmp_path: Any,
+) -> None:
+    """A file from the previous version holds entries that were each chosen on
+    their own, so the entry's own id is the honest group id -- and a stable one,
+    which matters because this runs on every load rather than once."""
+    path = tmp_path / "watchlist.json"
+    path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "old1",
+                        "engine_id": ENGINE,
+                        "kind": "unit",
+                        "name": "nginx.service",
+                        "match_kind": None,
+                        "pattern": "",
+                        "label": "",
+                        "added_at": 1.0,
+                    }
+                ]
+            }
+        )
+    )
+    first = DurableWatchStore.open(tmp_path).entries(ENGINE)[0]
+    assert first.group_id == "old1"
+    assert DurableWatchStore.open(tmp_path).entries(ENGINE)[0].group_id == "old1"
+
+
+def test_the_api_fans_one_selection_out_and_reports_each_host_on_its_own(
+    controller: Any,
+) -> None:
+    """Four hosts, one act of selection, four independent entries -- and the
+    count each row carries is what lets a panel say where it came from."""
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
+    with client:
+        answer = client.post(
+            "/api/v1/agents/watch",
+            json={"kind": "unit", "name": "nginx", "engine_ids": [ENGINE, "OTHER", "THIRD"]},
+        )
+        assert answer.status_code == 200, answer.text
+        body = answer.json()
+        assert body["stored"] == 3
+        # Answered in the order they were asked for, so a UI can put the
+        # results beside the checkboxes that produced them.
+        assert [host["engine_id"] for host in body["hosts"]] == [ENGINE, "OTHER", "THIRD"]
+        # None of these hosts has an agent, which is not a failure to store.
+        assert all(host["stored"] and not host["delivered"] for host in body["hosts"])
+
+        listed = client.get(f"/api/v1/agents/{ENGINE}/watch").json()["entries"]
+        assert len(listed) == 1
+        assert listed[0]["group_id"] == body["group_id"]
+        assert listed[0]["group_hosts"] == 3
+
+        # And the entry is this host's from here on. Stopping it stops nothing
+        # anywhere else; the other two lists are untouched.
+        assert client.delete(f"/api/v1/agents/{ENGINE}/watch/{listed[0]['id']}").status_code == 200
+        others = client.get("/api/v1/agents/OTHER/watch").json()["entries"]
+        assert len(others) == 1
+        assert others[0]["group_hosts"] == 2
+
+
+def test_one_hosts_refusal_does_not_unwind_the_other_hosts(controller: Any) -> None:
+    """Eight machines took it and the ninth already had it. Undoing the eight
+    would be a worse answer to a duplicate than keeping them."""
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
+    with client:
+        client.post(f"/api/v1/agents/{ENGINE}/watch", json={"kind": "unit", "name": "nginx"})
+
+        body = client.post(
+            "/api/v1/agents/watch",
+            json={"kind": "unit", "name": "nginx", "engine_ids": [ENGINE, "OTHER"]},
+        ).json()
+        assert body["stored"] == 1
+        refused, stored = body["hosts"]
+        assert not refused["stored"]
+        # In words meant for whoever typed it, and about that host alone.
+        assert "already watches" in refused["detail"]
+        assert stored["stored"]
+
+        # The host that refused keeps the entry it already had, and that entry
+        # keeps its own group: it was chosen separately and it stays that way.
+        first = client.get(f"/api/v1/agents/{ENGINE}/watch").json()["entries"][0]
+        assert first["group_id"] != body["group_id"]
+        assert first["group_hosts"] == 1
+
+
+def test_a_fanout_is_bounded_because_one_click_becomes_work_on_every_host(
+    controller: Any,
+) -> None:
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
+    with client:
+        assert (
+            client.post(
+                "/api/v1/agents/watch",
+                json={
+                    "kind": "unit",
+                    "name": "nginx",
+                    "engine_ids": [f"HOST{index}" for index in range(MAX_FANOUT + 1)],
+                },
+            ).status_code
+            == 422
+        )
+        # And a fan-out to nobody is not a request that means anything.
+        assert (
+            client.post(
+                "/api/v1/agents/watch",
+                json={"kind": "unit", "name": "nginx", "engine_ids": []},
+            ).status_code
+            == 422
+        )
+
+
+# --------------------------------------------------------------------------
+# Operating a group: N commands, on the hosts the operator named
+# --------------------------------------------------------------------------
+
+
+def test_the_fleets_watch_lists_are_readable_in_one_answer(controller: Any) -> None:
+    """The operations bar cannot ask a host's own list which *other* machines
+    hold this selection -- they are in other partitions -- so there is one read
+    that spans them."""
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
+    with client:
+        client.post(
+            "/api/v1/agents/watch",
+            json={"kind": "unit", "name": "nginx", "engine_ids": [ENGINE, "OTHER"]},
+        )
+        every = client.get("/api/v1/agents/watch").json()
+        assert {entry["engine_id"] for entry in every} == {ENGINE, "OTHER"}
+        assert len({entry["group_id"] for entry in every}) == 1
+        # The URN is on every row, which is what lets the bar key the index by
+        # the thing the canvas actually selects.
+        assert all(entry["urn"] for entry in every)
+
+
+def test_a_group_command_on_a_read_only_controller_is_one_refusal_not_eight(
+    controller: Any,
+) -> None:
+    """Read-only is a fact about this Controller rather than about any host, so
+    it gets the answer a single command gets -- not a body of identical rows
+    that a client has to notice are all the same."""
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
+    with client:
+        body = client.post(
+            "/api/v1/agents/watch",
+            json={"kind": "unit", "name": "nginx", "engine_ids": [ENGINE, "OTHER"]},
+        ).json()
+
+        refused = client.post(
+            "/api/v1/commands/group",
+            json={"kind": "restart", "group_id": body["group_id"], "engine_ids": [ENGINE, "OTHER"]},
+        )
+        assert refused.status_code == 403
+        assert refused.json()["detail"]["reason"] == "read_only"
+
+
+def test_a_host_that_no_longer_holds_the_entry_is_named_rather_than_skipped(
+    controller: Any,
+) -> None:
+    """Removed since the operator's screen was drawn, or never there. A host
+    that silently vanishes from the answer is indistinguishable from one that
+    was never asked -- and the operator is entitled to know their `all nine`
+    reached eight."""
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
+    with client:
+        body = client.post(
+            "/api/v1/agents/watch",
+            json={"kind": "unit", "name": "nginx", "engine_ids": [ENGINE]},
+        ).json()
+
+        answer = client.post(
+            "/api/v1/commands/group",
+            json={
+                "kind": "restart",
+                "group_id": body["group_id"],
+                # The second host is in the request and not in the group.
+                "engine_ids": [ENGINE, "NEVERWATCHED"],
+            },
+        )
+        # Not all read-only: one host refused for a different reason entirely,
+        # so the per-host answer is the only honest one.
+        assert answer.status_code == 200, answer.text
+        rows = {host["engine_id"]: host for host in answer.json()["hosts"]}
+        assert rows["NEVERWATCHED"]["status"] == "unknown_target"
+        assert "no longer watches" in rows["NEVERWATCHED"]["detail"]
+        assert rows[ENGINE]["status"] == "read_only"
+        # A host that never ran makes the whole thing a failure: the operator
+        # asked for two machines and reached fewer.
+        assert answer.json()["status"] == "failed"
+
+
+def test_a_group_command_is_bounded_by_the_command_limit_not_the_watch_one(
+    controller: Any,
+) -> None:
+    """`MAX_FANOUT` governs how much intent may be stored; this governs how
+    many machines one click may restart at once."""
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
+    with client:
+        assert (
+            client.post(
+                "/api/v1/commands/group",
+                json={
+                    "kind": "restart",
+                    "group_id": "g1",
+                    "engine_ids": [f"HOST{index}" for index in range(MAX_TARGETS + 1)],
+                },
+            ).status_code
+            == 422
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_group_command_reaches_every_host_and_one_failing_spares_the_rest(
+    tmp_path: Any,
+) -> None:
+    """The whole feature in one test: two machines, one selection, one press,
+    two independent commands — and the machine that fails does not take the
+    other with it.
+
+    The route is called directly rather than over `TestClient` because both
+    agents have to be answered *while* the request is in flight, which needs
+    them on the same event loop as the dispatch. What `TestClient` would add
+    is FastAPI's serialization, and the four tests above already cover that.
+    """
+    from tests.conftest import make_controller
+
+    from bystack.api.routes.commands import run_group_command
+    from bystack.api.schemas import GroupCommandIn
+
+    class Answering(FakeSession):
+        """A `FakeSession` that says when a command has reached it.
+
+        The dispatch is sequential — the route awaits one host before it asks
+        the next — so the answering task cannot know when to look without
+        this. Polling for it would work and would also be a busy loop in a
+        test suite that runs on every commit.
+        """
+
+        def __init__(self) -> None:
+            super().__init__(capabilities=("commands", "units"))
+            self.arrived = asyncio.Event()
+
+        async def send(self, envelope: object) -> None:
+            await super().send(envelope)
+            if isinstance(envelope, wire.Envelope) and envelope.HasField("command"):
+                self.arrived.set()
+
+    controller = make_controller(tmp_path, read_only=False)
+    context = controller.context
+    other = "BBBBCCCCDDDD"
+
+    sessions: dict[str, Answering] = {}
+    for engine_id in (ENGINE, other):
+        await context.watchlist.add(
+            WatchEntry(
+                id="",
+                engine_id=engine_id,
+                kind=WatchKind.UNIT,
+                group_id="shared",
+                name="nginx.service",
+            )
+        )
+        provider = context.collector.agent_provider(engine_id, create=True)
+        assert provider is not None
+        session = Answering()
+        provider.attach(session)
+        sessions[engine_id] = session
+        await provider.on_frame(hello(engine_id=engine_id))
+        await provider.on_frame(
+            wire.Envelope(
+                sync=wire.Sync(slice=wire.SLICE_UNIT, entities=[unit_entity("nginx.service")])
+            )
+        )
+
+    async def answer() -> None:
+        """The first host restarts the unit; the second refuses it."""
+        for engine_id, ok in ((ENGINE, True), (other, False)):
+            provider = context.collector.agent_provider(engine_id, create=False)
+            assert provider is not None
+            await sessions[engine_id].arrived.wait()
+            command = sessions[engine_id].last_command()
+            assert command.target_kind == "unit"
+            assert command.target_id == "nginx.service"
+            provider._channel.resolve(
+                wire.CommandResult(
+                    command_id=command.command_id,
+                    ok=ok,
+                    detail="" if ok else "Unit nginx.service not loaded",
+                )
+            )
+
+    task = asyncio.create_task(answer())
+    result = await run_group_command(
+        GroupCommandIn(kind=CommandKind.RESTART, group_id="shared", engine_ids=[ENGINE, other]),
+        context.commands,
+        context,
+    )
+    await task
+
+    rows = {host.engine_id: host for host in result.hosts}
+    assert set(rows) == {ENGINE, other}
+    # Both were dispatched to. Each carries its own complete per-target answer,
+    # because this is N commands rather than one command with N targets.
+    assert all(row.ran and row.result is not None for row in rows.values())
+    assert rows[ENGINE].status == str(CommandStatus.SUCCEEDED)
+    assert rows[other].status == str(CommandStatus.FAILED)
+    # Worst-wins across hosts, the same rule that applies across the targets
+    # within one: eight machines restarted and one not is not a success.
+    assert result.status == str(CommandStatus.FAILED)
