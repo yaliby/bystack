@@ -141,7 +141,9 @@ def check() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="fail if regeneration would change anything")
+    parser.add_argument(
+        "--check", action="store_true", help="fail if regeneration would change anything"
+    )
     args = parser.parse_args(argv)
 
     if not SOURCES:

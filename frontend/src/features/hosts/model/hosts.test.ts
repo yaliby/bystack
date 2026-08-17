@@ -7,7 +7,6 @@ import type {
 } from '../../../api/types';
 import {
   RENEWAL_WINDOW_MS,
-  behindCount,
   certificateNote,
   describeRow,
   describeSince,
@@ -18,6 +17,7 @@ import {
   pendingCount,
   revokeWarning,
   sameFleet,
+  skewCount,
   tokenLife,
   versionSkew,
 } from './hosts';
@@ -548,6 +548,14 @@ describe('version skew', () => {
     expect(versionSkew(agent('a', { agent_version: '0.2.0-rc1' }), '0.2.0')).toBe(true);
   });
 
+  it('marks a host running something newer, and takes no view on the direction', () => {
+    // The supported order is Controller first (INSTALL.md § Upgrading), but a
+    // host upgraded ahead of it is reachable and is genuinely off the
+    // Controller's version. It belongs in the count; what the panel must not
+    // do is call it "older", which is why nothing here returns a direction.
+    expect(versionSkew(agent('a', { agent_version: '0.4.0' }), '0.3.0')).toBe(true);
+  });
+
   it('counts the hosts the upgrade command is for', () => {
     // The panel shows that command once rather than on every card, so the
     // count is what decides whether to show it at all.
@@ -556,13 +564,16 @@ describe('version skew', () => {
         agent('a', { agent_version: '0.1.0' }),
         agent('b', { agent_version: '0.1.0' }),
         agent('c', { agent_version: '0.2.0' }),
+        agent('d', { agent_version: '0.3.0' }),
       ],
       [],
       noNames,
       NOW,
     );
 
-    expect(behindCount(rows, '0.2.0')).toBe(2);
+    // Three of four: two behind, one ahead, one current. The notice is for
+    // every host that is not on this Controller's version.
+    expect(skewCount(rows, '0.2.0')).toBe(3);
   });
 
   it('counts nothing while the Controller version is unknown', () => {
@@ -571,6 +582,6 @@ describe('version skew', () => {
     // current.
     const rows = fleetRows([agent('a', { agent_version: '0.1.0' })], [], noNames, NOW);
 
-    expect(behindCount(rows, null)).toBe(0);
+    expect(skewCount(rows, null)).toBe(0);
   });
 });

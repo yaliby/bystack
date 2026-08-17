@@ -79,6 +79,17 @@ persisted is how somebody restarts nine machines meaning to restart one.
   and the wire beside it said `:443 → 443`. The inspector now uses the same
   words as the map it is describing.
 
+- **The fleet panel called a newer agent an older one.** A host running ahead
+  of the Controller — upgraded before it, which the supported order does not
+  ask for but nothing prevents — was counted with the hosts behind it and then
+  described as "running an older agent". The comparison behind that notice
+  never took a view on which number was larger; only the name of the count and
+  the sentence it fed did. Both cases want the same command anyway, since
+  `install-agent.sh` installs the version this Controller is composed from in
+  whichever direction that moves the host. The notice now says those hosts are
+  not on the Controller's version and names the version, and the card sets the
+  two numbers beside each other with no adjective in between.
+
 ---
 
 ## v0.2.0

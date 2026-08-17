@@ -20,12 +20,12 @@ import type { JoinToken, ProviderHealth } from '../../../api/types';
 import {
   LINK_LABEL,
   STATUS_LABEL,
-  behindCount,
   describeRow,
   describeSince,
   fleetRows,
   localAgentNotice,
   revokeWarning,
+  skewCount,
   versionSkew,
   type HostRow,
 } from '../model/hosts';
@@ -69,7 +69,7 @@ export function HostsPanel({
   const rows = fleetRows(fleet.agents, providers, resolveHostName, now);
   const listenerOff = fleet.terms !== null && !fleet.terms.enabled;
   const localNotice = localAgentNotice(fleet.terms, rows);
-  const behind = behindCount(rows, controllerVersion);
+  const offVersion = skewCount(rows, controllerVersion);
 
   const addHost = async () => {
     setMinting(true);
@@ -130,7 +130,7 @@ export function HostsPanel({
         </p>
       ) : null}
 
-      {/* Once, above the list, and not on each card that is behind: the command
+      {/* Once, above the list, and not on each card that differs: the command
           is the same on every one of them, and a constant repeated per row is
           how four hosts become four copies of one sentence. The cards say
           *which*; this says what to do about it.
@@ -140,9 +140,9 @@ export function HostsPanel({
           the Controller changes this line without anyone editing it — and it
           has no token, which is the part an operator would get wrong from
           memory. */}
-      {behind > 0 && fleet.terms ? (
+      {offVersion > 0 && fleet.terms ? (
         <UpgradeNotice
-          count={behind}
+          count={offVersion}
           controllerVersion={controllerVersion}
           command={fleet.terms.upgrade}
         />
@@ -189,7 +189,15 @@ export function HostsPanel({
 }
 
 /**
- * Hosts running an older agent than the Controller, and the line that fixes it.
+ * Hosts not on the Controller's version, and the line that fixes it.
+ *
+ * *Not* on it, rather than behind it: `versionSkew` compares strings and takes
+ * no view on which number is larger, so this set contains the host somebody
+ * upgraded before the Controller as readily as the four they have not got to.
+ * Both want the same command — `install-agent.sh` installs the version this
+ * Controller is composed from, in whichever direction that moves the host —
+ * and calling a newer agent "older" is the kind of small lie an operator
+ * notices and then stops trusting the rest of the panel over.
  *
  * A report and not an alarm. A mixed-version fleet is an ordinary operating
  * state under ADR-0008 — nothing here is broken, and every one of those hosts
@@ -214,6 +222,14 @@ function UpgradeNotice({
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
 
+  // Same two seconds as `AddHostDialog`. A button that says "Copied" until the
+  // panel closes stops being an answer about the click that just happened.
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2_000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(command);
@@ -227,8 +243,8 @@ function UpgradeNotice({
   return (
     <div className="hosts__upgrade">
       <p>
-        {count === 1 ? '1 host is' : `${count} hosts are`} running an older agent. This
-        Controller is {controllerVersion}. Run this on each of them, as root:
+        {count === 1 ? '1 host is' : `${count} hosts are`} not on this Controller's
+        version, which is {controllerVersion}. Run this on each of them, as root:
       </p>
       <div className="token">
         <input
@@ -316,14 +332,18 @@ function HostCard({
         {versionSkew(agent, controllerVersion) ? (
           /* A report, not a fault. A mixed-version fleet is an ordinary
              operating state under ADR-0008, so this is styled as a note and
-             carries no button: this card says *which* host is behind, and the
+             carries no button: this card says *which* host differs, and the
              command that fixes it is named once at the top of the panel
-             (`UpgradeNotice`) because it is the same on all of them. */
+             (`UpgradeNotice`) because it is the same on all of them.
+
+             Both numbers, side by side, and no adjective between them. Which
+             one is newer is a question `versionSkew` deliberately does not
+             answer, and the pair reads correctly either way. */
           <>
             <span className="brand__sep">·</span>
             <span
               className="host__skew"
-              title={`This Controller is ${controllerVersion}. The command to upgrade this host is at the top of this panel.`}
+              title={`This Controller is ${controllerVersion}. The command that puts this host on it is at the top of this panel.`}
             >
               Controller is {controllerVersion}
             </span>
