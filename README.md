@@ -17,7 +17,7 @@ logs and alerting stay with the systems that already do them well.
 
 ---
 
-## Status: v0.2 — the agent path works end to end
+## Status: v0.3 — the agent path works end to end
 
 ByStack is a **central Controller plus a lightweight Agent on each managed
 host**. The Agent dials out, so managed hosts open no port and publish no
@@ -44,13 +44,14 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 | Incremental deltas over WebSocket | | | |
 | Interactive topology canvas | | | |
 | Container / service / stack operations | | | |
+| Operating a multi-host selection from one button, one audit entry per host | | | |
 | Unit and process operations, through the same six verbs | | | |
 | Agent wire protocol + Controller ingest | | | |
 | mTLS, join-token enrollment, auto-renewal | | | |
 | The agent — Rust, 1.97 MiB static musl, 3.9 MiB RSS | | | |
 | Zero-config startup — a bundled local agent | | | |
 | Hosts and the operations timeline, on the map | | | |
-| Watched systemd units and processes, selected per host | | | |
+| Watched systemd units and processes, selected per host — or on many hosts in one act of selection | | | |
 | Container logs — one-shot **and live** | | | |
 | Crash-loop depth (`RestartCount`) | | | |
 | A durable operations log | | | |
