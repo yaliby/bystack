@@ -128,6 +128,7 @@ body {
 .token-clock,
 .row__value--mono,
 .logs,
+.hosts__rollout-host,
 .token__command {
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
@@ -1807,6 +1808,61 @@ body {
   margin: 9px 0 0;
   color: var(--ink-muted);
   font-size: 11px;
+}
+
+/* A run that stopped on a host. The one thing in this panel that should be
+   hard to miss: everything else here reports a state, and this reports that
+   the fleet is part-way through a change somebody has to finish. A stopped run
+   -- an operator pressed the button -- deliberately does not get this. */
+.hosts__upgrade--failed {
+  border-color: color-mix(in srgb, var(--critical) 45%, var(--hairline));
+  background: color-mix(in srgb, var(--critical) 7%, var(--well));
+}
+
+/* The per-host rows of a rollout. A list rather than a bar, because there is
+   no percentage to draw: the fleet's progress is the version chip on the cards
+   below, and a second model of it would disagree exactly when a run goes
+   wrong. */
+.hosts__rollout {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hosts__rollout-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
+.hosts__rollout-host {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  color: var(--ink-secondary);
+}
+
+.hosts__rollout-state {
+  text-transform: lowercase;
+}
+
+.hosts__rollout-row.is-confirmed .hosts__rollout-state { color: var(--good); }
+.hosts__rollout-row.is-refused .hosts__rollout-state,
+.hosts__rollout-row.is-failed .hosts__rollout-state { color: var(--critical); }
+.hosts__rollout-row.is-skipped .hosts__rollout-state { color: var(--ink-muted); }
+.hosts__rollout-row.is-in-progress .hosts__rollout-state { color: var(--accent); }
+
+/* The reason a host gave, in its own words. On its own line because these are
+   sentences rather than labels -- "not signed by a key I hold" is the whole
+   content of that row. */
+.hosts__rollout-why {
+  flex-basis: 100%;
+  color: var(--ink-muted);
+  line-height: 1.5;
 }
 
 /* Pending is the row an operator came here to find, so it is the one row that

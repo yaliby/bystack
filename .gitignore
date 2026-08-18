@@ -30,3 +30,10 @@ state/
 
 # Browser profile used by the local screenshot lab — cookies, history, locks.
 .demo/lab/.chrome-profile/
+
+# The private half of a release signing key, if somebody puts one here by
+# mistake. `agent/keys/*.pub` is meant to be committed and is what every agent
+# is built to trust; the key that signs is meant to be on one machine and
+# nowhere else (ADR-0017), least of all in a repository.
+agent/keys/*.key
+agent/keys/*.pem

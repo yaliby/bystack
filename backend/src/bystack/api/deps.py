@@ -21,6 +21,7 @@ from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
 from bystack.runtime.localagent import LocalAgent
 from bystack.runtime.trust import AgentTrust
+from bystack.runtime.upgrade import UpgradeService
 
 
 @dataclass(slots=True)
@@ -48,6 +49,16 @@ class AppContext:
     operator selected (ADR-0001's first durable category). Reached from the
     API because editing it *is* the feature, and from the agent listener
     because a connection is where a host is told.
+    """
+
+    upgrades: UpgradeService
+    """Signed agent releases, and the staged rollout that distributes them.
+
+    Reached from the API because starting a rollout and reading its progress
+    are both operator actions on the browser's side of the split. It is not
+    reached from the agent listener at all: an agent never asks to be upgraded,
+    it is offered a release over the stream it already holds and decides for
+    itself (ADR-0017).
     """
 
     local_agent: LocalAgent
@@ -85,9 +96,14 @@ def get_trust(context: Annotated[AppContext, Depends(get_context)]) -> AgentTrus
     return context.trust
 
 
+def get_upgrades(context: Annotated[AppContext, Depends(get_context)]) -> UpgradeService:
+    return context.upgrades
+
+
 Context = Annotated[AppContext, Depends(get_context)]
 Store = Annotated[GraphStore, Depends(get_store)]
 Bus = Annotated[EventBus, Depends(get_bus)]
 Collectors = Annotated[Collector, Depends(get_collector)]
 Commands = Annotated[CommandService, Depends(get_commands)]
 Trust = Annotated[AgentTrust, Depends(get_trust)]
+Upgrades = Annotated[UpgradeService, Depends(get_upgrades)]

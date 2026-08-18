@@ -18,7 +18,7 @@ from bystack import __version__
 from bystack.api.deps import AppContext
 from bystack.api.routes import agents as agent_routes
 from bystack.api.routes import commands as commands_routes
-from bystack.api.routes import enrollment, graph, health, stream, watch
+from bystack.api.routes import enrollment, graph, health, stream, upgrades, watch
 from bystack.api.web import mount_web
 from bystack.config import Settings
 from bystack.core.graph.store import InMemoryGraphStore
@@ -27,12 +27,14 @@ from bystack.core.ports.watch import WatchStore
 from bystack.infra.audit.durable import DurableAuditLog
 from bystack.infra.audit.memory import InMemoryAuditLog
 from bystack.infra.eventbus.memory import InMemoryEventBus
+from bystack.infra.releases import ReleaseStore
 from bystack.infra.watch.durable import DurableWatchStore
 from bystack.infra.watch.memory import InMemoryWatchStore
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
 from bystack.runtime.localagent import LocalAgent
 from bystack.runtime.trust import AgentTrust
+from bystack.runtime.upgrade import UpgradeService
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +75,14 @@ def build_context(settings: Settings) -> AppContext:
         # could not spawn one can say why rather than showing an empty fleet.
         local_agent=LocalAgent(settings),
         watchlist=_watchlist(settings),
+        # The same lookup closure the command service takes, for the same
+        # reason: a rollout enumerates providers and does nothing else with
+        # the collector.
+        upgrades=UpgradeService(
+            ReleaseStore(settings.agents.releases_path),
+            lambda: collector.providers,
+            read_only=settings.read_only,
+        ),
     )
 
 
@@ -139,6 +149,11 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
         try:
             yield
         finally:
+            # Before the collector: a rollout in flight is holding a provider
+            # and waiting on a host, and stopping the providers underneath it
+            # would leave it waiting out a deadline for an answer that cannot
+            # arrive.
+            await context.upgrades.aclose()
             await context.collector.stop()
             await context.bus.aclose()
 
@@ -167,6 +182,9 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
     # The agent's side is `create_agent_app` and shares nothing but the
     # context.
     app.include_router(enrollment.router, prefix=API_PREFIX)
+    # Before the routes that end in a path parameter, so `/agents/upgrades`
+    # cannot be matched as an engine id by something registered earlier.
+    app.include_router(upgrades.router, prefix=API_PREFIX)
     # Also under `/agents`, and a separate module on purpose: enrollment
     # decides *whether* a host is managed, and this decides *what* is watched
     # on one that already is. They share a path prefix and nothing else.

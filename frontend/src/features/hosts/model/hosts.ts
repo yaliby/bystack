@@ -206,9 +206,11 @@ export function certificateNote(agent: EnrolledAgent, now: number): string | nul
  * means the health poll has not answered yet, which is the same situation.
  *
  * A mixed-version fleet is an ordinary operating state (ADR-0008), so this is
- * a *report*. It is not styled as a fault and there is no button beside it:
- * upgrading is `install-agent.sh` on that host (ADR-0015), and the command is
- * named once for the whole panel — see `skewCount`.
+ * a *report* and not a fault, and there is no button on the card. What to do
+ * about it is named once for the whole panel and depends on the Controller
+ * rather than on the host: one holding a signed release pushes it (ADR-0017),
+ * one holding nothing hands out the installer line (ADR-0015). See
+ * `model/upgrade.ts`.
  */
 export function versionSkew(agent: EnrolledAgent, controller: string | null): boolean {
   return Boolean(controller) && Boolean(agent.agent_version) &&

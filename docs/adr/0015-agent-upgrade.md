@@ -1,6 +1,11 @@
 # ADR-0015 — Agent upgrade: the Controller reports skew, the host applies it
 
-**Status:** Accepted
+**Status:** **Superseded by [ADR-0017](0017-agent-upgrade-signed-push.md)** — on
+one point. The blocking cost named below, `ReadWritePaths=/usr/local/bin` on a
+network-facing daemon, assumed the process that *receives* a binary is the
+process that *installs* it. Split those and the cost is not paid at all. The
+rest of this record still holds: shape 1 stays rejected for the reason given,
+and the reporting half described under Decision is built and unchanged.
 **Depends on:** [ADR-0008](0008-controller-agent-topology.md), [ADR-0011](0011-agent-trust-and-enrollment.md)
 **Closes:** the last clause of step 7 in [`../MIGRATION.md`](../MIGRATION.md) §6
 

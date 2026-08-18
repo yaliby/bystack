@@ -287,6 +287,70 @@ export interface LocalAgentStatus {
   readonly detail: string;
 }
 
+/**
+ * A signed agent release this Controller can hand out (ADR-0017).
+ *
+ * The Controller holds no signing key and cannot make one of these. It picks
+ * the artifact matching each host and sends it; the host decides whether to
+ * run it, against a key compiled into the agent. So this is a *distribution*
+ * list, not an authority — which is why nothing in the UI presents it as
+ * "trusted" anything.
+ */
+export interface AgentRelease {
+  readonly version: string;
+  readonly arch: string;
+  readonly sha256: string;
+  readonly released_at: number;
+  readonly size: number;
+}
+
+/** What can be pushed, and who would take it. */
+export interface AgentReleases {
+  /** Where the Controller looks. Named because the empty case is the common one. */
+  readonly directory: string;
+  readonly releases: readonly AgentRelease[];
+  /** Hosts that could be sent a release right now. */
+  readonly upgradable: readonly string[];
+  /**
+   * Connected hosts that cannot take one.
+   *
+   * An agent from before this feature, or one built with no signing keys.
+   * Named rather than left out of the count silently: a rollout steps over
+   * these, and an operator who cannot see which they are has no way to know
+   * why four machines were left behind.
+   */
+  readonly stale: readonly string[];
+}
+
+/** What one host did with one release. */
+export interface RolloutResult {
+  readonly engine_id: string;
+  /** `confirmed`, `refused`, `failed` or `skipped`. */
+  readonly state: string;
+  readonly reason: string | null;
+  readonly version: string;
+}
+
+/**
+ * A staged rollout, running or finished.
+ *
+ * One host at a time, confirmed by that host's next `Hello`, and a failure
+ * stops the run rather than completing it. There is no progress model here
+ * beyond `current`: the version per host is already on `GET /agents` and
+ * already drawn, so a run's progress is the fleet's own state changing.
+ */
+export interface Rollout {
+  readonly version: string;
+  /** `running`, `finished`, `stopped` (by an operator) or `failed` (by a host). */
+  readonly state: string;
+  readonly planned: readonly string[];
+  readonly current: string | null;
+  readonly detail: string | null;
+  readonly started_at: number;
+  readonly finished_at: number;
+  readonly results: readonly RolloutResult[];
+}
+
 export interface AuditEntry {
   readonly id: string;
   readonly at: number;

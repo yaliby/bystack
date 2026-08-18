@@ -1,0 +1,66 @@
+# Undo an upgrade that never reached a Controller (ADR-0017).
+#
+# A binary that starts is not an agent that works. A signed, correct,
+# higher-versioned release can still be an agent that connects to nothing -- a
+# protocol regression, a panic on an architecture the release was not tested
+# on, an environment assumption that holds on the maintainer's machine. The
+# host then drops off the map and the only way back is ssh: the exact cost this
+# feature exists to avoid, incurred on every host at once, by one button.
+#
+# So the swap is on probation, and this is what ends it. It runs at boot and,
+# while an upgrade is on probation, once a minute from
+# `bystack-agent-rollback.timer`. On a host that is not upgrading it reads one
+# file that is not there and exits, which is why the timer is not enabled and
+# nothing here ticks on a steady fleet.
+#
+# **A timer rather than `Restart=`, and that is not a preference.**
+# `bystack-agent.service` sets `StartLimitIntervalSec=300` and
+# `StartLimitBurst=5`: a crash-looping agent stops being restarted, which is
+# the behaviour that unit argues for at length and which must not change to
+# accommodate this. A rollback riding on the restart path would either require
+# weakening that or would never run.
+
+[Unit]
+Description=ByStack agent: undo an upgrade that never reached the Controller
+Documentation=https://github.com/yaliby/bystack/blob/main/docs/adr/0017-agent-upgrade-signed-push.md
+
+[Service]
+Type=oneshot
+# Where the agent's evidence is read from. The script defaults to the same
+# path; stating it here is what keeps an operator who moved `StateDirectory=`
+# on the agent's unit from having a rollback that looks for the wrong file.
+Environment=BYSTACK_STATE_DIR=/var/lib/bystack-agent
+ExecStart=/usr/local/lib/bystack/agent-rollback.sh
+
+# /var/lib/bystack-agent-update, root-owned: the probation flag the updater
+# wrote, and the record of what was rolled back. The same directory the updater
+# declares, and root's rather than the daemon's for the reason the version
+# floor is not stored in the daemon's either.
+StateDirectory=bystack-agent-update
+
+PrivateNetwork=yes
+ProtectSystem=strict
+# To put the previous binary back. Nothing else on the machine is written.
+ReadWritePaths=/usr/local/bin
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# Reading the agent's evidence means reading inside a 0700 directory owned by
+# another account.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+MemoryMax=64M
+TasksMax=16
+
+# At boot, because a host that reboots during probation must still be covered:
+# the timer is transient by design and does not survive one. The cost of this
+# on a host with nothing in flight is a process that stats one file and exits.
+[Install]
+WantedBy=multi-user.target

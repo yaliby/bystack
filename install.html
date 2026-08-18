@@ -324,7 +324,7 @@ docker compose up -d --build</pre>
       <span data-lang="en">It looks like this — <b>don't copy this one</b>, it's an example. The one in the dashboard carries your address, your token, and the version your Controller is actually running:</span>
     </p>
     <div class="code" data-lang="both">
-      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443 --token bys_&lt;your-token&gt;</pre>
     </div>
     <p>
@@ -402,7 +402,7 @@ docker compose up -d --build</pre>
       <span data-lang="en">Once the Controller is upgraded, the <b>Hosts</b> panel names the servers that are behind and shows the exact line to run (so does <code class="inline">bystack-ctl hosts</code>). It is the command that installed the agent, with the new tag in the URL and <b>no <code>--token</code></b>:</span>
     </p>
     <div class="code" data-lang="both">
-      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443</pre>
     </div>
 
@@ -458,7 +458,7 @@ docker compose up -d --build</pre>
     <p><span data-lang="he">מריצים על אותו שרת — אותו סקריפט שהתקין, עם דגל אחד ובלי כתובת ובלי טוקן:</span><span data-lang="en">Run this on that server — the same script that installed it, with one flag and neither an address nor a token:</span></p>
     <div class="code" data-lang="both">
       <button class="copy" onclick="copyCode(this)">Copy</button>
-      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
   | sudo sh -s -- --uninstall</pre>
     </div>
     <p>

@@ -1,0 +1,13 @@
+# The key ByStack releases are signed with, from v0.4.0 on.
+#
+# Compiled into every agent built from this checkout (`agent/build.rs`) and the
+# only thing that decides whether a binary pushed by the Controller is worth
+# running (ADR-0017). The private half was minted by `scripts/sign-agent.py
+# keygen`, lives on the machine that makes releases, and is not in this
+# repository, on the Controller, or in CI.
+#
+# Retiring this key is two releases, not a config change: see the README beside
+# this file. Do not delete a key here without shipping the release that stops
+# needing it -- an agent only trusts the set the build it is *already running*
+# was compiled with.
+1727b210a3523f6ff3f3040aa9df45abdf49ffc37026f34fc80743eeb4cf0ef3

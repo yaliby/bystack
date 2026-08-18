@@ -12,7 +12,13 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import type { EnrolledAgent, EnrollmentTerms, JoinToken } from '../../../api/types';
+import type {
+  AgentReleases,
+  EnrolledAgent,
+  EnrollmentTerms,
+  JoinToken,
+  Rollout,
+} from '../../../api/types';
 import { isMockMode } from '../../../mock/demoMode';
 import { demoAgents, demoTerms } from '../../../mock/demoWatch';
 import { sameFleet, sameTerms } from './hosts';
@@ -50,6 +56,24 @@ export interface Fleet {
    * reason from three seconds after startup for as long as the tab was open.
    */
   readonly terms: EnrollmentTerms | null;
+  /**
+   * Signed releases this Controller can push, and who could take one.
+   *
+   * `null` until fetched, which the panel reads as "make no claim": offering
+   * an upgrade button before the answer arrives would offer one on a
+   * Controller that holds nothing, and the fallback — run the installer on
+   * each host — is the *correct* instruction in that case rather than a
+   * degraded one.
+   */
+  readonly releases: AgentReleases | null;
+  /** The current or most recent rollout. `null` until one has been started. */
+  readonly rollout: Rollout | null;
+  /** Start one. Returns the reason it could not, or `null` if it began. */
+  readonly upgrade: (version?: string) => Promise<string | null>;
+  /** Stop after the current host. Never mid-transfer. */
+  readonly stopUpgrade: () => Promise<void>;
+  /** Forget a finished run, so the panel goes back to the fleet. */
+  readonly dismissRollout: () => void;
   /** The last failed action, in the Controller's own words where it gave any. */
   readonly error: string | null;
   /** The engine id of an action in flight, so one row can be busy without the rest. */
@@ -78,6 +102,9 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
   const [terms, setTerms] = useState<EnrollmentTerms | null>(() =>
     isMockMode() ? demoTerms() : null,
   );
+  const [releases, setReleases] = useState<AgentReleases | null>(null);
+  const [rollout, setRollout] = useState<Rollout | null>(null);
+  const [dismissed, setDismissed] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // Bumped by an action to re-poll at once rather than waiting out the
@@ -85,13 +112,22 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
   // seconds reads as a click that missed.
   const [nonce, setNonce] = useState(0);
 
+  //: Whether a rollout is in flight. Read here rather than inside the effect
+  //: because it is what decides the cadence, and an effect that read it from
+  //: state without depending on it would keep the slow one for the whole run.
+  const running = rollout?.state === 'running';
+
   useEffect(() => {
     if (isMockMode()) return;
 
     let disposed = false;
     let timer: number | undefined;
     const inFlight = new Set<AbortController>();
-    const interval = attentive ? ATTENTIVE_INTERVAL_MS : BACKGROUND_INTERVAL_MS;
+    // A run in flight is watched at the attentive cadence whatever the panel
+    // is doing, because it is the one thing here that changes on its own and
+    // the operator who started it may have closed the panel to look at the
+    // map. Four seconds against a rollout measured in minutes is cheap.
+    const interval = attentive || running ? ATTENTIVE_INTERVAL_MS : BACKGROUND_INTERVAL_MS;
 
     const poll = async () => {
       const controller = new AbortController();
@@ -115,6 +151,24 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
           const answer = (await termsResponse.json()) as EnrollmentTerms;
           setTerms((previous) => (sameTerms(previous, answer) ? previous : answer));
         }
+
+        // Fetched alongside rather than on their own timer. A rollout moves
+        // the version on each card, so the two answers have to arrive close
+        // together or the panel spends a poll interval showing a run that has
+        // finished above a fleet that has not caught up.
+        const [held, run] = await Promise.all([
+          fetch(new URL('/api/v1/agents/releases', baseUrl), { signal: controller.signal }),
+          fetch(new URL('/api/v1/agents/upgrades', baseUrl), { signal: controller.signal }),
+        ]);
+        if (disposed) return;
+        if (held.ok) {
+          const answer = (await held.json()) as AgentReleases;
+          setReleases((previous) => (sameReleases(previous, answer) ? previous : answer));
+        }
+        if (run.ok) {
+          const answer = (await run.json()) as Rollout | null;
+          setRollout((previous) => (sameRollout(previous, answer) ? previous : answer));
+        }
       } catch {
         if (!disposed && !controller.signal.aborted) setUnreachable(true);
       } finally {
@@ -130,7 +184,7 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
       window.clearTimeout(timer);
       for (const controller of inFlight) controller.abort();
     };
-  }, [baseUrl, attentive, nonce]);
+  }, [baseUrl, attentive, running, nonce]);
 
   const act = useCallback(
     async (engineId: string, verb: 'approve' | 'revoke') => {
@@ -205,9 +259,106 @@ export function useFleet(baseUrl: string, attentive: boolean): Fleet {
     }
   }, [baseUrl]);
 
+  const upgrade = useCallback(
+    async (version?: string): Promise<string | null> => {
+      if (isMockMode()) return 'The demo has no fleet to upgrade.';
+      setError(null);
+      try {
+        const response = await fetch(new URL('/api/v1/agents/upgrades', baseUrl), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ version: version ?? '' }),
+        });
+        if (!response.ok) {
+          // Returned rather than pushed into `error`, because every reason a
+          // rollout cannot start is a sentence about the fleet — read-only, a
+          // run already going, nothing signed to send — and it belongs beside
+          // the button that was pressed rather than in the panel's error slot
+          // with the failed approvals.
+          return await detailOf(response, 'The Controller would not start a rollout.');
+        }
+        setRollout((await response.json()) as Rollout);
+        setDismissed(0);
+        return null;
+      } catch {
+        return 'Could not reach the Controller.';
+      }
+    },
+    [baseUrl],
+  );
+
+  const stopUpgrade = useCallback(async () => {
+    if (isMockMode()) return;
+    try {
+      const response = await fetch(new URL('/api/v1/agents/upgrades/cancel', baseUrl), {
+        method: 'POST',
+      });
+      if (response.ok) setRollout((await response.json()) as Rollout);
+    } catch {
+      setError('Could not reach the Controller.');
+    }
+  }, [baseUrl]);
+
+  // Dismissal is remembered by *when the run started*, not by a boolean. A
+  // boolean would hide the next run too, and the next run is the one somebody
+  // pressed the button for.
+  const dismissRollout = useCallback(() => setDismissed(rollout?.started_at ?? 0), [rollout]);
+
   const dismissError = useCallback(() => setError(null), []);
 
-  return { agents, loaded, unreachable, terms, error, busy, approve, revoke, mint, dismissError };
+  return {
+    agents,
+    loaded,
+    unreachable,
+    terms,
+    releases,
+    rollout: rollout && rollout.started_at === dismissed ? null : rollout,
+    upgrade,
+    stopUpgrade,
+    dismissRollout,
+    error,
+    busy,
+    approve,
+    revoke,
+    mint,
+    dismissError,
+  };
+}
+
+/**
+ * Whether two release answers say the same thing.
+ *
+ * Same argument as `sameFleet`: this is polled every four seconds and a new
+ * object identity each time would re-render the panel to report that nothing
+ * changed. Compared on what is drawn — the versions held and the two host
+ * counts — rather than field by field.
+ */
+function sameReleases(before: AgentReleases | null, after: AgentReleases): boolean {
+  return (
+    before !== null &&
+    before.directory === after.directory &&
+    before.releases.length === after.releases.length &&
+    before.releases.every((release, index) => release.version === after.releases[index].version) &&
+    before.upgradable.join() === after.upgradable.join() &&
+    before.stale.join() === after.stale.join()
+  );
+}
+
+/**
+ * Whether two rollout answers say the same thing.
+ *
+ * `current` and the result count are the whole of what moves during a run, so
+ * they are what is compared. `started_at` distinguishes one run from the next.
+ */
+function sameRollout(before: Rollout | null, after: Rollout | null): boolean {
+  if (before === null || after === null) return before === after;
+  return (
+    before.started_at === after.started_at &&
+    before.state === after.state &&
+    before.current === after.current &&
+    before.detail === after.detail &&
+    before.results.length === after.results.length
+  );
 }
 
 /** FastAPI's `{"detail": …}`, when there is one worth showing. */

@@ -1,0 +1,24 @@
+# While an upgrade is on probation, and at no other time.
+#
+# **Deliberately not enabled.** It is started by `bystack-agent apply-update`
+# the moment a new binary is in place, and stopped by
+# `bystack-agent-rollback.service` as soon as the probation is resolved either
+# way. A host that is not upgrading has nothing armed, wakes for nothing, and
+# costs nothing -- which is the same promise the agent's process poll keeps by
+# doing nothing on its tick, kept here by not existing.
+#
+# A reboot loses it, and that is covered by the service being enabled at
+# `multi-user.target`: the boot run finds the probation flag and re-arms this.
+
+[Unit]
+Description=ByStack agent: check on an upgrade that is still on probation
+Documentation=https://github.com/yaliby/bystack/blob/main/docs/adr/0017-agent-upgrade-signed-push.md
+
+[Timer]
+# A minute after the install, then every minute. The deadline itself is
+# absolute and lives in the probation file, so this interval decides only how
+# promptly a failure is noticed after it -- not how long a new agent is given.
+OnActiveSec=60
+OnUnitActiveSec=60
+AccuracySec=15s
+Unit=bystack-agent-rollback.service

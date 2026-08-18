@@ -1,0 +1,80 @@
+# Install a staged release. The one unit that may write to /usr/local/bin.
+#
+# Started by `bystack-agent-update.path` and by nothing else. It is the second
+# of the two processes ADR-0017 splits apart, and the split is the entire
+# reason `bystack-agent.service` is unchanged by this feature: the process that
+# *receives* a binary over the network is not the process that *installs* it,
+# so a network-facing daemon never needs write access to a directory of
+# executables that other things run.
+#
+# It trusts nothing it is handed. `apply-update` copies the staged binary and
+# its manifest into the `RuntimeDirectory` below -- root-owned, 0700 -- and
+# performs every check there. Verifying in the agent's staging directory and
+# installing from it would be two reads of a path owned by `bystack-agent`, and
+# a compromised daemon that wins the race between them has bypassed the whole
+# signature chain by a few milliseconds.
+
+[Unit]
+Description=ByStack agent: install a staged upgrade
+Documentation=https://github.com/yaliby/bystack/blob/main/docs/adr/0017-agent-upgrade-signed-push.md
+# Belt and braces with the updater's own first act. Between the path unit
+# firing and this starting, the file may already have been dealt with by a
+# previous run.
+ConditionPathExists=/var/lib/bystack-agent/upgrade/trigger
+# The same argument the agent's own start limit makes. Reaching here five times
+# in five minutes is a trigger file nobody is clearing or an install that
+# cannot succeed, and hammering it hides the journal line that says which.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# No ordering relationship to bystack-agent.service in either direction. The
+# restart at the end of `apply-update` is the whole of the coupling, and it is
+# an ordinary job because this runs in its own cgroup rather than as a child of
+# the service it restarts.
+[Service]
+Type=oneshot
+Environment=BYSTACK_STATE_DIR=/var/lib/bystack-agent
+Environment=BYSTACK_AGENT_BIN=/usr/local/bin/bystack-agent
+# No arguments, and none that could ever come from the wire.
+ExecStart=/usr/local/bin/bystack-agent apply-update
+
+# /run/bystack-agent-updater. Where the copy is verified and installed from.
+RuntimeDirectory=bystack-agent-updater
+RuntimeDirectoryMode=0700
+# /var/lib/bystack-agent-update: the probation flag and what to roll back to.
+# Declared rather than created by hand so systemd owns its lifecycle, and
+# root-owned because this unit is.
+StateDirectory=bystack-agent-update
+
+# -- what it is allowed to do -----------------------------------------------
+#
+# It runs as root, so this list is doing less than the agent's is. What it does
+# do is worth having: this process has no business on the network, and saying
+# so in the unit is what makes that a property rather than a claim about the
+# code.
+PrivateNetwork=yes
+ProtectSystem=strict
+# The one grant this whole design exists to keep out of the daemon's unit.
+ReadWritePaths=/usr/local/bin
+# The agent's staging directory: the trigger and the staged artifact are
+# cleared from here once they are installed.
+ReadWritePaths=/var/lib/bystack-agent
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# Enough to read a 0700 directory owned by the agent's account and to write a
+# root-owned binary. An empty set would leave root unable to read the very
+# thing it was started to install.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_FSETID
+# systemctl and restorecon speak over unix sockets. There is no network here to
+# speak over anyway.
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+MemoryMax=128M
+TasksMax=32

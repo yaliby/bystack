@@ -65,6 +65,10 @@ message Envelope {
     WatchList watch_list = 40;
     InventoryRequest inventory_request = 41;
     InventoryResponse inventory_response = 42;
+
+    UpgradeOffer upgrade_offer = 50;
+    UpgradeChunk upgrade_chunk = 51;
+    UpgradeStatus upgrade_status = 52;
   }
 }
 
@@ -897,4 +901,140 @@ message LogLine {
   // the daemon records. Requested from the daemon rather than stamped here,
   // because the agent's clock is not when the line was written.
   string text = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade (ADR-0017)
+// ---------------------------------------------------------------------------
+//
+// The Controller is a **distribution channel and is not trusted with
+// content**. It holds releases, picks the artifact matching each host's
+// architecture, and sends. It has no signing key, so a Controller in an
+// attacker's hands can withhold an upgrade, send an old one, or send nothing
+// -- and cannot produce a binary any agent will run.
+//
+// What makes a binary worth executing is therefore decided entirely on the
+// host: the signature below is checked against a key compiled into the agent,
+// and the digest of what arrived is checked against the one inside the signed
+// document. Neither answer depends on how the Controller obtained the bytes,
+// which is why fetching them from GitHub Releases, shipping them in the wheel
+// and an operator dropping files in a directory are equivalent here.
+//
+// Gated on the `upgrade` capability in `Hello.capabilities`. An agent built
+// with no keys does not advertise it and cannot be sent one of these frames --
+// which is the same answer as "too old", and is the answer we want: absence,
+// with a diagnosis, rather than a transfer that ends in a refusal after a
+// megabyte has crossed someone's uplink.
+
+// Controller -> Agent: a release is available for this host.
+//
+// Nothing is installed by this frame and nothing is installed by the chunks
+// that follow it. The agent verifies, stages inside the `StateDirectory` it
+// already owns, and writes a trigger file; a `.path` unit starts a `oneshot`
+// with no network which is the only thing in the system that may write to
+// `/usr/local/bin`. The daemon that holds this connection never touches the
+// executable, which is why the agent's own unit is unchanged by this feature.
+message UpgradeOffer {
+  // Correlates the chunks and the status frames. One transfer at a time per
+  // agent; a second offer while one is in flight replaces it, exactly as a
+  // second connection displaces the first.
+  string transfer_id = 1;
+
+  // **The signed document, verbatim.** Not its fields: the bytes.
+  //
+  // `{name, version, arch, sha256, released_at}` in a canonical text form the
+  // agent parses for itself. Carrying the fields as protobuf and signing them
+  // separately would mean the sender chooses the parse -- and protobuf
+  // serialization is not canonical, so the signer and the verifier would be
+  // hashing different bytes for the same message. What is signed is what is
+  // sent and what is read.
+  //
+  // The version is inside it for the reason the whole document is signed
+  // rather than just the digest. A digest alone is a genuinely signed artifact
+  // that the *sender* gets to name a version for: an old release with a known
+  // weakness, announced as new, against an anti-downgrade check comparing a
+  // number the attacker chose. `arch` is the same argument at a smaller scale,
+  // and `name` because a key that ever signs a second artifact must not let
+  // one be presented as the other.
+  bytes manifest = 2;
+
+  // Ed25519 over `manifest`, raw 64 bytes.
+  //
+  // Verified against a **set** of keys compiled into the agent at build time,
+  // not against a file on the host: a key in the daemon's `StateDirectory` is
+  // writable by the process it is supposed to constrain, and anywhere else it
+  // is a file that arrived over the same channel as the binary it verifies. A
+  // set rather than one key is the entire rotation mechanism -- version N
+  // trusts {old, new} and version N+1 trusts {new}, so two ordinary upgrades
+  // retire a key and a leak is answered by a release.
+  bytes signature = 3;
+
+  // What the chunks will add up to. Cross-checked against the bytes actually
+  // received before the digest is computed, so a truncated transfer is named
+  // as one rather than reported as a signature failure.
+  uint64 total_bytes = 4;
+}
+
+// Controller -> Agent: part of the artifact named by an offer.
+//
+// **Chunked, and not for memory.** `dist/` is 2.2 MB for x86_64 against a
+// `MemoryMax=64M`, so a single frame would fit. It is chunked because this
+// socket also carries the live graph, and a multi-megabyte burst on it is a
+// topology map that stops moving for the duration of every upgrade. The
+// offsets also make a dropped connection resumable rather than a transfer
+// that starts again.
+message UpgradeChunk {
+  string transfer_id = 1;
+
+  // Where these bytes belong in the artifact. Carried rather than implied by
+  // arrival order, because the agent resumes from a partial file after a
+  // reconnect and must refuse anything that does not continue it -- an
+  // out-of-order chunk is a bug or an attempt to splice, and both are answered
+  // by refusing the transfer rather than by seeking.
+  uint64 offset = 2;
+
+  bytes data = 3;
+
+  // Set on the last chunk. The agent verifies and stages when it arrives.
+  bool last = 4;
+}
+
+// Agent -> Controller: what happened to a transfer.
+//
+// Sent at least twice for a healthy upgrade -- once accepting the offer, once
+// when the artifact is staged -- and once with a reason for every refusal.
+// The refusals are the point: an agent that simply stopped answering would be
+// indistinguishable from a host that went away, and the operator would be left
+// with a rollout that stalled and no sentence explaining it.
+message UpgradeStatus {
+  string transfer_id = 1;
+
+  // `accepted` | `staged` | `refused` | `failed`.
+  //
+  // A string rather than an enum, for the reason `Command.verb` is one: proto3
+  // decodes an unknown enum value as UNSPECIFIED, and a state a Controller
+  // does not recognise must stay unrecognised rather than become the zero
+  // value of something else.
+  //
+  //   accepted  the manifest verified and the version is higher; send bytes
+  //   staged    written and verified on disk; the trigger file is written and
+  //             this agent is about to be restarted by a process it does not
+  //             control, so the next thing the Controller sees is a
+  //             disconnect and a `Hello` carrying the new version
+  //   refused   this agent will not install it: a bad signature, a version
+  //             that is not higher, the wrong architecture. Not retryable.
+  //   failed    something on this host went wrong: no space, an unwritable
+  //             state directory, a truncated transfer. Worth retrying.
+  string state = 2;
+
+  // Written to be shown to an operator. Populated for every refusal and
+  // failure, and empty otherwise.
+  string reason = 3;
+
+  // How much of this artifact the agent already holds, from a partial
+  // transfer that survived a reconnect. Sent with `accepted`, and the
+  // Controller starts from it: zero means send everything, which is what an
+  // agent with nothing staged reports and what proto3's default gives us for
+  // an agent too old to have the field.
+  uint64 resume_from = 4;
 }

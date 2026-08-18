@@ -394,44 +394,58 @@ could not run on a new server. It now composes a `curl … | sudo sh` over the
 installer, pinned to the Controller's own version, with the direct form kept
 alongside for a host that already has the agent.
 
-### What is left: Controller-driven upgrade
+### Done: Controller-driven upgrade
 
-**Decided and recorded in [ADR-0015](adr/0015-agent-upgrade.md).** The
-reporting half is built: `/healthz` carries the Controller's version, and both
-`bystack-ctl hosts` and the Hosts panel mark the agents that differ. Applying
-an upgrade is `install-agent.sh` on that host, which is idempotent and never
-touches the certificate.
+**Built, to [ADR-0017](adr/0017-agent-upgrade-signed-push.md), which supersedes
+[ADR-0015](adr/0015-agent-upgrade.md).** The Controller pushes a signed release
+down the stream that is already open; the host verifies it against a key
+compiled into the agent, stages it, and a `.path` unit hands it to a `oneshot`
+with no network that installs it and puts the swap on probation. One click is a
+staged rollout — one host, confirmed by its next `Hello`, then the next — and a
+failure stops the run.
 
-Automating it is deliberately not done, and the obvious design does not work:
+Read the ADR before changing any of it. The TOCTOU copy into the updater's own
+`RuntimeDirectory`, the temporary file created *in* `/usr/local/bin` for
+SELinux's sake, and the rollback on a timer rather than on `Restart=` are each
+there because the obvious shorter version is wrong in a way that is invisible
+until a fleet is on it.
 
-**The agent has no root store.** `agent/Cargo.toml` takes rustls's
+**Two things about the state it ships in.**
+
+*The signing key exists, and only its public half is here.*
+`agent/keys/release.pub` and `RELEASE_KEYS_PEM` in `scripts/install-agent.sh`
+are the same key in two encodings, compared by `scripts/check-release-keys.sh`
+in CI because nothing derives one from the other and a mismatch is a host that
+installs fine and then refuses every upgrade for the rest of its life. The
+private half is on the machine that cuts releases and nowhere else — not in
+this repository, not on the Controller, not in CI, where a workflow change
+would sign anything.
+
+Releases are signed by `scripts/release-agent.sh <tag> --attach`, run by hand
+after the release workflow publishes. That split is the decision, not an
+omission: CI builds with no key and nothing to steal, and in the window before
+the signatures are attached the installer falls back to `SHA256SUMS` and says
+so, while the Controller declines to push a release it has no signature for.
+
+A checkout with `agent/keys/` emptied still builds an agent that trusts nobody
+and is upgraded by running the installer on it, which is what a fork gets and
+is the honest behaviour for a build that holds no keys.
+
+*`install-agent.sh` remains load-bearing.* It stops being the **routine** path
+rather than stopping being a path: a host running an agent from before this
+feature has no updater unit to trigger, so the transition to push-upgrade is one
+last run of the script per host. Both the CLI and the Hosts panel count those
+hosts separately and print the command for them, because a rollout steps over
+them — and an operator who cannot see which four machines were skipped reads
+the finished run as covering everything.
+
+The one thing ADR-0015 left standing and ADR-0017 does not reopen: **the agent
+still has no root store and no HTTP client.** `agent/Cargo.toml` takes rustls's
 underscore-prefixed `__rustls-tls` feature precisely to avoid the public CA
-sets the two ordinary spellings bring, because the agent trusts exactly one
-CA — the Controller's — and a public CA that mis-issues for the Controller's
-hostname must not be a way in. So an agent cannot fetch a release from GitHub
-without acquiring the trust surface it was built to refuse, plus the binary
-size that comes with it.
-
-The shape that fits ADR-0008 is the Controller pushing the binary down the
-stream that is already open and already mutually authenticated. That needs:
-
-- a wire message and a capability to gate it on, so an older agent refuses
-  with a diagnosis rather than timing out (the rule in §7 below);
-- a Controller that holds binaries for architectures other than its own —
-  the wheel carries exactly one, on purpose;
-- an agent that can replace its own executable and exit for the service
-  manager to restart it, which is where `install`-not-`cp` matters: replacing
-  the inode rather than writing through it is what stops a running process
-  reading a half-written file.
-
-And a cost that is not the transport: `ProtectSystem=strict` in the agent's
-unit makes `/usr/local/bin` read-only to the service, so self-replacement needs
-`ReadWritePaths=` there — write access to a directory of executables, granted
-to a network-facing daemon. **Superseding ADR-0015 is the way to do that**, not
-adding a flag.
-
-Nothing in the current tree pre-empts any of it: no wire message, no tag spent,
-no capability invented, and the `.proto` is unchanged.
+sets the two ordinary spellings bring, and nothing in the upgrade path adds
+one. The bytes arrive over the connection the agent already had, and where the
+*Controller* got them is an operational question rather than a trust decision —
+which is exactly what verification at the host buys.
 
 ### Two notes that were live during this work, and still are
 

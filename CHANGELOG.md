@@ -10,6 +10,90 @@ to point at a release where the agent binary exists.
 
 ---
 
+## v0.4.0
+
+### Upgrade the fleet from the dashboard ([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md))
+
+**Hosts → Upgrade them to ‹version›.** The Controller pushes a signed release
+down the connection each agent already holds; the host verifies it against a
+key compiled into the agent, installs it itself, and puts the old binary back
+if the new one cannot reach the Controller within ten minutes.
+
+It runs **one host at a time**, confirmed by that host coming back and saying
+what it is now, and a failure stops the run rather than completing it. That is
+the entire trade this feature makes: applying a change to two hundred machines
+at once is worth having only in proportion to the confidence that the change is
+good, and the first host to run a release is the cheapest place to discover it
+is not. `bystack-ctl upgrade --watch` is the same run without a browser.
+
+**The Controller is a distribution channel and is not trusted with content.**
+It has no signing key. A Controller in an attacker's hands can withhold an
+upgrade, send an old one, or send nothing — and cannot produce a binary any
+agent will run. That is what makes *where the artifacts came from* an
+operational question instead of a trust decision, and it is why the daemon that
+receives a binary never gains write access to `/usr/local/bin`: it stages inside
+the directory it already owns, and a `.path` unit hands the install to a
+`oneshot` with no network.
+
+### What you have to do to turn it on
+
+Nothing, to keep working as you are: with no release in the Controller's
+`releases` directory, hosts are upgraded by `install-agent.sh` exactly as
+before, and the dashboard hands out that command as it always did.
+
+Releases from this one on are signed. `agent/keys/release.pub` is the key every
+agent built from this tree accepts a pushed binary from, and the same key is in
+`RELEASE_KEYS_PEM` at the top of `scripts/install-agent.sh`, so the *first*
+install on a host is verified on the same terms as every upgrade after it —
+against a signature made offline, rather than against a `SHA256SUMS` fetched
+over the same connection as the binary it describes. `install-agent.sh --keys`
+prints what a given copy of the installer will accept.
+
+To hand releases out, put the artifacts and their manifests where the
+Controller can see them:
+
+    cp dist/bystack-agent-* /var/lib/bystack/releases/
+
+Running your own fleet from a fork is the same three steps it always was — mint
+a key, put its public half in `agent/keys/`, its PEM in the installer — and
+`scripts/release-agent.sh <tag>` does the signing, refusing to sign a version
+the binary does not report, a key the fleet does not trust, or one architecture
+without the other. The private key belongs on the machine that makes releases
+and nowhere else: not on the Controller, and not in CI, where a workflow change
+signs anything.
+
+### Fixed: the installer reported every successful enrolment as a failure
+
+`install-agent.sh` decided whether a host had enrolled by looking for `*.pem` in
+the state directory. The agent writes `agent.crt`, `agent.key` and `ca.crt`, so
+the check never matched: a good install printed "has not enrolled yet" and
+exited non-zero, and — the part that was not cosmetic — **left the single-use
+join token in `/etc/bystack/agent.env`**.
+
+A token sitting beside a stored certificate makes the agent re-enrol on its
+next start, deliberately, and a single-use token is refused the second time. So
+the host worked until something restarted it, and then went quiet. A reboot did
+it; so did the upgrade above, which always restarts the agent — and the
+rollback would put the previous binary back into the same wall.
+
+If a host of yours has a `BYSTACK_TOKEN=` line in `/etc/bystack/agent.env` and
+a certificate in `/var/lib/bystack-agent`, delete the line and restart the
+agent. Running this release's installer over it does the same thing.
+
+**Every host needs `install-agent.sh` run on it once more**, and only once. An
+agent from v0.3.0 or earlier has no updater unit to trigger, so it cannot be
+pushed to; the panel and `bystack-ctl hosts` count those hosts separately and
+print the command for them. The upgrade after that one is the button.
+
+### Rotating the signing key
+
+The agent holds a *set*. Version *N* is signed by the old key and ships
+`{old, new}`; version *N+1* is signed by the new key and ships `{new}`. Two
+ordinary upgrades retire a key, which is why a leak is answered by a release
+rather than by visiting every machine in the fleet.
+
+---
+
 ## v0.3.0
 
 **Upgrade the Controller. The agents can follow whenever it suits you.**

@@ -200,6 +200,19 @@ for target in "${targets[@]}"; do
 	chmod +x "${OUT}/bystack-agent-$(arch_of "$target")"
 done
 
+# A signature made for the *previous* build of this architecture is worse than
+# a stale checksum, because it is cryptographically valid: it verifies under
+# the fleet's key and describes bytes that are no longer there. Every consumer
+# does catch it -- `releases.py` compares the digest to the file beside it, and
+# so does `install-agent.sh` -- but each of them catches it late, on a
+# Controller or on a host, as a puzzling refusal. Deleting it here means the
+# only manifest in this directory is one `scripts/release-agent.sh` made for
+# the binary that is actually sitting next to it.
+for target in "${targets[@]}"; do
+	rm -f "${OUT}/bystack-agent-$(arch_of "$target")".manifest \
+		"${OUT}/bystack-agent-$(arch_of "$target")".manifest.sig
+done
+
 # Written last and covering only what this run produced. A checksum file that
 # accumulated lines from previous runs would vouch for binaries nobody built
 # today, which is worse than having none.

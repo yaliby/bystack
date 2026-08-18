@@ -28,13 +28,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import os
+import platform
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from bystack.agent.v1 import agent_pb2 as wire
 from bystack.conformance import controller as conformance_controller
@@ -44,8 +49,18 @@ from bystack.core.graph.model import EdgeKind
 from bystack.core.identity import NodeKind, engine_scope, image_urn
 from bystack.core.ports.command import CommandKind, CommandRejected, CommandRequest
 from bystack.core.ports.provider import ProviderState
+from bystack.infra import releases
+from bystack.infra.releases import Release, ReleaseStore
 
 SETTLE = 8.0
+
+#: The private half of a key the agent under test was built to trust.
+#:
+#: Supplied by the operator running this, because it cannot be derived: the
+#: public key is *compiled into* the binary (ADR-0017), so a harness that
+#: generated its own could only ever demonstrate the refusal path. Absent, the
+#: upgrade scenario skips and says so.
+SIGNING_KEY: ed25519.Ed25519PrivateKey | None = None
 
 #: One image digest deliberately shared by two hosts.
 #:
@@ -912,6 +927,141 @@ async def scenario_read_only_agent(h: Harness) -> None:
     )
 
 
+async def scenario_signed_upgrade(h: Harness) -> None:
+    """A release the Controller distributes and cannot forge (ADR-0017).
+
+    The one property of this feature that no unit test on either side can
+    observe, because it is a claim about the *seam*: the Controller sends a
+    document it did not sign, over the connection it already holds, and a real
+    agent binary decides for itself whether to run it -- against a key compiled
+    into that binary, which this process does not have.
+
+    Three things are checked and each fails silently otherwise:
+
+    * a correctly signed, higher release is **staged**, with the trigger file
+      root's path unit fires on and nothing else touched;
+    * a release for a *lower* version is refused, because the floor is the
+      binary on the agent's own disk and downgrade is not an operation;
+    * a manifest **this harness signs with a key of its own** is refused --
+      which is the compromised-Controller case, and the reason the Controller
+      holds no key at all.
+
+    Skipped, with a sentence, when the agent under test was built with no
+    signing keys. That is what a checkout produces and it is a legitimate
+    build: it advertises no `upgrade` capability, and the Controller refuses to
+    start a transfer to it rather than sending two megabytes at a host that was
+    always going to refuse them.
+    """
+    alpha = h.hosts["alpha"]
+    provider = h.provider(alpha)
+    if provider is None:
+        h.record("a signed release is staged", "alpha has no provider", False)
+        return
+
+    # A skip is *reported*, not silent. `why` is only printed for a failure,
+    # so the sentence goes in `detail` -- a run that quietly dropped the one
+    # scenario about replacing binaries on other people's machines would read
+    # as a run that covered it.
+    if not provider.upgradable:
+        h.record(
+            "a signed release is staged",
+            "an agent built with no keys cannot verify a release, which is a build and not a fault",
+            True,
+            "SKIPPED: this agent advertises no `upgrade` capability, so it was built with "
+            "no signing keys. Rebuild with BYSTACK_SIGNING_KEYS=<hex> and pass --signing-key.",
+        )
+        return
+    if SIGNING_KEY is None:
+        h.record(
+            "a signed release is staged",
+            "the public key is compiled into the binary, so this harness cannot derive it",
+            True,
+            "SKIPPED: this agent can verify releases, but no --signing-key was given, so "
+            "nothing here can produce one it would accept.",
+        )
+        return
+
+    workdir = h.controller.state_dir.parent
+    arch = platform.machine()
+    artifact = b"\x7fELF" + os.urandom(4096)
+
+    # A version far above anything this tree will ship, so the check being made
+    # is the *floor* rather than an accident of what the agent happens to be.
+    good = _publish(workdir / "releases", "99.0.0", arch, artifact, SIGNING_KEY)
+    outcome = await provider.push_upgrade(good)
+
+    staged_dir = h.controller.state_dir / "alpha" / "upgrade"
+    h.record(
+        "a signed release is staged",
+        "the agent verified a document the Controller could not have made, and staged it",
+        outcome.staged,
+        outcome.reason or outcome.state,
+    )
+    h.record(
+        "the trigger file is written, and only after the artifact",
+        "a path unit that fired on a half-written file would hand root a truncated binary",
+        (staged_dir / "trigger").exists()
+        and (staged_dir / "staged").read_bytes() == artifact,
+        f"in {staged_dir}",
+    )
+
+    # Downgrade. The floor is the binary on the disk and there is no stored
+    # number anything can lower.
+    old = _publish(workdir / "old", "0.0.1", arch, artifact, SIGNING_KEY)
+    refused = await provider.push_upgrade(old)
+    h.record(
+        "an older release is refused",
+        "the version floor is the binary already on the host; downgrade is not an operation",
+        refused.state == "refused" and "downgrade" in (refused.reason or ""),
+        refused.reason or refused.state,
+    )
+
+    # A Controller with its own key. This is what a compromised one looks like
+    # from the host's side, and it must look like nothing at all.
+    forged_key = ed25519.Ed25519PrivateKey.generate()
+    forged = _publish(workdir / "forged", "99.9.9", arch, artifact, forged_key)
+    rejected = await provider.push_upgrade(forged)
+    h.record(
+        "a release signed by the Controller itself is refused",
+        "the Controller is a distribution channel and is not trusted with content",
+        rejected.state == "refused" and "trusts" in (rejected.reason or ""),
+        rejected.reason or rejected.state,
+    )
+
+
+def _publish(
+    directory: Path,
+    version: str,
+    arch: str,
+    artifact: bytes,
+    key: ed25519.Ed25519PrivateKey,
+) -> Release:
+    """Write a signed release into a directory and read it back as one.
+
+    Deliberately goes through `ReleaseStore` rather than building a `Release`
+    by hand: the indexing rules -- the strict manifest parse, the digest check
+    against the file beside it -- are part of what is being exercised, and a
+    hand-built object would skip them.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    binary = directory / f"bystack-agent-{arch}"
+    binary.write_bytes(artifact)
+    document = (
+        f"{releases.MAGIC}\n"
+        f"name {releases.ARTIFACT}\n"
+        f"version {version}\n"
+        f"arch {arch}\n"
+        f"sha256 {hashlib.sha256(artifact).hexdigest()}\n"
+        f"released_at 1755388800\n"
+    ).encode()
+    binary.with_name(binary.name + ".manifest").write_bytes(document)
+    binary.with_name(binary.name + ".manifest.sig").write_bytes(key.sign(document))
+
+    found = ReleaseStore(directory).find(version, arch)
+    assert found is not None, f"the harness wrote a release {directory} would not index"
+    return found
+
+
 SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("convergence", scenario_convergence),
     ("partitioning", scenario_partitioning),
@@ -927,6 +1077,7 @@ SCENARIOS: list[tuple[str, Callable[[Harness], Awaitable[None]]]] = [
     ("live logs routing", scenario_live_logs_routing),
     ("logical fan-out", scenario_logical_fanout),
     ("read-only agent", scenario_read_only_agent),
+    ("signed upgrade", scenario_signed_upgrade),
 ]
 
 
@@ -993,11 +1144,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("agent", type=Path, help="path to the agent binary")
     parser.add_argument("--port", type=int, default=8131)
+    parser.add_argument(
+        "--signing-key",
+        type=Path,
+        help="the ed25519 private key this agent build was compiled to trust "
+        "(scripts/sign-agent.py keygen). Without it the upgrade scenario skips.",
+    )
     args = parser.parse_args(argv)
 
     if not args.agent.exists():
         print(f"no such agent binary: {args.agent}", file=sys.stderr)
         return 2
+
+    if args.signing_key is not None:
+        # Read here rather than inside the run, so a wrong path is an error
+        # before three agents are spawned rather than a scenario that skips
+        # thirteen scenarios later.
+        global SIGNING_KEY
+        loaded = serialization.load_pem_private_key(args.signing_key.read_bytes(), password=None)
+        if not isinstance(loaded, ed25519.Ed25519PrivateKey):
+            print(f"{args.signing_key} is not an ed25519 private key", file=sys.stderr)
+            return 2
+        SIGNING_KEY = loaded
 
     return asyncio.run(run(args.agent, args.port))
 

@@ -159,7 +159,9 @@ class HealthOut(BaseModel):
     made it a fact rather than an answer. A mixed-version fleet is a normal
     operating state under ADR-0008, so "which hosts are behind" is a question
     an operator asks routinely and could not previously ask here at all
-    (ADR-0015).
+    (ADR-0015). Since ADR-0017 it is also the progress view of a rollout: the
+    version per host is what a staged upgrade moves, and there is deliberately
+    no second model of it.
     """
 
     seq: int

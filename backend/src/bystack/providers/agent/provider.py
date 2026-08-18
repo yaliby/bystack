@@ -45,6 +45,7 @@ from bystack.core.ports.command import (
 )
 from bystack.core.ports.provider import GraphWriter, ProviderHealth, ProviderState
 from bystack.core.ports.watch import WatchEntry, WatchKind
+from bystack.infra.releases import Release
 from bystack.providers.agent.commands import (
     CAP_INVENTORY,
     CAP_LOGS,
@@ -64,6 +65,7 @@ from bystack.providers.agent.commands import (
     refuse_read_only,
 )
 from bystack.providers.agent.ingest import AgentIngest
+from bystack.providers.agent.upgrade import CAP_UPGRADE, UpgradeChannel, UpgradeOutcome
 
 # Not the cross-provider dependency ARCHITECTURE §6 forbids: that rule is
 # about reading another provider's *partition*, and this is a pure function of
@@ -107,6 +109,7 @@ class AgentProvider:
         "_logs",
         "_streams",
         "_inventory",
+        "_upgrades",
         "_watching",
         "_state",
         "_detail",
@@ -126,6 +129,7 @@ class AgentProvider:
         self._logs = LogsChannel()
         self._streams = LogsSubscriptions()
         self._inventory = InventoryChannel()
+        self._upgrades = UpgradeChannel()
         #: What this host was last *told* to watch, for the health line.
         #: Not what it is watching -- that is the graph, and the two differing
         #: is exactly the symptom of an agent too old to have the capability.
@@ -203,6 +207,7 @@ class AgentProvider:
                 "pending_logs": len(self._logs),
                 "live_log_streams": len(self._streams),
                 "watching": self._watching,
+                "upgrading": len(self._upgrades),
                 "connected_for": int(time.time() - self._connected_at) if self.connected else 0,
             },
         )
@@ -228,6 +233,7 @@ class AgentProvider:
         self._logs = LogsChannel()
         self._streams = LogsSubscriptions()
         self._inventory = InventoryChannel()
+        self._upgrades = UpgradeChannel()
         self._connected_at = time.time()
         self._set(ProviderState.STARTING, None)
 
@@ -243,6 +249,11 @@ class AgentProvider:
         self._channel.abandon(reason)
         self._logs.abandon(reason)
         self._inventory.abandon(reason)
+        # A rollout waiting on a host that has gone away gets an answer now
+        # rather than sitting out its deadline. Note that a *staged* upgrade
+        # disconnects on purpose -- the agent is restarted by the updater --
+        # so this fires on the happy path too, after the outcome is already in.
+        self._upgrades.abandon(reason)
         # Ends every live tail with a reason, so a browser watching a log gets
         # "the host went away" rather than a stream that silently stops.
         self._streams.abandon(reason)
@@ -300,6 +311,8 @@ class AgentProvider:
                 self._streams.deliver(envelope.logs_chunk)
             case "inventory_response":
                 self._inventory.resolve(envelope.inventory_response)
+            case "upgrade_status":
+                self._upgrades.resolve(envelope.upgrade_status)
             case other:
                 # Not an error. An agent from a later release may send frames
                 # this Controller predates, and mixed-version fleets are a
@@ -447,6 +460,75 @@ class AgentProvider:
             return False
         self._watching = len(sendable)
         return not missing
+
+    # -- upgrade (ADR-0017) ------------------------------------------------
+
+    @property
+    def architecture(self) -> str:
+        """What this host runs on, or empty when no agent is attached."""
+        return self._session.architecture if self._session is not None else ""
+
+    @property
+    def upgradable(self) -> bool:
+        """Whether a release can be pushed to this host right now.
+
+        Three separate conditions, and the UI needs them apart from each
+        other: an agent has to be attached, it has to be one that verifies
+        releases (`CAP_UPGRADE`), and it must not be the Controller's own local
+        child -- that binary lives inside the Controller's installation, and
+        upgrading it is upgrading the Controller.
+        """
+        session = self._session
+        return (
+            session is not None
+            and not session.local
+            and CAP_UPGRADE in session.capabilities
+        )
+
+    async def push_upgrade(self, release: Release) -> UpgradeOutcome:
+        """Send a signed release to this host and report what it did with it.
+
+        Deliberately **not** a `CommandKind` and not routed through
+        `CommandService`. That enum is the closed set of lifecycle mutations
+        ADR-0014 bounded, and this is neither one of them nor a fourth kind of
+        one: upgrading the agent is a distribution the host applies to itself,
+        after checking a signature this Controller cannot produce. Adding a
+        verb for it would put "replace the executable on that machine" in the
+        same list as `restart`, which is exactly the boundary ADR-0014 drew.
+
+        Refusals are returned rather than raised, because the caller is a
+        staged rollout keeping a row per host: an exception is a run that stops
+        with nothing recorded about where.
+        """
+        session = self._session
+        if session is None:
+            return UpgradeOutcome(
+                "failed", f"the agent on {self._id} is not currently connected"
+            )
+        if session.local:
+            return UpgradeOutcome(
+                "refused",
+                "this is the agent the Controller runs for its own machine; it is "
+                "upgraded with the Controller",
+            )
+        if CAP_UPGRADE not in session.capabilities:
+            # Absence is the answer for "too old" and for "built with no
+            # signing keys", and it is named as a version so an operator knows
+            # what to do about it: run install-agent.sh on that host once.
+            return UpgradeOutcome(
+                "refused",
+                f"the agent on {self._id} (version {session.agent_version or 'unknown'}) "
+                f"cannot verify a pushed release. Run install-agent.sh on it once, and "
+                f"the upgrade after that is this button.",
+            )
+        if session.architecture and session.architecture != release.arch:
+            # Caught here as well as at the agent, because the agent's refusal
+            # costs a two-megabyte transfer to arrive at.
+            return UpgradeOutcome(
+                "refused",
+                f"this host is {session.architecture} and that release is for {release.arch}",
+            )
+        return await self._upgrades.push(session, release)
 
     # -- reads -------------------------------------------------------------
 

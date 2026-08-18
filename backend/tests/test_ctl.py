@@ -24,15 +24,42 @@ from bystack import ctl
 
 
 def args(**overrides: Any) -> argparse.Namespace:
-    base = {"url": None, "config": None, "json": False, "ttl": 15, "manual": False}
+    base = {
+        "url": None,
+        "config": None,
+        "json": False,
+        "ttl": 15,
+        "manual": False,
+        "version": None,
+        "watch": False,
+        "status": False,
+        "cancel": False,
+    }
     return argparse.Namespace(**{**base, **overrides})
 
 
 def responder(routes: dict[str, Any]):
+    """Stand in for `call`, with a Controller that distributes nothing.
+
+    `/agents/releases` is defaulted rather than added to every test below,
+    because "this Controller holds no signed release" is the state every one of
+    those tests was written against and the one every Controller starts in.
+    The tests that care override it.
+    """
+    answers = {"/agents/releases": NO_RELEASES, **routes}
+
     def call(url: str, path: str, *, method: str = "GET", body: Any = None) -> Any:
-        return routes[path]
+        return answers[path]
 
     return call
+
+
+NO_RELEASES: dict[str, Any] = {
+    "directory": "/var/lib/bystack/releases",
+    "releases": [],
+    "upgradable": [],
+    "stale": [],
+}
 
 
 HEALTH = {
@@ -320,3 +347,124 @@ def test_hosts_behind_the_controller_are_named_with_the_way_to_fix_them(
     # noise.
     assert "0.1.0*" in out
     assert "0.2.0*" not in out
+
+
+# --------------------------------------------------------------------------
+# The rollout (ADR-0017)
+# --------------------------------------------------------------------------
+
+
+HELD = {
+    "directory": "/var/lib/bystack/releases",
+    "releases": [
+        {
+            "version": "0.4.0",
+            "arch": "x86_64",
+            "sha256": "ab" * 32,
+            "released_at": 1755388800,
+            "size": 2_300_000,
+        }
+    ],
+    "upgradable": ["e1"],
+    "stale": ["e2"],
+}
+
+
+def test_a_controller_holding_a_release_offers_the_button_and_not_the_installer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two answers, and printing both would print one wrong one every time.
+
+    A Controller holding a signed release pushes it down connections it already
+    has (ADR-0017); one holding nothing cannot, and those hosts are upgraded by
+    the installer (ADR-0015). Which applies is a fact about this Controller.
+    """
+    rows = [agent("e1", agent_version="0.1.0"), agent("e2", agent_version="0.1.0")]
+    monkeypatch.setattr(
+        ctl,
+        "call",
+        responder(
+            {
+                "/agents": rows,
+                "/healthz": HEALTH,
+                "/agents/enrollment": TERMS,
+                "/agents/releases": HELD,
+            }
+        ),
+    )
+
+    ctl.cmd_hosts(args(), "http://x")
+
+    out = capsys.readouterr().out
+    assert "bystack-ctl upgrade" in out
+    # The host that cannot take a push is named with the command that fixes it,
+    # rather than left out of a run that will silently step over it.
+    assert "1 cannot" in out
+    assert "install-agent.sh" in out
+
+
+def test_with_nothing_to_push_the_installer_line_is_still_the_answer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rows = [agent("e1", agent_version="0.1.0")]
+    monkeypatch.setattr(
+        ctl,
+        "call",
+        responder({"/agents": rows, "/healthz": HEALTH, "/agents/enrollment": TERMS}),
+    )
+
+    ctl.cmd_hosts(args(), "http://x")
+
+    out = capsys.readouterr().out
+    assert "install-agent.sh" in out
+    assert "bystack-ctl upgrade" not in out
+    assert "No token" in out
+
+
+def test_a_rollout_that_stopped_on_a_host_exits_non_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A script that ran this must not go on to report a fleet upgrade that did
+    not happen. The exit code is the only part of that a script reads."""
+    failed = {
+        "version": "0.4.0",
+        "state": "failed",
+        "planned": ["e1", "e2"],
+        "current": None,
+        "detail": "e2: it staged 0.4.0 but has not come back on it within 120s.",
+        "started_at": 0.0,
+        "finished_at": 0.0,
+        "results": [
+            {"engine_id": "e1", "state": "confirmed", "reason": None, "version": "0.4.0"},
+            {"engine_id": "e2", "state": "failed", "reason": "no answer", "version": ""},
+        ],
+    }
+    monkeypatch.setattr(ctl, "call", responder({"/agents/upgrades": failed}))
+
+    assert ctl.cmd_upgrade(args(status=True), "http://x") == 1
+    out = capsys.readouterr().out
+    assert "1 of 2 confirmed" in out
+    assert "has not come back" in out
+
+
+def test_asking_about_a_rollout_that_never_ran_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(ctl, "call", responder({"/agents/upgrades": None}))
+
+    assert ctl.cmd_upgrade(args(status=True), "http://x") == 0
+    assert "no rollout" in capsys.readouterr().out
+
+
+def test_releases_names_the_directory_even_when_it_is_empty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The empty answer is the common one, and an empty list with no path is a
+    feature that looks broken rather than one with nothing in it yet."""
+    monkeypatch.setattr(ctl, "call", responder({}))
+
+    ctl.cmd_releases(args(), "http://x")
+
+    out = capsys.readouterr().out
+    assert "/var/lib/bystack/releases" in out
+    assert "sign-agent.py" in out

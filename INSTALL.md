@@ -151,7 +151,7 @@ docker compose up -d
 It looks like this:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443 --token bst1.…
 ```
 
@@ -186,7 +186,7 @@ ssh you@newserver 'sudo sh /tmp/install-agent.sh --binary /tmp/bystack-agent-x86
 | `ssh: Could not resolve hostname http://…` | `ssh` takes `user@host`, not a URL. Drop the `http://` and the trailing slash. |
 | Browser cannot connect at all | The port is on loopback. See Step 2. |
 | The map is completely empty | The Docker socket group. See below. |
-| The pasted `curl` in Step 3 returns 404 | No release has been published for this Controller's version yet. Tag one (`git tag v0.3.0 && git push origin v0.3.0`) or use the `--binary` form above. |
+| The pasted `curl` in Step 3 returns 404 | No release has been published for this Controller's version yet. Tag one (`git tag v0.4.0 && git push origin v0.4.0`) or use the `--binary` form above. |
 | Agent says the certificate name does not match | The address it dialled is not in `server_names`. Step 3a. |
 
 **The empty map is worth its own paragraph**, because nothing else reports it.
@@ -331,13 +331,40 @@ The `version` in that answer is the Controller's, and it is the same string the
 
 ### Each server
 
+**If the Controller has a signed release for them, this is a button.** Open
+**Hosts**: when there is one to push and hosts that can take it, the panel says
+so and offers *Upgrade them to ‹version›*. It goes one host at a time, waits
+for each to come back on the new version before touching the next, and stops if
+one does not. `bystack-ctl upgrade --watch` is the same thing without a
+browser. Nothing has to be installed on the hosts, nothing has to reach GitHub,
+and no command has to be pasted anywhere.
+
+Two things about it are worth knowing before you press it:
+
+- **The Controller cannot forge a release.** It holds no signing key. Each host
+  checks the release against a key compiled into its own agent, so a Controller
+  someone else has taken over can withhold an upgrade or send an old one — and
+  cannot make a host run anything.
+- **A host that comes up unable to reach the Controller undoes itself.** The
+  new agent is on probation until it connects and is admitted; if that has not
+  happened ten minutes after the swap, the machine puts its previous binary
+  back and restarts it, without anybody being told to go and look.
+
+Setting that up is [CHANGELOG.md](CHANGELOG.md) under the release that
+introduced it: mint a signing key, build and sign an agent, and drop the three
+files in the Controller's `releases` directory. Until you do, the Controller
+holds nothing to push and the paragraphs below are the path — which is also
+what happens on any host running an agent from before this existed.
+
+#### By hand, which is still the first upgrade on every host
+
 You do not have to compose this yourself. Once the Controller is upgraded,
 **Hosts** names the hosts that are behind and shows the exact line to run, and
 so does `bystack-ctl hosts`. It is the command that installed the agent, with
 the new tag in the URL and **no `--token`**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443
 ```
 
@@ -361,12 +388,13 @@ just as well: build or download the binary once, copy it over, and pass
 `--binary` with no token.
 
 Afterwards, **Hosts** shows each agent's version, so a host you missed is
-visible rather than merely quiet.
+visible rather than merely quiet — and a host you have run this on once can be
+upgraded from the panel next time.
 
 ### If you installed the wheel instead
 
 ```bash
-/opt/bystack/bin/pip install --upgrade bystack-0.3.0-*.whl   # from the release
+/opt/bystack/bin/pip install --upgrade bystack-0.4.0-*.whl   # from the release
 sudo systemctl restart bystack-controller                    # if it runs as a unit
 ```
 
@@ -382,7 +410,7 @@ left on the host, so fetch it the same way — `--uninstall` needs neither a
 controller nor a token:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
   | sudo sh -s -- --uninstall
 ```
 

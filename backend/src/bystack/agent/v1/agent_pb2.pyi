@@ -25,7 +25,7 @@ SLICE_UNIT: Slice
 SLICE_PROCESS: Slice
 
 class Envelope(_message.Message):
-    __slots__ = ("seq", "hello", "hello_ack", "sync", "delta", "command", "command_result", "resync_request", "logs_request", "logs_response", "logs_subscribe", "logs_chunk", "logs_cancel", "enroll_request", "enroll_response", "renewal_offer", "certificate_request", "certificate_issued", "watch_list", "inventory_request", "inventory_response")
+    __slots__ = ("seq", "hello", "hello_ack", "sync", "delta", "command", "command_result", "resync_request", "logs_request", "logs_response", "logs_subscribe", "logs_chunk", "logs_cancel", "enroll_request", "enroll_response", "renewal_offer", "certificate_request", "certificate_issued", "watch_list", "inventory_request", "inventory_response", "upgrade_offer", "upgrade_chunk", "upgrade_status")
     SEQ_FIELD_NUMBER: _ClassVar[int]
     HELLO_FIELD_NUMBER: _ClassVar[int]
     HELLO_ACK_FIELD_NUMBER: _ClassVar[int]
@@ -47,6 +47,9 @@ class Envelope(_message.Message):
     WATCH_LIST_FIELD_NUMBER: _ClassVar[int]
     INVENTORY_REQUEST_FIELD_NUMBER: _ClassVar[int]
     INVENTORY_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    UPGRADE_OFFER_FIELD_NUMBER: _ClassVar[int]
+    UPGRADE_CHUNK_FIELD_NUMBER: _ClassVar[int]
+    UPGRADE_STATUS_FIELD_NUMBER: _ClassVar[int]
     seq: int
     hello: Hello
     hello_ack: HelloAck
@@ -68,7 +71,10 @@ class Envelope(_message.Message):
     watch_list: WatchList
     inventory_request: InventoryRequest
     inventory_response: InventoryResponse
-    def __init__(self, seq: _Optional[int] = ..., hello: _Optional[_Union[Hello, _Mapping]] = ..., hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., sync: _Optional[_Union[Sync, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., command: _Optional[_Union[Command, _Mapping]] = ..., command_result: _Optional[_Union[CommandResult, _Mapping]] = ..., resync_request: _Optional[_Union[ResyncRequest, _Mapping]] = ..., logs_request: _Optional[_Union[LogsRequest, _Mapping]] = ..., logs_response: _Optional[_Union[LogsResponse, _Mapping]] = ..., logs_subscribe: _Optional[_Union[LogsSubscribe, _Mapping]] = ..., logs_chunk: _Optional[_Union[LogsChunk, _Mapping]] = ..., logs_cancel: _Optional[_Union[LogsCancel, _Mapping]] = ..., enroll_request: _Optional[_Union[EnrollRequest, _Mapping]] = ..., enroll_response: _Optional[_Union[EnrollResponse, _Mapping]] = ..., renewal_offer: _Optional[_Union[RenewalOffer, _Mapping]] = ..., certificate_request: _Optional[_Union[CertificateRequest, _Mapping]] = ..., certificate_issued: _Optional[_Union[CertificateIssued, _Mapping]] = ..., watch_list: _Optional[_Union[WatchList, _Mapping]] = ..., inventory_request: _Optional[_Union[InventoryRequest, _Mapping]] = ..., inventory_response: _Optional[_Union[InventoryResponse, _Mapping]] = ...) -> None: ...
+    upgrade_offer: UpgradeOffer
+    upgrade_chunk: UpgradeChunk
+    upgrade_status: UpgradeStatus
+    def __init__(self, seq: _Optional[int] = ..., hello: _Optional[_Union[Hello, _Mapping]] = ..., hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., sync: _Optional[_Union[Sync, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., command: _Optional[_Union[Command, _Mapping]] = ..., command_result: _Optional[_Union[CommandResult, _Mapping]] = ..., resync_request: _Optional[_Union[ResyncRequest, _Mapping]] = ..., logs_request: _Optional[_Union[LogsRequest, _Mapping]] = ..., logs_response: _Optional[_Union[LogsResponse, _Mapping]] = ..., logs_subscribe: _Optional[_Union[LogsSubscribe, _Mapping]] = ..., logs_chunk: _Optional[_Union[LogsChunk, _Mapping]] = ..., logs_cancel: _Optional[_Union[LogsCancel, _Mapping]] = ..., enroll_request: _Optional[_Union[EnrollRequest, _Mapping]] = ..., enroll_response: _Optional[_Union[EnrollResponse, _Mapping]] = ..., renewal_offer: _Optional[_Union[RenewalOffer, _Mapping]] = ..., certificate_request: _Optional[_Union[CertificateRequest, _Mapping]] = ..., certificate_issued: _Optional[_Union[CertificateIssued, _Mapping]] = ..., watch_list: _Optional[_Union[WatchList, _Mapping]] = ..., inventory_request: _Optional[_Union[InventoryRequest, _Mapping]] = ..., inventory_response: _Optional[_Union[InventoryResponse, _Mapping]] = ..., upgrade_offer: _Optional[_Union[UpgradeOffer, _Mapping]] = ..., upgrade_chunk: _Optional[_Union[UpgradeChunk, _Mapping]] = ..., upgrade_status: _Optional[_Union[UpgradeStatus, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("agent_version", "engine_id", "engine", "read_only", "capabilities", "unix_time")
@@ -590,3 +596,39 @@ class LogLine(_message.Message):
     stderr: bool
     text: str
     def __init__(self, stderr: _Optional[bool] = ..., text: _Optional[str] = ...) -> None: ...
+
+class UpgradeOffer(_message.Message):
+    __slots__ = ("transfer_id", "manifest", "signature", "total_bytes")
+    TRANSFER_ID_FIELD_NUMBER: _ClassVar[int]
+    MANIFEST_FIELD_NUMBER: _ClassVar[int]
+    SIGNATURE_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_BYTES_FIELD_NUMBER: _ClassVar[int]
+    transfer_id: str
+    manifest: bytes
+    signature: bytes
+    total_bytes: int
+    def __init__(self, transfer_id: _Optional[str] = ..., manifest: _Optional[bytes] = ..., signature: _Optional[bytes] = ..., total_bytes: _Optional[int] = ...) -> None: ...
+
+class UpgradeChunk(_message.Message):
+    __slots__ = ("transfer_id", "offset", "data", "last")
+    TRANSFER_ID_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    LAST_FIELD_NUMBER: _ClassVar[int]
+    transfer_id: str
+    offset: int
+    data: bytes
+    last: bool
+    def __init__(self, transfer_id: _Optional[str] = ..., offset: _Optional[int] = ..., data: _Optional[bytes] = ..., last: _Optional[bool] = ...) -> None: ...
+
+class UpgradeStatus(_message.Message):
+    __slots__ = ("transfer_id", "state", "reason", "resume_from")
+    TRANSFER_ID_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    RESUME_FROM_FIELD_NUMBER: _ClassVar[int]
+    transfer_id: str
+    state: str
+    reason: str
+    resume_from: int
+    def __init__(self, transfer_id: _Optional[str] = ..., state: _Optional[str] = ..., reason: _Optional[str] = ..., resume_from: _Optional[int] = ...) -> None: ...

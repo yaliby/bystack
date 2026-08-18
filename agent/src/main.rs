@@ -30,6 +30,7 @@ mod procfs;
 mod session;
 mod systemd;
 mod trust;
+mod upgrade;
 mod wire;
 
 use std::path::PathBuf;
@@ -212,6 +213,10 @@ usage: bystack-agent --controller <wss url> [--token <token>] [options]
   --socket      Docker socket (default /var/run/docker.sock)
   --read-only   Refuse every mutation, whatever the Controller sends
 
+  apply-update  Install the release this host has already verified and staged,
+                and restart the service. Runs as root, started by
+                bystack-agent-updater.service and not by hand (ADR-0017).
+
 Environment: BYSTACK_CONTROLLER, BYSTACK_TOKEN, BYSTACK_STATE_DIR,
              BYSTACK_DOCKER_SOCKET, BYSTACK_READ_ONLY";
 
@@ -223,6 +228,25 @@ Environment: BYSTACK_CONTROLLER, BYSTACK_TOKEN, BYSTACK_STATE_DIR,
 /// program that does nothing most seconds of its life.
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // Before the runtime does anything, and before a Docker socket is
+    // required. The updater is this same binary, run as root by a oneshot with
+    // no network, and it neither observes nor connects to anything -- asking
+    // it for an engine id it will never use would make an upgrade fail on a
+    // host whose daemon happens to be down.
+    //
+    // A subcommand rather than a flag, and it takes no arguments at all: the
+    // unit's `ExecStart=` is fixed, so there is no shape in which a
+    // compromised daemon parameterises what root does (ADR-0017).
+    if std::env::args().nth(1).as_deref() == Some("apply-update") {
+        match upgrade::apply_update() {
+            Ok(()) => return,
+            Err(message) => {
+                eprintln!("bystack-agent: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let config = match Config::from_args() {
         Ok(config) => config,
         Err(message) => {

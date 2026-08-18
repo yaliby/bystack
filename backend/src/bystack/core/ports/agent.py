@@ -87,6 +87,23 @@ class AgentSession(Protocol):
         ...
 
     @property
+    def architecture(self) -> str:
+        """What the host runs on, from ``Hello.engine.architecture``.
+
+        Needed by exactly one caller and worth a property for it: a Controller
+        distributing a release has to pick the artifact matching each host, and
+        it is talking to a fleet that is deliberately mixed (ADR-0008). Read
+        from the live connection rather than from the graph, because the answer
+        must come from the same handshake as the capability that decides
+        whether to send anything at all.
+
+        Empty from an engine that did not report it, which is refused rather
+        than guessed: sending an x86_64 binary to a machine that never said
+        what it was is a host that goes quiet.
+        """
+        ...
+
+    @property
     def local(self) -> bool:
         """Whether this agent is the one the Controller spawned itself.
 

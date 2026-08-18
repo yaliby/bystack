@@ -143,6 +143,42 @@ class AgentsConfig(BaseModel):
     agents within seconds of a cold start (ADR-0001).
     """
 
+    releases_dir: str = Field(
+        default="",
+        description="Signed agent releases to distribute. Empty means <state_dir>/releases.",
+    )
+    """Where the artifacts a fleet is upgraded from live (ADR-0017).
+
+    A directory of `bystack-agent-<arch>` files, each with the
+    `.manifest` and `.manifest.sig` that make it worth installing. The
+    Controller holds **no signing key** and cannot produce any of them: it
+    picks the artifact matching each host and sends it, and the host decides
+    whether to run it against a key compiled into the agent.
+
+    That is what makes *how the files got here* an operational question rather
+    than a trust decision. Fetched from GitHub Releases, copied off a laptop,
+    dropped in by configuration management -- all equivalent, because none of
+    them is what the agent is relying on.
+
+    An empty directory is the ordinary state and not a fault: it means this
+    Controller distributes nothing and hosts are upgraded by running the
+    installer on them, which is what every host does for its first install
+    anyway.
+    """
+
+    @property
+    def releases_path(self) -> str:
+        """`releases_dir`, defaulted into the state directory.
+
+        Beside the CA and the enrollment registry rather than in a second
+        place, for the reason the audit log is: that directory is already the
+        one an operator knows about, already created, and already has the right
+        permissions. Unlike the things beside it, this one is *not* worth
+        backing up -- every file in it is a public artifact that can be
+        downloaded again.
+        """
+        return self.releases_dir or f"{self.state_dir.rstrip('/')}/releases"
+
     @property
     def listen_address(self) -> tuple[str, int]:
         """``listen`` split, with ``[::]:8443`` spelled the way it must be.

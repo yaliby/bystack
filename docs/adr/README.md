@@ -24,8 +24,9 @@ From the Controller/Agent pivot onward, each decision is its own file.
 | [0012](0012-operations-and-audit.md)      | Operations: lifecycle only, logical targets, no optimistic updates | Accepted |
 | [0013](0013-agent-in-rust.md)             | The Agent is written in Rust; supersedes 0010 | Accepted |
 | [0014](0014-no-user-identity.md)          | No user identity; the network is the boundary, and destructive verbs stay out | Accepted |
-| [0015](0015-agent-upgrade.md)             | Agent upgrade: the Controller reports skew, the host applies it | Accepted |
+| [0015](0015-agent-upgrade.md)             | Agent upgrade: the Controller reports skew, the host applies it | **Superseded by 0017** |
 | [0016](0016-watched-units-and-processes.md)| Units and processes are selected rather than discovered; a watch rule is the identity | Accepted |
+| [0017](0017-agent-upgrade-signed-push.md) | Signed push upgrade: the Controller distributes, the host verifies; supersedes 0015 | Accepted |
 
 A record is written when a decision is *hard to reverse* or when the reasoning
 will not be obvious to someone reading the code a year from now. Everything

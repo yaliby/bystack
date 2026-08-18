@@ -35,7 +35,8 @@ import pytest
 
 from bystack.agent.v1 import agent_pb2 as wire
 from bystack.conformance import runner
-from bystack.providers.agent import commands, ingest
+from bystack.infra import releases
+from bystack.providers.agent import commands, ingest, upgrade
 
 BACKEND = Path(__file__).resolve().parent.parent
 GENERATOR = BACKEND / "scripts" / "generate_proto.py"
@@ -115,6 +116,31 @@ def test_the_constants_mirrored_across_languages_still_agree() -> None:
     )
 
 
+def test_the_manifest_vocabulary_agrees_across_languages() -> None:
+    """The signed document is parsed by both sides, strictly, by hand.
+
+    Not generated from anything and not derivable: it is a text format written
+    twice, once in Rust and once in Python, because the two readers must agree
+    on which bytes are acceptable. The drift this catches is the expensive
+    kind and it is silent -- a Controller that indexes a release every host
+    refuses, or worse, one that skips a field an agent enforces.
+    """
+    assert _rust_string("upgrade.rs", "MAGIC") == releases.MAGIC, (
+        "the manifest format string differs; the Controller would offer a "
+        "release every agent in the fleet refuses to read"
+    )
+    assert _rust_string("upgrade.rs", "ARTIFACT_NAME") == releases.ARTIFACT, (
+        "what is being signed is spelled differently on the two sides"
+    )
+    # The capability, which is what stops a two-megabyte transfer to a host
+    # that was always going to refuse it.
+    agent_source = (BACKEND.parent / "agent" / "src" / "session.rs").read_text()
+    assert f'"{upgrade.CAP_UPGRADE}"' in agent_source, (
+        "the agent no longer advertises the capability the Controller checks; "
+        "every push would be refused with no diagnosis"
+    )
+
+
 def test_every_host_field_the_mapper_reads_is_carried_on_the_wire() -> None:
     """The §5 drift guard again, for systemd and /proc.
 
@@ -178,6 +204,40 @@ def _full_process() -> wire.Process:
             )
         ],
     )
+
+
+def test_the_installer_looks_for_the_files_the_agent_writes() -> None:
+    """`install-agent.sh` decides "enrolled" by looking in the state directory.
+
+    Three names, written by the agent and read by a shell script, with nothing
+    between them. The drift is silent in the worst direction: the installer
+    concludes the host never enrolled, says so, exits non-zero -- and leaves
+    the single-use join token in `agent.env`. A token beside a stored
+    certificate makes the agent **re-enrol on its next start** (`main.rs`,
+    `ensure_enrolled`, deliberately), and the second redemption of a
+    single-use token is refused.
+
+    So the host survives exactly until something restarts it. ADR-0017's
+    upgrade always does, which turns a push into a host that drops off the
+    map -- and the rollback puts the previous binary back into the same wall.
+    """
+    installer = (BACKEND.parent / "scripts" / "install-agent.sh").read_text()
+    for name in ("CERT_FILE", "KEY_FILE", "CA_FILE"):
+        written = _rust_string("trust.rs", name)
+        assert written in installer, (
+            f"the agent writes {written} ({name} in agent/src/trust.rs) and "
+            f"install-agent.sh does not look for it; it would report every "
+            f"successful enrolment as a failure and leave the spent token in "
+            f"agent.env, which takes the host down on its next restart"
+        )
+
+
+def _rust_string(filename: str, name: str) -> str:
+    """The string literal bound to ``name`` in one of the agent's sources."""
+    source = (BACKEND.parent / "agent" / "src" / filename).read_text()
+    found = re.search(rf'\b{name}\s*:\s*&str\s*=\s*"([^"]*)"', source)
+    assert found is not None, f"{name} is no longer defined in agent/src/{filename}"
+    return found.group(1)
 
 
 def _rust_const(filename: str, name: str) -> int:

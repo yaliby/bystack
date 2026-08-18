@@ -38,7 +38,7 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 
 | Working now | Being built | Not built yet | Decided against |
 |---|---|---|---|
-| Docker discovery (List / Watch / Resync) | Controller-driven agent upgrade | Durable graph history | User authentication and RBAC ([ADR-0014](docs/adr/0014-no-user-identity.md)) |
+| Docker discovery (List / Watch / Resync) | | Durable graph history | User authentication and RBAC ([ADR-0014](docs/adr/0014-no-user-identity.md)) |
 | Canonical graph, two-layer identity | | Plugin system | Destructive operations — `remove`, `prune`, volume deletion |
 | Compose stacks, services, `depends_on` | | | |
 | Incremental deltas over WebSocket | | | |
@@ -47,6 +47,7 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 | Operating a multi-host selection from one button, one audit entry per host | | | |
 | Unit and process operations, through the same six verbs | | | |
 | Agent wire protocol + Controller ingest | | | |
+| Signed push upgrade, staged one host at a time ([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)) | | | |
 | mTLS, join-token enrollment, auto-renewal | | | |
 | The agent — Rust, 1.97 MiB static musl, 3.9 MiB RSS | | | |
 | Zero-config startup — a bundled local agent | | | |
@@ -102,9 +103,14 @@ is served by the Controller on its own port, so there is no Node on a
 control-plane host and no second origin. "Add a host" hands out a command that
 works on a machine with nothing on it, which is what it did not do before.
 
-One clause of that step is still open: **Controller-driven upgrade**. Version
-skew is visible — the Controller knows its own version and every agent's — but
-replacing a running agent is still `install-agent.sh` on that host.
+The last clause of that step is closed too: **upgrading the fleet is a
+button**. The Controller pushes a signed release down the connection each agent
+already holds, one host at a time, confirmed by that host coming back on the
+new version before the next one is touched. It signs nothing and holds no key
+— each host verifies the release against a key compiled into its own agent, so
+a Controller in the wrong hands can withhold an upgrade and cannot cause one.
+A host that comes up unable to reach the Controller restores its previous
+binary by itself ([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)).
 
 ---
 
@@ -122,7 +128,7 @@ docker compose up -d --build
 
 # 2. A wheel. Carries the agent binary and the dashboard; nothing else needed.
 python3 -m venv /opt/bystack
-/opt/bystack/bin/pip install bystack-0.3.0-py3-none-manylinux*_x86_64*.whl
+/opt/bystack/bin/pip install bystack-0.4.0-py3-none-manylinux*_x86_64*.whl
 /opt/bystack/bin/bystack                        # manages this machine
 
 # 3. From a checkout. `scripts/build-agent.sh` produces the static binaries.
@@ -134,18 +140,22 @@ Adding a host is one command on that host, and the dashboard composes it with
 the token already in it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.3.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://controller:8443 --token bst1.…
 ```
 
-It fetches one static binary, checks it against the release's `SHA256SUMS`,
-installs a hardened systemd unit and starts it. `--binary` skips the download
-for a network with no egress; `--uninstall` removes everything except the
-certificate, because that is this host's identity and not ours to discard.
+It fetches one static binary, checks it against the release's signed manifest
+where there is one and its `SHA256SUMS` otherwise, installs a hardened systemd
+unit and the four that upgrade it later, and starts it. `--binary` skips the
+download for a network with no egress; `--uninstall` removes everything except
+the certificate, because that is this host's identity and not ours to discard.
 
-Upgrading an existing install is `git pull && docker compose up -d --build`
-followed by the same line above on each host, without the token — the missing
-token is what makes it an upgrade rather than a second host.
+Upgrading an existing install is `git pull && docker compose up -d --build`,
+and then the fleet from the **Hosts** panel or `bystack-ctl upgrade` once the
+Controller holds a signed release. Every host needs the line above run on it
+once more first, without the token — the missing token is what makes it an
+upgrade rather than a second host, and an agent from before ADR-0017 has no
+updater unit for the Controller to trigger.
 [`INSTALL.md`](INSTALL.md#upgrading) has the order and the two things that
 collide; [`CHANGELOG.md`](CHANGELOG.md) has what each release changed.
 
@@ -156,6 +166,7 @@ bystack-ctl status              # health, what is observed, whether hosts can jo
 bystack-ctl token               # mint a token, print the command to paste
 bystack-ctl hosts               # the fleet, and which rows need a decision
 bystack-ctl approve <engine-id>
+bystack-ctl upgrade --watch     # roll a signed release out, one host at a time
 ```
 
 ---

@@ -111,6 +111,7 @@ class WebSocketAgentSession:
         "_local",
         "_agent_version",
         "_capabilities",
+        "_architecture",
     )
 
     def __init__(
@@ -129,10 +130,17 @@ class WebSocketAgentSession:
         # the other end of *this* connection. An agent upgraded in place
         # reconnects, and the new session carries the new set.
         self._capabilities = frozenset(hello.capabilities)
+        # `uname -m` as the engine reports it, which is the spelling both the
+        # release manifests and the agent's own check use.
+        self._architecture = hello.engine.architecture
 
     @property
     def engine_id(self) -> str:
         return self._engine_id
+
+    @property
+    def architecture(self) -> str:
+        return self._architecture
 
     @property
     def read_only(self) -> bool:

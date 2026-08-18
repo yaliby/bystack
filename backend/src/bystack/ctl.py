@@ -5,6 +5,8 @@
     bystack-ctl token                  # mint a join token, print the install command
     bystack-ctl approve <engine-id>
     bystack-ctl revoke <engine-id>
+    bystack-ctl releases               # signed agent releases this Controller holds
+    bystack-ctl upgrade                # roll the newest one out, one host at a time
 
 ADR-0011 put the operator surface on four REST routes and MIGRATION §6.4 said
 a CLI over them was packaging work. This is it, and it is deliberately nothing
@@ -33,6 +35,7 @@ import datetime as dt
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -193,19 +196,42 @@ def cmd_hosts(args: argparse.Namespace, url: str) -> int:
         # agent version was already on this route with nothing to compare it
         # against, which made it a fact rather than an answer (ADR-0015).
         print()
-        print(f"* {len(behind)} host(s) behind the Controller ({current}). On each one:")
-        # The command the Controller composes, not one written here. It carries
-        # the running version and the address agents actually dial, so an
-        # operator who upgraded the Controller ten minutes ago is handed the
-        # matching agent rather than a line with an ellipsis in it that they
-        # have to reconstruct on every host.
-        print(f"    {call(url, '/agents/enrollment')['upgrade']}")
-        # Said out loud because the missing token is the part that looks like
-        # an omission. Re-running the installer *with* one makes the agent
-        # enrol again, and the host comes back as a stranger waiting for
-        # approval while the row above it goes quiet.
-        print("  No token: that is what makes it an upgrade rather than a second host.")
+        print(f"* {len(behind)} host(s) behind the Controller ({current}).")
+        _how_to_upgrade(url)
     return 0
+
+
+def _how_to_upgrade(url: str) -> None:
+    """The one line that actually moves those hosts, whichever line it is.
+
+    Two answers, and which one applies is a fact about this Controller rather
+    than a preference: a Controller holding a signed release pushes it down the
+    connections it already has (ADR-0017), and one holding nothing cannot, so
+    the hosts are upgraded by running the installer on them (ADR-0015). Printing
+    both would be printing one wrong instruction every time.
+    """
+    releases = call(url, "/agents/releases")
+    if releases["releases"] and releases["upgradable"]:
+        print(f"  {len(releases['upgradable'])} of them can take a pushed release:")
+        print("    bystack-ctl upgrade")
+        if releases["stale"]:
+            # Named, because these are the hosts a rollout will *not* touch and
+            # the operator would otherwise read the run as having finished.
+            print(f"  {len(releases['stale'])} cannot, and need the installer once:")
+            print(f"    {call(url, '/agents/enrollment')['upgrade']}")
+        return
+
+    # The command the Controller composes, not one written here. It carries the
+    # running version and the address agents actually dial, so an operator who
+    # upgraded the Controller ten minutes ago is handed the matching agent
+    # rather than a line with an ellipsis they reconstruct on every host.
+    print("  On each one:")
+    print(f"    {call(url, '/agents/enrollment')['upgrade']}")
+    # Said out loud because the missing token is the part that looks like an
+    # omission. Re-running the installer *with* one makes the agent enrol
+    # again, and the host comes back as a stranger waiting for approval while
+    # the row above it goes quiet.
+    print("  No token: that is what makes it an upgrade rather than a second host.")
 
 
 def _behind(agent: dict[str, Any], controller: str) -> bool:
@@ -266,6 +292,100 @@ def cmd_revoke(args: argparse.Namespace, url: str) -> int:
     return 0
 
 
+def cmd_releases(args: argparse.Namespace, url: str) -> int:
+    answer = call(url, "/agents/releases")
+    if args.json:
+        print(json.dumps(answer, indent=2))
+        return 0
+
+    print(f"releases in {answer['directory']}")
+    if not answer["releases"]:
+        # The empty case is the common one and is not a fault: a Controller
+        # that distributes nothing is a Controller whose hosts are upgraded by
+        # the installer, which is what every one of them did to get here.
+        print("  (none — build with scripts/build-agent.sh, sign with scripts/sign-agent.py)")
+    for release in answer["releases"]:
+        size = release["size"] / (1024 * 1024)
+        print(f"  {release['version']:<12} {release['arch']:<10} {size:.1f} MiB  "
+              f"{_expiry(release['released_at']).split(' ')[0]}")
+
+    print()
+    print(f"{len(answer['upgradable'])} host(s) can take a pushed release")
+    if answer["stale"]:
+        # Not a fault either, and the distinction is the whole reason this line
+        # exists: these hosts are managed, healthy and simply running an agent
+        # from before signed push existed. A rollout steps over them silently
+        # unless something says so.
+        print(f"{len(answer['stale'])} cannot, and need install-agent.sh run on them once:")
+        for engine_id in answer["stale"]:
+            print(f"  {engine_id}")
+    return 0
+
+
+def cmd_upgrade(args: argparse.Namespace, url: str) -> int:
+    """Start, watch or stop the fleet rollout.
+
+    One flag-shaped command rather than three subcommands, because there is
+    only ever one rollout: `bystack-ctl upgrade` starts it, and the other two
+    are questions about the same object.
+    """
+    if args.cancel:
+        rollout = call(url, "/agents/upgrades/cancel", method="POST")
+        print(f"stopping after {rollout['current'] or 'the current host'}.")
+        print("A host mid-transfer has written a partial file and nothing else.")
+        return 0
+
+    if args.status:
+        rollout = call(url, "/agents/upgrades")
+        if rollout is None:
+            print("no rollout has been started.")
+            return 0
+        return _report(rollout, args)
+
+    rollout = call(
+        url, "/agents/upgrades", method="POST", body={"version": args.version or ""}
+    )
+    if args.json and not args.watch:
+        print(json.dumps(rollout, indent=2))
+        return 0
+
+    print(f"rolling out {rollout['version']} to {len(rollout['planned'])} host(s), one at a time.")
+    print("A failure stops the run rather than completing it.")
+    if not args.watch:
+        print("  bystack-ctl upgrade --status")
+        return 0
+
+    # Polled rather than streamed. There is no event for this and there should
+    # not be one: a rollout is minutes long and the thing an operator wants is
+    # the same answer the panel shows, not a socket.
+    while rollout["state"] == "running":
+        time.sleep(2)
+        rollout = call(url, "/agents/upgrades")
+    return _report(rollout, args)
+
+
+def _report(rollout: dict[str, Any], args: argparse.Namespace) -> int:
+    if args.json:
+        print(json.dumps(rollout, indent=2))
+    else:
+        done = sum(1 for r in rollout["results"] if r["state"] == "confirmed")
+        print(
+            f"{rollout['version']}: {rollout['state']}  "
+            f"({done} of {len(rollout['planned'])} confirmed)"
+        )
+        for result in rollout["results"]:
+            reason = f"  {result['reason']}" if result["reason"] else ""
+            print(f"  {result['engine_id']:<26} {result['state']:<10}{reason}")
+        if rollout["current"]:
+            print(f"  {rollout['current']:<26} in progress")
+        if rollout["detail"]:
+            print()
+            print(rollout["detail"])
+    # A run that stopped on a host is a non-zero exit, so a script that ran
+    # this does not go on to report a fleet upgrade that did not happen.
+    return 1 if rollout["state"] == "failed" else 0
+
+
 def _minutes(unix: int) -> str:
     """How long is left, for something whose whole lifetime is minutes."""
     left = unix - int(dt.datetime.now(tz=dt.UTC).timestamp())
@@ -316,6 +436,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the command for a host that already has the agent binary",
     )
 
+    sub.add_parser("releases", help="Signed agent releases this Controller can distribute")
+
+    upgrade = sub.add_parser("upgrade", help="Roll a release out to the fleet, one host at a time")
+    upgrade.add_argument("--version", help="Which release (default: the newest held)")
+    upgrade.add_argument("--watch", action="store_true", help="Follow the run to the end")
+    upgrade.add_argument("--status", action="store_true", help="Report the current or last run")
+    upgrade.add_argument("--cancel", action="store_true", help="Stop after the current host")
+
     for name, help_text in (
         ("approve", "Let an enrolled agent contribute to the graph"),
         ("revoke", "Stop trusting this host's certificate"),
@@ -328,6 +456,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {
     "status": cmd_status,
+    "releases": cmd_releases,
+    "upgrade": cmd_upgrade,
     "hosts": cmd_hosts,
     "token": cmd_token,
     "approve": cmd_approve,

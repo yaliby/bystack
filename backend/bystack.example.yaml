@@ -76,6 +76,27 @@ agents:
   # cold start.
   state_dir: "~/.local/state/bystack"
 
+  # Signed agent releases to distribute (ADR-0017). Empty puts them in
+  # `<state_dir>/releases`.
+  #
+  # A directory of `bystack-agent-<arch>` files, each beside the `.manifest`
+  # and `.manifest.sig` that `scripts/sign-agent.py` produced. **The Controller
+  # holds no signing key and cannot make any of them.** It picks the artifact
+  # matching each host and sends it; the host decides whether to run it,
+  # against a key compiled into the agent.
+  #
+  # That is what makes *how the files got here* an operational question rather
+  # than a trust decision -- fetched from GitHub Releases, copied off a laptop,
+  # dropped in by configuration management, all equivalent. Unlike `state_dir`
+  # above, nothing in here is worth backing up: every file is a public artifact
+  # that can be downloaded again.
+  #
+  # An empty directory is the ordinary state and not a fault. It means this
+  # Controller distributes nothing, and hosts are upgraded by running
+  # `scripts/install-agent.sh` on them -- which is what every host does for its
+  # first install anyway.
+  releases_dir: ""
+
   # Seconds between agent-side resyncs, sent to the agent in HelloAck. Long,
   # because the agent reads a unix socket on the same kernel and there is no
   # network to lose. This defends only against agent-side hash map bugs, and

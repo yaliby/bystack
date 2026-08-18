@@ -1,0 +1,39 @@
+# Watch for a release the agent has already verified and staged (ADR-0017).
+#
+#     install -m 0644 bystack-agent-update.path /etc/systemd/system/
+#     systemctl enable --now bystack-agent-update.path
+#
+# `scripts/install-agent.sh` does this. The file is here to be read: this is
+# the hinge of the whole upgrade design and an operator running a fleet is
+# entitled to see it before it is on their machines.
+#
+# **A path unit, and not `systemctl start bystack-agent-updater.service` from
+# the agent.** The agent *can* start units -- but only where
+# `packaging/polkit/49-bystack-agent.rules` is installed, and that file is
+# deliberately optional (ADR-0016): a host that only watches services does not
+# have it, and systemd answers `InteractiveAuthorizationRequired`. Building the
+# upgrade path on `StartUnit` would make a fleet-wide capability depend on an
+# unrelated opt-in, and fail on precisely the hosts whose operator chose the
+# narrower grant.
+#
+# This needs none of it -- no polkit, no new D-Bus method, nothing added to the
+# daemon's syscall surface -- and it **accepts no arguments**, so there is no
+# shape in which a compromised daemon parameterises what root does. The whole
+# of the daemon's influence over this unit is whether one file exists.
+
+[Unit]
+Description=ByStack agent: watch for a staged upgrade
+Documentation=https://github.com/yaliby/bystack/blob/main/docs/adr/0017-agent-upgrade-signed-push.md
+# Both are the agent's, and this watches inside the second.
+After=bystack-agent.service
+
+[Path]
+# Written by the agent only after the artifact beside it is complete and its
+# digest matches the signed manifest. The updater removes it before doing
+# anything else: `PathExists=` re-triggers as soon as the unit it started goes
+# inactive, so a trigger file that outlives a refusal is a oneshot in a loop.
+PathExists=/var/lib/bystack-agent/upgrade/trigger
+Unit=bystack-agent-updater.service
+
+[Install]
+WantedBy=paths.target

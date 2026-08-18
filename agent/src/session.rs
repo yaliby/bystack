@@ -26,6 +26,7 @@ use crate::host::Host;
 use crate::informer::{self, State, ALL_SLICES, HOST_SLICES};
 use crate::systemd::{Applied, Systemd};
 use crate::trust::{self, Credentials};
+use crate::upgrade;
 use crate::wire::{self, envelope::Payload, Slice};
 use crate::{Config, Endpoint};
 
@@ -104,7 +105,7 @@ pub async fn run(
         // arrives on the wire; telling the Controller lets the UI disable the
         // actions rather than offer them and watch every one bounce.
         read_only: config.read_only,
-        capabilities: capabilities(host).await,
+        capabilities: capabilities(host, config).await,
         // Our clock, so the Controller can name a skew as a skew. Certificate
         // validation is time-sensitive and a badly wrong clock otherwise
         // surfaces as a generic TLS error that sends whoever is debugging it
@@ -143,6 +144,14 @@ pub async fn run(
         } else {
             Ended::Refused(reason)
         };
+    }
+
+    // Admitted, on this connection, by this version. Recorded here and nowhere
+    // else: an accepted `HelloAck` is the only event that means "the Controller
+    // is talking to it", which is the claim a swapped-in binary is on probation
+    // for. A successful start is not that claim (ADR-0017).
+    if let Endpoint::Remote(_) = &config.controller {
+        upgrade::note_connected(&config.state_dir);
     }
 
     let resync_interval = Duration::from_secs(if ack.resync_interval == 0 {
@@ -238,6 +247,15 @@ pub async fn run(
     //: watched. See `PROCESS_POLL`.
     let mut processes = tokio::time::interval(PROCESS_POLL);
     processes.tick().await;
+
+    //: The release being pushed to this host, if one is.
+    //:
+    //: One at a time, and bound to this connection like every other correlated
+    //: exchange here. The partial file underneath it is *not* bound to the
+    //: connection: an offer arriving after a reconnect resumes from what is
+    //: already on disk, which is the difference between an upgrade that
+    //: completes over a flaky uplink and one that never does (ADR-0017).
+    let mut transfer: Option<upgrade::Transfer> = None;
 
     loop {
         tokio::select! {
@@ -492,6 +510,46 @@ pub async fn run(
                             return Ended::Disconnected(reason);
                         }
                     }
+                    // A release, pushed down the stream that is already open.
+                    //
+                    // Nothing is installed by this and nothing is installed by
+                    // the chunks that follow: the daemon verifies a signature
+                    // against a key the Controller does not have, stages inside
+                    // the directory it already owns, and writes a trigger file
+                    // that a `.path` unit turns into a oneshot with no network.
+                    // This process never touches `/usr/local/bin`, which is why
+                    // its own unit is unchanged by the feature (ADR-0017).
+                    Some(Payload::UpgradeOffer(frame)) => {
+                        let status = upgrade::offer(&config.state_dir, &frame, &mut transfer);
+                        if status.state != "accepted" {
+                            log(&format!("refusing the offered upgrade: {}", status.reason));
+                        }
+                        if sink.send(WsMessage::Binary(
+                            send(Payload::UpgradeStatus(status), &mut seq)
+                        )).await.is_err() {
+                            watcher.abort();
+                            return Ended::Disconnected("controller closed during an upgrade".into());
+                        }
+                    }
+                    // Bytes. Answered only when the transfer ends -- a status
+                    // frame per chunk would put a round trip on every 64 KB of
+                    // a two-megabyte artifact for no information anyone reads.
+                    Some(Payload::UpgradeChunk(frame)) => {
+                        if let Some(status) = upgrade::chunk(&mut transfer, &frame) {
+                            if status.state != "staged" {
+                                log(&format!("upgrade transfer failed: {}", status.reason));
+                            }
+                            if sink.send(WsMessage::Binary(
+                                send(Payload::UpgradeStatus(status), &mut seq)
+                            )).await.is_err() {
+                                watcher.abort();
+                                return Ended::Disconnected(
+                                    "controller closed during an upgrade".into()
+                                );
+                            }
+                        }
+                    }
+
                     // Our certificate is two thirds through its life. Answer
                     // with a CSR, over the connection that is already open and
                     // already authenticated -- no cron job, no second channel,
@@ -747,7 +805,15 @@ async fn push_host(
 /// `ProtectProc=invisible` hides other users' processes -- and that is a
 /// per-rule answer, not a per-host one: it shows up as a rule matching
 /// nothing, which is a state the graph already has a word for.
-async fn capabilities(host: &mut Host) -> Vec<String> {
+///
+/// `upgrade` widens it the same way `units` does, twice over. It is absent
+/// from a build compiled with no release signing keys, because such a build
+/// can verify nothing and the honest moment to say so is before two megabytes
+/// cross somebody's uplink. And it is absent on the local socket, because the
+/// agent the Controller spawned for its own machine is a file inside the
+/// Controller's own installation -- upgrading *that* is upgrading the
+/// Controller, and it is not this feature's business.
+async fn capabilities(host: &mut Host, config: &Config) -> Vec<String> {
     let mut set = vec![
         "commands".to_string(),
         "resync".into(),
@@ -761,6 +827,9 @@ async fn capabilities(host: &mut Host) -> Vec<String> {
         set.push("units".into());
     } else {
         log("no reachable systemd on this machine; units cannot be watched here");
+    }
+    if upgrade::available() && matches!(config.controller, Endpoint::Remote(_)) {
+        set.push("upgrade".into());
     }
     set
 }

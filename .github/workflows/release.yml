@@ -1,6 +1,6 @@
 # Cut a release: the binaries the installer fetches, the wheels, the image.
 #
-#     git tag v0.3.0 && git push origin v0.3.0
+#     git tag v0.4.0 && git push origin v0.4.0
 #
 # Everything an operator can reach is produced here, and the pieces are not
 # independent. `scripts/install-agent.sh` fetches `bystack-agent-<arch>` and
@@ -10,6 +10,26 @@
 # command that 404s -- which is the exact failure step 7 existed to fix, in a
 # new place. The jobs are ordered so that cannot happen quietly: the release is
 # published once, from artifacts that all had to exist.
+#
+# ## This workflow does not sign anything, and that is the design
+#
+# Agents verify a pushed release against a key compiled into themselves, and
+# `install-agent.sh` verifies a downloaded one against the same key (ADR-0017).
+# The private half is not here and must not be: in CI secrets it would be
+# reachable by a workflow change, which would make the CI account worth more
+# than the key itself.
+#
+# So the second half of the pipeline is run by hand, on the machine that holds
+# the key, once this has finished:
+#
+#     scripts/release-agent.sh v0.4.0 --attach
+#
+# It downloads exactly what was published here, signs it, verifies it under two
+# implementations, and uploads the `.manifest` and `.manifest.sig`. Until it
+# runs, the release is usable and unsigned: `install-agent.sh` falls back to
+# SHA256SUMS and says so, and a Controller declines to push a release it has no
+# signature for. Both of those are visible rather than silent, which is what
+# makes the window safe to have.
 
 name: Release
 

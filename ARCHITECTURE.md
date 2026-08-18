@@ -300,7 +300,19 @@ Three frame families:
 | ↓         | `RenewalOffer`   | The certificate is 2/3 through its life    |
 | ↑         | `CertificateRequest` | A CSR, in answer to that offer         |
 | ↓         | `CertificateIssued`  | The renewed certificate                |
+| ↓         | `UpgradeOffer`   | A signed release is available for this host |
+| ↓         | `UpgradeChunk`   | The artifact, 64 KB at a time              |
+| ↑         | `UpgradeStatus`  | Accepted, staged, refused or failed        |
 | ↕         | `ping` / `pong`  | Every 30s, agent-initiated                 |
+
+The last three carry a binary down the same socket as the live graph, which is
+why they are chunked: a multi-megabyte burst on this connection is a topology
+map that stops moving for the duration of every upgrade. **The Controller
+signs nothing** — it distributes a manifest it cannot produce, and the agent
+verifies it against a key compiled into itself
+([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)). The process that
+receives the binary is not the process that installs it, so the agent's own
+unit never gains write access to a directory of executables.
 
 Enrollment (`EnrollRequest` / `EnrollResponse`) uses the same framing on a
 separate path that requires no client certificate, because an agent enrolling
@@ -621,3 +633,4 @@ Controller/Agent pivot onward are separate documents in
 | [0014](docs/adr/0014-no-user-identity.md) | No user identity; the network is the boundary, and destructive verbs stay out |
 | [0015](docs/adr/0015-agent-upgrade.md) | Controller-driven agent upgrade, and why it is not automated |
 | [0016](docs/adr/0016-watched-units-and-processes.md) | Units and processes are *selected*, not discovered; identity is the rule, not the pid |
+| [0017](docs/adr/0017-agent-upgrade-signed-push.md) | Signed push upgrade: the Controller distributes, the host verifies; supersedes ADR-0015 |

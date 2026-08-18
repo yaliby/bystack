@@ -29,6 +29,13 @@ import {
   versionSkew,
   type HostRow,
 } from '../model/hosts';
+import {
+  describeRollout,
+  rolloutFailed,
+  rolloutRows,
+  upgradeOffer,
+  type UpgradeOffer,
+} from '../model/upgrade';
 import type { Fleet } from '../model/useFleet';
 import { AddHostDialog } from './AddHostDialog';
 
@@ -60,6 +67,7 @@ export function HostsPanel({
   const [token, setToken] = useState<JoinToken | null>(null);
   const [minting, setMinting] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), TICK_MS);
@@ -70,6 +78,13 @@ export function HostsPanel({
   const listenerOff = fleet.terms !== null && !fleet.terms.enabled;
   const localNotice = localAgentNotice(fleet.terms, rows);
   const offVersion = skewCount(rows, controllerVersion);
+  const offer = upgradeOffer(fleet.agents, controllerVersion, fleet.releases, fleet.rollout);
+
+  const startUpgrade = async (version: string) => {
+    setRefusal(null);
+    const refused = await fleet.upgrade(version);
+    if (refused) setRefusal(refused);
+  };
 
   const addHost = async () => {
     setMinting(true);
@@ -130,23 +145,26 @@ export function HostsPanel({
         </p>
       ) : null}
 
-      {/* Once, above the list, and not on each card that differs: the command
-          is the same on every one of them, and a constant repeated per row is
-          how four hosts become four copies of one sentence. The cards say
-          *which*; this says what to do about it.
-
-          Shown verbatim from the Controller, which is the whole point. It
-          carries the version the Controller is actually running, so upgrading
-          the Controller changes this line without anyone editing it — and it
-          has no token, which is the part an operator would get wrong from
-          memory. */}
-      {offVersion > 0 && fleet.terms ? (
-        <UpgradeNotice
-          count={offVersion}
-          controllerVersion={controllerVersion}
-          command={fleet.terms.upgrade}
-        />
-      ) : null}
+      {/* Once, above the list, and not on each card that differs. The cards
+          say *which* hosts; this says what to do about them, and what that is
+          depends on this Controller rather than on a preference: one holding a
+          signed release pushes it (ADR-0017), and one holding nothing hands
+          out the installer line (ADR-0015). A rollout in flight replaces both,
+          because an operator looking at this panel during one is asking about
+          it. */}
+      <Upgrade
+        offer={offer}
+        count={offVersion}
+        controllerVersion={controllerVersion}
+        command={fleet.terms?.upgrade ?? null}
+        refusal={refusal}
+        onStart={startUpgrade}
+        onStop={() => void fleet.stopUpgrade()}
+        onDismiss={() => {
+          setRefusal(null);
+          fleet.dismissRollout();
+        }}
+      />
 
       <div className="hosts__list">
         {rows.map((row) => (
@@ -189,6 +207,171 @@ export function HostsPanel({
 }
 
 /**
+ * The one thing to do about a fleet that is not on the Controller's version.
+ *
+ * A switch over `UpgradeOffer` and nothing else, because the four cases want
+ * four different paragraphs and the decision between them is in
+ * `model/upgrade.ts` where it is tested. A component that took five booleans
+ * would reliably render a fifth case that reads as nonsense.
+ *
+ * The button is the whole feature and it is deliberately unremarkable: no
+ * confirmation dialog, no host picker, no "are you sure". What makes it safe
+ * is not ceremony in front of it — it is that the run is staged, that each
+ * host confirms before the next is touched, that a failure stops it, and that
+ * a host which comes up unable to reach the Controller puts its previous agent
+ * back by itself. Ceremony would suggest the danger is in the click.
+ */
+function Upgrade({
+  offer,
+  count,
+  controllerVersion,
+  command,
+  refusal,
+  onStart,
+  onStop,
+  onDismiss,
+}: {
+  offer: UpgradeOffer;
+  count: number;
+  controllerVersion: string | null;
+  command: string | null;
+  refusal: string | null;
+  onStart: (version: string) => void;
+  onStop: () => void;
+  onDismiss: () => void;
+}) {
+  if (offer.kind === 'running' || offer.kind === 'ended') {
+    return (
+      <RolloutNotice
+        offer={offer}
+        onStop={onStop}
+        onDismiss={onDismiss}
+        refusal={refusal}
+      />
+    );
+  }
+  if (count === 0) return null;
+
+  if (offer.kind === 'push') {
+    return (
+      <div className="hosts__upgrade">
+        <p>
+          {offer.hosts === 1 ? '1 host can' : `${offer.hosts} hosts can`} take{' '}
+          {offer.version} from this Controller, one at a time.
+        </p>
+        <div className="actions">
+          <button
+            type="button"
+            className="action action--primary"
+            onClick={() => onStart(offer.version)}
+          >
+            Upgrade {offer.hosts === 1 ? 'it' : 'them'} to {offer.version}
+          </button>
+        </div>
+        {/* The sentence that decides whether this button is frightening. Every
+            claim in it is enforced somewhere other than this file. */}
+        <p className="hosts__upgrade-note">
+          Each host verifies the release against a key this Controller does not have, installs
+          it itself, and puts the old agent back if the new one cannot reach us. One host at a
+          time, and a failure stops the run.
+        </p>
+        {refusal ? <p className="hosts__error">{refusal}</p> : null}
+        {/* The mixed fleet this lands into and stays in. A host from before
+            signed push has no updater unit to trigger, so the run steps over
+            it — and an operator who cannot see that reads the finished run as
+            covering everything. */}
+        {offer.installer > 0 && command ? (
+          <>
+            <p className="hosts__upgrade-note">
+              {offer.installer === 1 ? '1 host is' : `${offer.installer} hosts are`} running an
+              agent from before this existed, so a rollout will skip{' '}
+              {offer.installer === 1 ? 'it' : 'them'}. Run this on{' '}
+              {offer.installer === 1 ? 'it' : 'each of them'} once, as root, and the upgrade
+              after that is this button:
+            </p>
+            <CopyableCommand command={command} label="Upgrade command" />
+          </>
+        ) : null}
+      </div>
+    );
+  }
+
+  // Nothing signed to push, which is the state every Controller starts in and
+  // most stay in. The instruction that was here before ADR-0017, unchanged.
+  return command ? (
+    <UpgradeNotice count={count} controllerVersion={controllerVersion} command={command} />
+  ) : null;
+}
+
+/**
+ * A run, while it happens and after it stops.
+ *
+ * There is no progress bar, and the absence is the design. A rollout reports
+ * which host it is on and a row per host once that host is done; the *fleet's*
+ * progress is the version chip on each card below, which was already there. A
+ * percentage here would be a second model of the same fact, and the two would
+ * disagree exactly when a run went wrong.
+ */
+function RolloutNotice({
+  offer,
+  refusal,
+  onStop,
+  onDismiss,
+}: {
+  offer: Extract<UpgradeOffer, { kind: 'running' | 'ended' }>;
+  refusal: string | null;
+  onStop: () => void;
+  onDismiss: () => void;
+}) {
+  const { rollout } = offer;
+  const failed = rolloutFailed(rollout);
+  const rows = rolloutRows(rollout);
+
+  return (
+    <div className={`hosts__upgrade${failed ? ' hosts__upgrade--failed' : ''}`}>
+      <p>{describeRollout(rollout)}</p>
+
+      {rows.length > 0 ? (
+        <ul className="hosts__rollout">
+          {rows.map((row) => (
+            <li key={row.engineId} className={`hosts__rollout-row is-${row.state.replace(' ', '-')}`}>
+              <span className="hosts__rollout-host" title={row.engineId}>
+                {row.label}
+              </span>
+              <span className="hosts__rollout-state">{row.state}</span>
+              {row.reason ? <span className="hosts__rollout-why">{row.reason}</span> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {refusal ? <p className="hosts__error">{refusal}</p> : null}
+
+      <div className="actions">
+        {offer.kind === 'running' ? (
+          <button type="button" className="action action--disruptive" onClick={onStop}>
+            Stop after this host
+          </button>
+        ) : (
+          <button type="button" className="action action--safe" onClick={onDismiss}>
+            Dismiss
+          </button>
+        )}
+      </div>
+      {offer.kind === 'running' ? (
+        /* Said because the button says "after this host" and an operator
+           under pressure will read that as a delay rather than as a promise.
+           A host mid-transfer has written a partial file and nothing else. */
+        <p className="hosts__upgrade-note">
+          The host being upgraded finishes; nothing further is touched. A transfer that is
+          interrupted installs nothing.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * Hosts not on the Controller's version, and the line that fixes it.
  *
  * *Not* on it, rather than behind it: `versionSkew` compares strings and takes
@@ -219,6 +402,36 @@ function UpgradeNotice({
   controllerVersion: string | null;
   command: string;
 }) {
+  return (
+    <div className="hosts__upgrade">
+      <p>
+        {count === 1 ? '1 host is' : `${count} hosts are`} not on this Controller's
+        version, which is {controllerVersion}. Run this on each of them, as root:
+      </p>
+      <CopyableCommand command={command} label="Upgrade command" />
+      {/* The sentence that saves an afternoon. Every other command in this
+          panel carries a token, so its absence here looks like something the
+          UI forgot rather than the thing that makes this an upgrade. */}
+      <p className="hosts__upgrade-note">
+        No token, deliberately: that is what keeps the host's identity instead of
+        enrolling it again as a stranger. Nothing is deleted, and the host drops off the
+        map for a second while the agent restarts.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * A command to run somewhere else, with the one affordance that matters.
+ *
+ * Extracted because two different situations now print one: a fleet with
+ * nothing to push, and the hosts a rollout will skip. It was already the
+ * `token__command` field rather than a `<code>` block for a reason worth
+ * keeping — that field is selectable and read-only, so an operator whose
+ * browser refuses the clipboard (an insecure origin, which is exactly what a
+ * Controller on a private IP is) can still select the text.
+ */
+function CopyableCommand({ command, label }: { command: string; label: string }) {
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -241,38 +454,26 @@ function UpgradeNotice({
   };
 
   return (
-    <div className="hosts__upgrade">
-      <p>
-        {count === 1 ? '1 host is' : `${count} hosts are`} not on this Controller's
-        version, which is {controllerVersion}. Run this on each of them, as root:
-      </p>
+    <>
       <div className="token">
         <input
           className="token__command"
           readOnly
           value={command}
-          aria-label="Upgrade command"
+          aria-label={label}
           onFocus={(event) => event.currentTarget.select()}
         />
         <button type="button" className="control token__copy" onClick={() => void copy()}>
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      {/* The sentence that saves an afternoon. Every other command in this
-          panel carries a token, so its absence here looks like something the
-          UI forgot rather than the thing that makes this an upgrade. */}
-      <p className="hosts__upgrade-note">
-        No token, deliberately: that is what keeps the host's identity instead of
-        enrolling it again as a stranger. Nothing is deleted, and the host drops off the
-        map for a second while the agent restarts.
-      </p>
       {failed ? (
         <p className="hosts__upgrade-note">
           The browser would not write to the clipboard. Select the command above and copy
           it by hand.
         </p>
       ) : null}
-    </div>
+    </>
   );
 }
 
