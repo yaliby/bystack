@@ -280,20 +280,76 @@ if [ "$attach" = false ]; then
 	echo
 	echo "Signed, not uploaded. Attach them with:"
 	echo "  scripts/release-agent.sh ${tag} --local --attach"
-	echo "or by hand:"
-	echo "  gh release upload ${tag} ${OUT}/bystack-agent-*.manifest ${OUT}/bystack-agent-*.manifest.sig"
+	echo
+	echo "That uses \`gh\` where it is installed and the REST API with GH_TOKEN where"
+	echo "it is not. The four files are public artifacts either way -- the key that"
+	echo "made them does not leave this machine, so they can also be attached by hand"
+	echo "from anywhere."
 	exit 0
 fi
 
-command -v gh >/dev/null 2>&1 ||
-	die "no \`gh\`, so the signatures cannot be uploaded. They are in ${OUT}."
-
 echo "==> attaching to ${tag}"
-# `--clobber`, because the failure this run exists to prevent is a signature
-# that does not match the artifact, and re-signing after fixing one is the
-# ordinary way out. Refusing to overwrite would leave the wrong one in place.
-gh release upload "$tag" --repo "$GH_REPO" --clobber \
-	"${OUT}"/bystack-agent-*.manifest "${OUT}"/bystack-agent-*.manifest.sig
+
+# Overwriting rather than refusing, in both paths below. The failure this run
+# exists to prevent is a signature that does not match the artifact, and
+# re-signing after fixing one is the ordinary way out; refusing to overwrite
+# would leave the wrong one in place, which is the state this is for escaping.
+if command -v gh >/dev/null 2>&1; then
+	gh release upload "$tag" --repo "$GH_REPO" --clobber \
+		"${OUT}"/bystack-agent-*.manifest "${OUT}"/bystack-agent-*.manifest.sig
+else
+	# No `gh`, and that should not be what stops a release being signed. The
+	# machine this runs on is chosen for holding the key, not for having
+	# GitHub's CLI installed -- and everything above already needed `curl`,
+	# so the fallback adds no dependency that was not there.
+	token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+	[ -n "$token" ] || die "no \`gh\`, and neither GH_TOKEN nor GITHUB_TOKEN is set,
+  so the signatures cannot be uploaded. They are in ${OUT} and can be attached
+  by hand from any machine -- they are public artifacts, and the key that made
+  them stays here."
+
+	api="https://api.github.com/repos/${GH_REPO}"
+	release="$(curl -fsSL -H "Authorization: Bearer ${token}" "${api}/releases/tags/${tag}")" ||
+		die "no published release for ${tag}. This signs what the release workflow
+  published; if that has not finished, there is nothing to attach to yet."
+
+	# The id, and the names already attached. Parsed with python rather than by
+	# pattern: `upload_url` carries a `{?name,label}` template and an asset
+	# named by an attacker is not a thing a regex should be deciding about.
+	id="$("$python" -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<-EOF
+		${release}
+	EOF
+	)"
+
+	for file in "${OUT}"/bystack-agent-*.manifest "${OUT}"/bystack-agent-*.manifest.sig; do
+		name="$(basename "$file")"
+
+		# Delete first: the upload endpoint refuses a name that already exists
+		# rather than replacing it, so this is what `--clobber` spells above.
+		existing="$("$python" -c '
+import json, sys
+name = sys.argv[1]
+for asset in json.load(sys.stdin):
+    if asset["name"] == name:
+        print(asset["id"])
+' "$name" <<-EOF
+			$(curl -fsSL -H "Authorization: Bearer ${token}" "${api}/releases/${id}/assets")
+		EOF
+		)"
+		if [ -n "$existing" ]; then
+			curl -fsSL -X DELETE -H "Authorization: Bearer ${token}" \
+				"${api}/releases/assets/${existing}" >/dev/null
+		fi
+
+		curl -fsSL -X POST \
+			-H "Authorization: Bearer ${token}" \
+			-H "Content-Type: application/octet-stream" \
+			--data-binary "@${file}" \
+			"https://uploads.github.com/repos/${GH_REPO}/releases/${id}/assets?name=${name}" \
+			>/dev/null || die "could not upload ${name}"
+		echo "    ${name}"
+	done
+fi
 
 echo
 echo "${tag} is signed. A host installs it with the command the dashboard prints,"
