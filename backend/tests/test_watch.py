@@ -850,7 +850,7 @@ def test_a_group_command_on_a_read_only_controller_is_one_refusal_not_eight(
         assert refused.json()["detail"]["reason"] == "read_only"
 
 
-def test_a_host_that_no_longer_holds_the_entry_is_named_rather_than_skipped(
+def test_a_host_that_holds_none_of_the_selection_is_named_rather_than_skipped(
     controller: Any,
 ) -> None:
     """Removed since the operator's screen was drawn, or never there. A host
@@ -878,11 +878,56 @@ def test_a_host_that_no_longer_holds_the_entry_is_named_rather_than_skipped(
         assert answer.status_code == 200, answer.text
         rows = {host["engine_id"]: host for host in answer.json()["hosts"]}
         assert rows["NEVERWATCHED"]["status"] == "unknown_target"
-        assert "no longer watches" in rows["NEVERWATCHED"]["detail"]
+        # Not "no longer watches": this host never held the entry, and a
+        # message that says otherwise sends the operator looking for a removal
+        # that never happened.
+        assert rows["NEVERWATCHED"]["detail"] == "this host watches nothing from this selection"
         assert rows[ENGINE]["status"] == "read_only"
         # A host that never ran makes the whole thing a failure: the operator
         # asked for two machines and reached fewer.
         assert answer.json()["status"] == "failed"
+
+
+def test_a_selection_that_stored_nothing_mints_a_group_with_no_members(
+    controller: Any,
+) -> None:
+    """The third way a group command finds no entry, and the only one that is
+    not the operator's screen going stale.
+
+    A fan-out mints its group id per *request*, and a host that already watches
+    the target refuses the duplicate (two entries for one target would be two
+    nodes with the same content and different URNs). Ask for something already
+    watched and the answer is `stored: 0` with a reason per host -- but the
+    group id in that same answer now names a group that never had a member and
+    never will. Operating on it is not a stale screen and must not be described
+    as one.
+    """
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(controller.ui)
+    with client:
+        first = client.post(
+            "/api/v1/agents/watch",
+            json={"kind": "unit", "name": "nginx", "engine_ids": [ENGINE]},
+        ).json()
+        again = client.post(
+            "/api/v1/agents/watch",
+            json={"kind": "unit", "name": "nginx", "engine_ids": [ENGINE]},
+        ).json()
+
+        assert first["stored"] == 1
+        assert again["stored"] == 0
+        assert "already watches" in again["hosts"][0]["detail"]
+        # A fresh id all the same, which is the part worth pinning: the caller
+        # is handed something that looks exactly like a usable group.
+        assert again["group_id"] != first["group_id"]
+
+        answer = client.post(
+            "/api/v1/commands/group",
+            json={"kind": "restart", "group_id": again["group_id"], "engine_ids": [ENGINE]},
+        )
+        assert answer.status_code == 200, answer.text
+        row = answer.json()["hosts"][0]
+        assert row["status"] == "unknown_target"
+        assert row["detail"] == "this host watches nothing from this selection"
 
 
 def test_a_group_command_is_bounded_by_the_command_limit_not_the_watch_one(

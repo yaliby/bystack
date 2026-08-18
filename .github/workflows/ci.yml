@@ -31,11 +31,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The floor from `requires-python`, and the current release. The floor
-        # is the one that matters: it is what a distribution's python3 will be
-        # for years, and a 3.13-only syntax slipping in is invisible on a
-        # laptop that has 3.13.
-        python: ["3.12", "3.13"]
+        # The floor from `requires-python`, and every version above it that a
+        # user's `python3` is actually going to be.
+        #
+        # The floor is what a distribution's python3 will be for years, and a
+        # 3.13-only syntax slipping in is invisible on a laptop that has 3.13.
+        # The top of the range is here for the opposite reason: `requires-python`
+        # is `>=3.12` with no upper bound, so pip installs the wheel on whatever
+        # is newest and the operator is the one who finds out. Fedora 44 already
+        # ships 3.14 as its `python3`, which makes it a version this is
+        # *installed on* today rather than one it might reach one day.
+        python: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

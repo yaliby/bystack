@@ -108,7 +108,7 @@ async def run_group_command(
     are tied back together.
 
     **One host's refusal is not the request's.** A machine that is asleep, or
-    that no longer holds an entry from this group, is reported in its own row
+    that holds no entry from this group, is reported in its own row
     while the rest proceed. The exception is read-only, which is a fact about
     this Controller rather than about any host: when it is the *only* thing
     that happened, the whole request is a `403` and not eight identical rows.
@@ -126,16 +126,24 @@ async def run_group_command(
             None,
         )
         if entry is None:
-            # Removed on that host since the operator's screen was drawn, or
-            # never there. Named rather than skipped: a host that silently
-            # disappears from the answer is indistinguishable from one that
-            # was never asked.
+            # Removed on that host since the operator's screen was drawn, never
+            # there, or -- the one that is easy to miss -- from a selection that
+            # stored nothing anywhere: the fan-out mints a group id per request
+            # and a host that already watches the target refuses the duplicate,
+            # so a group can be born with no members at all.
+            #
+            # Which is why this does not say "no longer". Only the first of the
+            # three is a host that ever held the entry, and a message asserting
+            # it sends an operator looking for the moment it was removed.
+            #
+            # Named rather than skipped: a host that silently disappears from
+            # the answer is indistinguishable from one that was never asked.
             hosts.append(
                 GroupCommandHostOut(
                     engine_id=engine_id,
                     ran=False,
                     status=str(RejectionReason.UNKNOWN_TARGET),
-                    detail="this host no longer watches anything from this selection",
+                    detail="this host watches nothing from this selection",
                 )
             )
             continue
