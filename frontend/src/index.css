@@ -1784,6 +1784,81 @@ body {
   line-height: 1.5;
 }
 
+/* Updating the Controller itself (ADR-0018).
+
+   Above the fleet's own upgrade block and styled like it, because they are two
+   halves of one operation in the order they happen: this machine first, then
+   the hosts behind it. The border is what separates them -- accent rather than
+   hairline, since this is the section that acts on the thing the operator is
+   looking at right now. */
+.hosts__self {
+  flex: none;
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--hairline));
+  border-radius: var(--r-inner);
+  background: var(--well);
+}
+
+.hosts__self > p {
+  margin: 0 0 9px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.hosts__self > p.hosts__upgrade-note {
+  margin: 9px 0 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.hosts__self-version strong {
+  color: var(--ink-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A run that ended somewhere an operator has to look at -- including a
+   rollback, which is the system working and still means the published release
+   does not run here. */
+.hosts__self--failed {
+  border-color: color-mix(in srgb, var(--critical) 45%, var(--hairline));
+  background: color-mix(in srgb, var(--critical) 7%, var(--well));
+}
+
+/* The only progress bar in the product, and it earns the exception.
+
+   Everywhere else, progress is the fleet's own state changing -- a version
+   chip moving on a card -- because there is a real fact to draw. Here there is
+   not: the Controller is being replaced, so for part of the operation there is
+   nothing to poll and no state to reflect. A bar is honest about that in a way
+   a list of hosts would not be, and it is what stops an operator concluding
+   that a page which has gone quiet has broken. */
+.hosts__self-bar {
+  height: 4px;
+  margin: 0 0 9px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  overflow: hidden;
+}
+
+.hosts__self-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  /* Slow, because the steps behind it are slow and unevenly sized. A fast
+     transition on a bar that sits at 25% for a minute reads as a stall; a slow
+     one reads as work. */
+  transition: width 900ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hosts__self-fill {
+    transition: none;
+  }
+}
+
 /* Version skew is a report, not a fault, and the colour is the argument: the
    same quiet well as a note rather than `--critical`, which is reserved for
    something that is actually wrong. Every host counted here is managed,

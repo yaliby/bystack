@@ -28,6 +28,7 @@ from typing import Final
 
 import uvicorn
 
+from bystack import __version__
 from bystack.api.app import (
     build_context,
     create_agent_app,
@@ -50,6 +51,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", help="Override the configured bind address")
     parser.add_argument("--port", type=int, help="Override the configured port")
     parser.add_argument("--reload", action="store_true", help="Auto-reload (development)")
+    # The version, on the same terms the agent prints it: one line, ending in
+    # the number. `bystack-manager` reads the last whitespace-separated token
+    # of this to decide whether a release is an upgrade (ADR-0018), and
+    # `scripts/release-agent.sh` reads it to check that the tag it is about to
+    # sign matches the artifact it is signing. Both take the last field, so a
+    # prefix is free to change and the shape is not.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"bystack {__version__}",
+        help="Print the version and exit",
+    )
     return parser.parse_args(argv)
 
 

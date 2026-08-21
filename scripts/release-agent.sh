@@ -2,6 +2,13 @@
 #
 # Sign a release, on the machine that holds the key, and attach the signatures.
 #
+# Two artifacts now, under one key: `bystack-agent-<arch>`, which a fleet
+# installs (ADR-0017), and `bystack-controller-<arch>`, which the machine
+# running the Controller installs on itself (ADR-0018). The only difference
+# between their manifests is the `name` field -- which is exactly the situation
+# that field was put inside the signed document for, because a key that signs
+# two things must not let one be presented as the other.
+#
 #     scripts/release-agent.sh v0.4.0                 # fetch the published tag, sign
 #     scripts/release-agent.sh v0.4.0 --attach        # ... and upload the signatures
 #     scripts/release-agent.sh v0.4.0 --local         # sign what build-agent.sh made
@@ -42,8 +49,10 @@
 #   - and under openssl, which is the implementation `install-agent.sh` uses.
 #     Two verifiers, because the one bug that would be invisible to a single
 #     one is a manifest that only one of them can read.
-#   - both architectures, or neither. A tag with one signed artifact is a
-#     fleet that upgrades on half its hosts and refuses on the other half.
+#   - both architectures of both artifacts, or none. A tag with one signed
+#     artifact is a fleet that upgrades on half its hosts and refuses on the
+#     other half -- or a Controller that updates itself and then has nothing
+#     signed to hand the fleet.
 #
 set -euo pipefail
 
@@ -52,6 +61,11 @@ GH_REPO="${BYSTACK_REPO:-yaliby/bystack}"
 KEY="${BYSTACK_SIGNING_KEY:-${HOME}/.bystack/release.key}"
 OUT="${REPO_DIR}/dist"
 ARCHES=(x86_64 aarch64)
+
+#: What this signs, in the order it signs them. The agent first because it is
+#: the one a fleet cannot do without; a run that dies half-way has at least
+#: left the fleet upgradable.
+ARTIFACTS=(bystack-agent bystack-controller)
 
 tag=""
 local_build=false
@@ -123,9 +137,12 @@ mkdir -p "$OUT"
 
 if [ "$local_build" = true ]; then
 	echo "==> signing the local build in ${OUT}"
-	for arch in "${ARCHES[@]}"; do
-		[ -f "${OUT}/bystack-agent-${arch}" ] ||
-			die "no ${OUT}/bystack-agent-${arch}. Run scripts/build-agent.sh first."
+	for artifact in "${ARTIFACTS[@]}"; do
+		for arch in "${ARCHES[@]}"; do
+			[ -f "${OUT}/${artifact}-${arch}" ] ||
+				die "no ${OUT}/${artifact}-${arch}. Run scripts/build-agent.sh and
+  scripts/build-controller.sh first."
+		done
 	done
 else
 	base="https://github.com/${GH_REPO}/releases/download/${tag}"
@@ -135,9 +152,11 @@ else
 	# from the same commit is *not* the same file: a different toolchain, a
 	# different cache, a dirty tree. Signing a local rebuild would produce a
 	# manifest whose digest matches nothing anyone can download.
-	for arch in "${ARCHES[@]}"; do
-		curl -fsSL "${base}/bystack-agent-${arch}" -o "${OUT}/bystack-agent-${arch}" ||
-			die "no bystack-agent-${arch} at ${tag}. Has the release workflow finished?"
+	for artifact in "${ARTIFACTS[@]}"; do
+		for arch in "${ARCHES[@]}"; do
+			curl -fsSL "${base}/${artifact}-${arch}" -o "${OUT}/${artifact}-${arch}" ||
+				die "no ${artifact}-${arch} at ${tag}. Has the release workflow finished?"
+		done
 	done
 	curl -fsSL "${base}/SHA256SUMS" -o "${OUT}/SHA256SUMS.published" ||
 		die "no SHA256SUMS at ${tag}"
@@ -147,16 +166,21 @@ else
 	# the one failure that would otherwise be signed, published, and discovered
 	# by a fleet.
 	echo "==> checksums as published"
-	for arch in "${ARCHES[@]}"; do
-		want="$(awk -v f="bystack-agent-${arch}" '$2 == f || $2 == "*"f {print $1}' "${OUT}/SHA256SUMS.published")"
-		got="$(sha256sum "${OUT}/bystack-agent-${arch}" | cut -d' ' -f1)"
-		[ -n "$want" ] || die "SHA256SUMS at ${tag} names no bystack-agent-${arch}"
-		[ "$want" = "$got" ] || die "bystack-agent-${arch} does not match the published SHA256SUMS"
-		echo "    bystack-agent-${arch}  ok"
+	for artifact in "${ARTIFACTS[@]}"; do
+		for arch in "${ARCHES[@]}"; do
+			name="${artifact}-${arch}"
+			want="$(awk -v f="$name" '$2 == f || $2 == "*"f {print $1}' "${OUT}/SHA256SUMS.published")"
+			got="$(sha256sum "${OUT}/${name}" | cut -d' ' -f1)"
+			[ -n "$want" ] || die "SHA256SUMS at ${tag} names no ${name}"
+			[ "$want" = "$got" ] || die "${name} does not match the published SHA256SUMS"
+			echo "    ${name}  ok"
+		done
 	done
 fi
 
-chmod +x "${OUT}"/bystack-agent-*
+for artifact in "${ARTIFACTS[@]}"; do
+	chmod +x "${OUT}/${artifact}"-*
+done
 
 # --------------------------------------------------------------------------
 # 2. The version in the manifest is the version the binary reports
@@ -178,17 +202,21 @@ esac
 
 echo "==> version"
 checked=false
-for arch in "${ARCHES[@]}"; do
-	if [ "$arch" = "$native" ]; then
-		reported="$("${OUT}/bystack-agent-${arch}" --version | awk '{print $NF}')"
-		[ "$reported" = "$version" ] ||
-			die "the tag says ${version} and bystack-agent-${arch} reports ${reported}.
+for artifact in "${ARTIFACTS[@]}"; do
+	name="${artifact}-${native}"
+	[ -f "${OUT}/${name}" ] || continue
+	# `SHIV_ROOT` into a scratch directory for the Controller, which is a
+	# zipapp and unpacks itself on first run. Left to its default it would
+	# populate the signer's home directory with a copy of every release they
+	# have ever signed.
+	reported="$(SHIV_ROOT="$(mktemp -d)" "${OUT}/${name}" --version | awk '{print $NF}')"
+	[ "$reported" = "$version" ] ||
+		die "the tag says ${version} and ${name} reports ${reported}.
   Signing it as ${version} would give every host a manifest that disagrees with
-  the binary it describes, and the agent's anti-downgrade check reads the
-  binary. Fix the version in the tree and re-cut the tag."
-		echo "    bystack-agent-${arch} reports ${reported}"
-		checked=true
-	fi
+  the binary it describes, and the anti-downgrade check reads the binary. Fix
+  the version in the tree and re-cut the tag."
+	echo "    ${name} reports ${reported}"
+	checked=true
 done
 if [ "$checked" = false ]; then
 	echo "    no ${native} artifact in this release, so nothing here can be run;"
@@ -206,10 +234,16 @@ fi
 released_at="$(date -u +%s)"
 
 echo "==> signing"
-for arch in "${ARCHES[@]}"; do
-	"$python" "${REPO_DIR}/scripts/sign-agent.py" sign "${OUT}/bystack-agent-${arch}" \
-		--key "$KEY" --version "$version" --arch "$arch" --released-at "$released_at" |
-		sed 's/^/    /'
+for artifact in "${ARTIFACTS[@]}"; do
+	for arch in "${ARCHES[@]}"; do
+		# `--name` explicitly rather than letting it be read off the file name.
+		# The one mistake this whole field exists to prevent is signing one
+		# artifact as the other, and a run that inferred it would infer it from
+		# the same string it is meant to be checking.
+		"$python" "${REPO_DIR}/scripts/sign-agent.py" sign "${OUT}/${artifact}-${arch}" \
+			--key "$KEY" --name "$artifact" --version "$version" --arch "$arch" \
+			--released-at "$released_at" | sed 's/^/    /'
+	done
 done
 
 # --------------------------------------------------------------------------
@@ -217,12 +251,23 @@ done
 # --------------------------------------------------------------------------
 
 echo "==> verifying against agent/keys/ (what a host will accept)"
-for arch in "${ARCHES[@]}"; do
-	# No `--key`: the default is `agent/keys/*.pub`, which is the point. This
-	# passes only if the key just used to sign is one the fleet was built to
-	# trust, which is the failure that is otherwise found by a fleet.
-	"$python" "${REPO_DIR}/scripts/sign-agent.py" verify "${OUT}/bystack-agent-${arch}" |
-		sed 's/^/    /'
+for artifact in "${ARTIFACTS[@]}"; do
+	for arch in "${ARCHES[@]}"; do
+		# No `--key`: the default is `agent/keys/*.pub`, which is the point.
+		# This passes only if the key just used to sign is one the fleet was
+		# built to trust, which is the failure that is otherwise found by a
+		# fleet -- and, since ADR-0018, by a Controller that will not update
+		# itself.
+		"$python" "${REPO_DIR}/scripts/sign-agent.py" verify "${OUT}/${artifact}-${arch}" |
+			sed 's/^/    /'
+	done
+done
+
+#: Every artifact this run signed, as file-name stems. Built once here because
+#: the openssl loop below and the completeness check after it both need it.
+manifests=()
+for artifact in "${ARTIFACTS[@]}"; do
+	for arch in "${ARCHES[@]}"; do manifests+=("${artifact}-${arch}"); done
 done
 
 echo "==> verifying with openssl (what install-agent.sh will use)"
@@ -230,7 +275,7 @@ pem="$(mktemp)"
 trap 'rm -f "$pem"' EXIT
 sh "${REPO_DIR}/scripts/install-agent.sh" --keys >/dev/null ||
 	die "install-agent.sh cannot decode its own keys"
-for arch in "${ARCHES[@]}"; do
+for name in "${manifests[@]}"; do
 	verified=false
 	# Every key in the installer's set, because that is what the installer
 	# does: during a rotation more than one is legitimate and exactly one works.
@@ -244,33 +289,33 @@ for arch in "${ARCHES[@]}"; do
 	csplit -z -f "${pem}." -b '%d.pem' "$pem" '/BEGIN PUBLIC KEY/' '{*}' >/dev/null 2>&1 || cp "$pem" "${pem}.0.pem"
 	for key in "${pem}."*.pem; do
 		if openssl pkeyutl -verify -pubin -inkey "$key" -rawin \
-			-in "${OUT}/bystack-agent-${arch}.manifest" \
-			-sigfile "${OUT}/bystack-agent-${arch}.manifest.sig" >/dev/null 2>&1; then
+			-in "${OUT}/${name}.manifest" \
+			-sigfile "${OUT}/${name}.manifest.sig" >/dev/null 2>&1; then
 			verified=true
 			break
 		fi
 	done
 	rm -f "${pem}."*.pem
 	[ "$verified" = true ] ||
-		die "openssl will not verify bystack-agent-${arch}.manifest against the
-  keys in install-agent.sh, even though python did. The two implementations
-  disagree, which means one of them is reading a different document."
-	echo "    bystack-agent-${arch}.manifest  ok"
+		die "openssl will not verify ${name}.manifest against the keys in
+  install-agent.sh, even though python did. The two implementations disagree,
+  which means one of them is reading a different document."
+	echo "    ${name}.manifest  ok"
 done
 
 # --------------------------------------------------------------------------
 # 5. Both, or neither
 # --------------------------------------------------------------------------
 
-for arch in "${ARCHES[@]}"; do
+for name in "${manifests[@]}"; do
 	for suffix in "" .manifest .manifest.sig; do
-		[ -s "${OUT}/bystack-agent-${arch}${suffix}" ] ||
-			die "bystack-agent-${arch}${suffix} is missing or empty; not attaching a partial release"
+		[ -s "${OUT}/${name}${suffix}" ] ||
+			die "${name}${suffix} is missing or empty; not attaching a partial release"
 	done
 done
 
 echo
-ls -l "${OUT}"/bystack-agent-*.manifest "${OUT}"/bystack-agent-*.manifest.sig
+ls -l "${OUT}"/*.manifest "${OUT}"/*.manifest.sig
 
 # --------------------------------------------------------------------------
 # 6. Attach
@@ -282,7 +327,7 @@ if [ "$attach" = false ]; then
 	echo "  scripts/release-agent.sh ${tag} --local --attach"
 	echo
 	echo "That uses \`gh\` where it is installed and the REST API with GH_TOKEN where"
-	echo "it is not. The four files are public artifacts either way -- the key that"
+	echo "it is not. Every one of them is a public artifact either way -- the key that"
 	echo "made them does not leave this machine, so they can also be attached by hand"
 	echo "from anywhere."
 	exit 0
@@ -296,7 +341,7 @@ echo "==> attaching to ${tag}"
 # would leave the wrong one in place, which is the state this is for escaping.
 if command -v gh >/dev/null 2>&1; then
 	gh release upload "$tag" --repo "$GH_REPO" --clobber \
-		"${OUT}"/bystack-agent-*.manifest "${OUT}"/bystack-agent-*.manifest.sig
+		"${OUT}"/*.manifest "${OUT}"/*.manifest.sig
 else
 	# No `gh`, and that should not be what stops a release being signed. The
 	# machine this runs on is chosen for holding the key, not for having
@@ -321,7 +366,7 @@ else
 	EOF
 	)"
 
-	for file in "${OUT}"/bystack-agent-*.manifest "${OUT}"/bystack-agent-*.manifest.sig; do
+	for file in "${OUT}"/*.manifest "${OUT}"/*.manifest.sig; do
 		name="$(basename "$file")"
 
 		# Delete first: the upload endpoint refuses a name that already exists
@@ -353,4 +398,5 @@ fi
 
 echo
 echo "${tag} is signed. A host installs it with the command the dashboard prints,"
-echo "and every host already in the fleet can now be upgraded to it from Hosts."
+echo "every host already in the fleet can now be upgraded to it from Hosts, and a"
+echo "Controller with a local updater will offer \"Update system\" on the same panel."

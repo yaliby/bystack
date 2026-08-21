@@ -20,6 +20,7 @@ from bystack.core.ports.watch import WatchStore
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
 from bystack.runtime.localagent import LocalAgent
+from bystack.runtime.selfupdate import SelfUpdateService
 from bystack.runtime.trust import AgentTrust
 from bystack.runtime.upgrade import UpgradeService
 
@@ -61,6 +62,17 @@ class AppContext:
     itself (ADR-0017).
     """
 
+    selfupdate: SelfUpdateService
+    """This Controller's own updater, and the fleet cascade behind it.
+
+    Beside `upgrades` rather than inside it, and the two are kept apart on
+    purpose. `upgrades` distributes to hosts that verify for themselves; this
+    asks a root process on *this* machine to replace the file this process is
+    running out of. They share the signature contract and nothing else --
+    different trust boundary, different failure mode, different thing to be
+    careful about (ADR-0018).
+    """
+
     local_agent: LocalAgent
     """The agent this Controller spawned for its own machine.
 
@@ -100,6 +112,10 @@ def get_upgrades(context: Annotated[AppContext, Depends(get_context)]) -> Upgrad
     return context.upgrades
 
 
+def get_selfupdate(context: Annotated[AppContext, Depends(get_context)]) -> SelfUpdateService:
+    return context.selfupdate
+
+
 Context = Annotated[AppContext, Depends(get_context)]
 Store = Annotated[GraphStore, Depends(get_store)]
 Bus = Annotated[EventBus, Depends(get_bus)]
@@ -107,3 +123,4 @@ Collectors = Annotated[Collector, Depends(get_collector)]
 Commands = Annotated[CommandService, Depends(get_commands)]
 Trust = Annotated[AgentTrust, Depends(get_trust)]
 Upgrades = Annotated[UpgradeService, Depends(get_upgrades)]
+SelfUpdate = Annotated[SelfUpdateService, Depends(get_selfupdate)]

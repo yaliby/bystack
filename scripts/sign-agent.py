@@ -2,7 +2,8 @@
 """Sign an agent release, so a fleet can install it without trusting the Controller.
 
     scripts/sign-agent.py keygen --out ~/.bystack/release.key
-    scripts/sign-agent.py sign dist/bystack-agent-x86_64 --version 0.4.0 --key ~/.bystack/release.key
+    scripts/sign-agent.py sign dist/bystack-agent-x86_64 --key ~/.bystack/release.key
+    scripts/sign-agent.py sign dist/bystack-controller-x86_64 --key ~/.bystack/release.key
     scripts/sign-agent.py verify dist/bystack-agent-x86_64
 
 What comes out of `sign` is two files beside the binary:
@@ -14,6 +15,11 @@ Those are what the Controller distributes and what the agent checks. The
 Controller holds no key and cannot make either of them, which is the whole
 point: it can withhold an upgrade, send an old one, or send nothing, and it
 cannot produce a binary any agent will run (ADR-0017).
+
+Since ADR-0018 the same key, the same format and this same script also sign
+`bystack-controller-<arch>`, which `bystack-manager` pulls and installs on the
+machine that runs the Controller. The *only* difference is the `name` field --
+which is precisely why that field is inside the signed document.
 
 ## Why a document and not just a digest
 
@@ -62,15 +68,32 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 #: `agent/src/upgrade.rs`, `Manifest::parse`.
 MAGIC = "bystack-manifest/1"
 
-#: What is being signed. A key that ever signs a second artifact must not let
-#: one be presented as the other, which is why the name is inside the document
-#: rather than implied by the file it sits beside.
-ARTIFACT = "bystack-agent"
+#: What this key is allowed to sign, and the whole of the difference between
+#: ADR-0017's feature and ADR-0018's.
+#:
+#: The key signs two artifacts now, which is exactly the situation the `name`
+#: field was put inside the document for: **a key that ever signs a second
+#: artifact must not let one be presented as the other.** Without it, a
+#: genuine, current, correctly signed Controller could be handed to a managed
+#: host as its agent, and every check but that one would pass.
+#:
+#: A closed set rather than a free string. `--name` picks between these and
+#: cannot invent a third, because the two verifiers -- `bystack-release` in
+#: Rust and `install-agent.sh` in shell -- each compare against a constant they
+#: were built with, and a name nothing checks for is a signature nothing will
+#: accept.
+ARTIFACTS = ("bystack-agent", "bystack-controller")
 
-#: `bystack-agent-x86_64` -> `x86_64`. The same spelling `uname -m` prints and
-#: the agent's `std::env::consts::ARCH` reports, because those are the two
-#: places it is compared against.
-_ARCH = re.compile(rf"^{ARTIFACT}-(?P<arch>[a-z0-9_]+)$")
+#: The default, because it is what the overwhelming majority of signing runs
+#: are and what every existing invocation means.
+ARTIFACT = ARTIFACTS[0]
+
+#: `bystack-agent-x86_64` -> `(bystack-agent, x86_64)`. The architecture is the
+#: same spelling `uname -m` prints and `std::env::consts::ARCH` reports,
+#: because those are the two places it is compared against.
+_NAMED = re.compile(
+    rf"^(?P<name>{'|'.join(re.escape(name) for name in ARTIFACTS)})-(?P<arch>[a-z0-9_]+)$"
+)
 
 
 def cmd_keygen(args: argparse.Namespace) -> int:
@@ -116,10 +139,23 @@ def cmd_sign(args: argparse.Namespace) -> int:
     if not binary.is_file():
         raise SystemExit(f"{binary} is not a file")
 
-    arch = args.arch or _arch_of(binary)
+    name, arch = _named(binary)
+    name = args.name or name
+    arch = args.arch or arch
+    if name is None:
+        raise SystemExit(
+            f"cannot tell what {binary.name!r} is; pass --name. It has to be one of "
+            f"{', '.join(ARTIFACTS)}, because those are the only names anything verifies."
+        )
+    if arch is None:
+        raise SystemExit(
+            f"cannot tell the architecture from {binary.name!r}; pass --arch. "
+            f"The build scripts name their output <artifact>-<arch>."
+        )
     version = args.version or _version_of(binary)
 
     document = manifest(
+        name=name,
         version=version,
         arch=arch,
         digest=_digest(binary),
@@ -174,14 +210,22 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if fields.get("sha256") != _digest(binary):
         raise SystemExit(f"{binary} does not match the digest in its own manifest")
 
-    print(f"ok: {fields.get('name')} {fields.get('version')} ({fields.get('arch')})")
+    name = fields.get("name")
+    if name not in ARTIFACTS:
+        raise SystemExit(
+            f"the manifest is a signed {name!r}, which is not something this project "
+            f"publishes. Nothing verifies that name, so nothing would install it."
+        )
+    print(f"ok: {name} {fields.get('version')} ({fields.get('arch')})")
     return 0
 
 
 # --------------------------------------------------------------------------
 
 
-def manifest(*, version: str, arch: str, digest: str, released_at: int) -> bytes:
+def manifest(
+    *, name: str = ARTIFACT, version: str, arch: str, digest: str, released_at: int
+) -> bytes:
     """The exact bytes that are signed, verified and parsed.
 
     Ordered and spelled the same way every time, because **the bytes are the
@@ -191,7 +235,7 @@ def manifest(*, version: str, arch: str, digest: str, released_at: int) -> bytes
     """
     return (
         f"{MAGIC}\n"
-        f"name {ARTIFACT}\n"
+        f"name {name}\n"
         f"version {version}\n"
         f"arch {arch}\n"
         f"sha256 {digest}\n"
@@ -207,14 +251,18 @@ def _digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _arch_of(binary: Path) -> str:
-    match = _ARCH.match(binary.name)
+def _named(binary: Path) -> tuple[str | None, str | None]:
+    """`(name, arch)` read off the file name, or `(None, None)`.
+
+    Read rather than assumed, because the two artifacts now sit in the same
+    `dist/` and signing one as the other is the single mistake this whole
+    field exists to make impossible. `--name` and `--arch` override, and the
+    failure names them rather than guessing.
+    """
+    match = _NAMED.match(binary.name)
     if match is None:
-        raise SystemExit(
-            f"cannot tell the architecture from {binary.name!r}; pass --arch. "
-            f"`scripts/build-agent.sh` names its output {ARTIFACT}-<arch>."
-        )
-    return match.group("arch")
+        return None, None
+    return match.group("name"), match.group("arch")
 
 
 def _version_of(binary: Path) -> str:
@@ -231,7 +279,9 @@ def _version_of(binary: Path) -> str:
             [str(binary), "--version"], capture_output=True, text=True, timeout=10
         )
     except OSError as exc:
-        raise SystemExit(f"cannot run {binary} to read its version ({exc}); pass --version") from exc
+        raise SystemExit(
+            f"cannot run {binary} to read its version ({exc}); pass --version"
+        ) from exc
     if result.returncode != 0 or not result.stdout.split():
         raise SystemExit(f"{binary} did not answer --version; pass --version")
     return result.stdout.split()[-1]
@@ -298,6 +348,11 @@ def build_parser() -> argparse.ArgumentParser:
     sign.add_argument("--key", required=True, help="The private key from keygen")
     sign.add_argument("--version", help="Default: ask the binary")
     sign.add_argument("--arch", help="Default: read it off the file name")
+    sign.add_argument(
+        "--name",
+        choices=ARTIFACTS,
+        help="What is being signed. Default: read it off the file name",
+    )
     sign.add_argument(
         "--released-at", type=int, help="Unix time in the manifest. Default: now"
     )

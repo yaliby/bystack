@@ -27,6 +27,7 @@ From the Controller/Agent pivot onward, each decision is its own file.
 | [0015](0015-agent-upgrade.md)             | Agent upgrade: the Controller reports skew, the host applies it | **Superseded by 0017** |
 | [0016](0016-watched-units-and-processes.md)| Units and processes are selected rather than discovered; a watch rule is the identity | Accepted |
 | [0017](0017-agent-upgrade-signed-push.md) | Signed push upgrade: the Controller distributes, the host verifies; supersedes 0015 | Accepted |
+| [0018](0018-controller-self-update.md)    | The Controller updates itself: 0017's signatures, pulled instead of pushed; then cascades to the fleet | Accepted |
 
 A record is written when a decision is *hard to reverse* or when the reasoning
 will not be obvious to someone reading the code a year from now. Everything

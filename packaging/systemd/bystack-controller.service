@@ -1,10 +1,20 @@
-# The Controller, installed from a wheel.
+# The Controller, installed as one file.
 #
-#     python3 -m venv /opt/bystack
-#     /opt/bystack/bin/pip install bystack-<version>-py3-none-*.whl
-#     ln -s /opt/bystack/bin/bystack /usr/local/bin/bystack
+#     install -D -m 0755 bystack-controller-$(uname -m) /opt/bystack/bin/bystack-controller
+#     install -D -m 0755 bystack-manager-$(uname -m)    /opt/bystack/bin/bystack-manager
 #     install -m 0644 bystack-controller.service /etc/systemd/system/
 #     systemctl enable --now bystack-controller
+#
+# One file, because the update has to be an atomic `rename` with the previous
+# inode kept beside it -- which is what lets `bystack-manager` promise a
+# rollback rather than attempt one (ADR-0018). A virtualenv could be neither.
+# `scripts/build-controller.sh` assembles it; it carries the Controller, its
+# dependencies, the dashboard and the agent for this architecture, and it needs
+# a `python3.12` on the host to run.
+#
+# A `pip install` into a venv still works and is still supported -- it is what
+# a developer checkout does. What it does not get is the button in the
+# dashboard, because there is nothing for the manager to rename.
 #
 # The container image is the other way to run this, and is the easier one on a
 # machine that already runs containers. This is for a host where the Controller
@@ -23,7 +33,7 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/bystack --config /etc/bystack/bystack.yaml
+ExecStart=/opt/bystack/bin/bystack-controller --config /etc/bystack/bystack.yaml
 Restart=always
 RestartSec=5
 
@@ -58,6 +68,26 @@ StateDirectoryMode=0700
 ConfigurationDirectory=bystack
 
 WorkingDirectory=%S/bystack
+
+# -- the two things it writes inside /opt/bystack -----------------------------
+#
+# `ProtectSystem=strict` makes /opt read-only, which is what we want for the
+# directory holding the executable this process is running out of. These two
+# subdirectories are the exceptions, and they are narrow on purpose:
+#
+#   ipc/    one file, `update.intent`, which is how the dashboard's update
+#           button reaches root (ADR-0018). The directory is root:bystack 1770
+#           -- the sticky bit is what stops this process also being able to
+#           unlink `update.status`, which root owns and which is the one thing
+#           in that feature the Controller cannot say for itself.
+#   cache/  where the zipapp unpacks itself on first run. Nothing is executed
+#           out of ipc/; this is the directory the interpreter reads from, and
+#           it is written once per version.
+#
+# `releases/` is deliberately *not* here. The Controller reads the fleet's
+# signed artifacts and hands them out; the manager is what puts them there.
+ReadWritePaths=/opt/bystack/ipc /opt/bystack/cache
+Environment=SHIV_ROOT=/opt/bystack/cache
 
 # -- what it is allowed to do -----------------------------------------------
 #

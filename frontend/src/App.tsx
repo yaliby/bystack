@@ -8,6 +8,7 @@ import { prepareTopologyGraph } from './features/topology/layout/prepareTopology
 import { neighborsOf } from './features/topology/model/graphStore';
 import { deriveStatus, explainEmpty } from './features/topology/model/status';
 import { pendingCount } from './features/hosts/model/hosts';
+import { useController } from './features/hosts/model/useController';
 import { useFleet } from './features/hosts/model/useFleet';
 import { HostsPanel } from './features/hosts/ui/HostsPanel';
 import { useActivity } from './features/activity/model/useActivity';
@@ -95,6 +96,12 @@ export default function App() {
   // Polled faster while the panel is open: a host that has just been given the
   // install command is the thing the operator is watching for.
   const fleet = useFleet(API_BASE, hostsOpen);
+  // Not gated on the panel being open, unlike `useFleet`. An update outlives
+  // whatever the operator does with the sheet -- it stops and replaces the
+  // process serving this page -- and a hook that only polled while a panel was
+  // open would forget a run the moment somebody went back to the map to wait
+  // it out. Thirty seconds when nothing is happening; two while one is.
+  const controller = useController(API_BASE);
   const activity = useActivity(API_BASE, activityOpen);
   // Loaded when a host is chosen and at no other time. Nothing here polls:
   // the list changes when this operator changes it, and the *states* arrive on
@@ -565,6 +572,7 @@ export default function App() {
         {hostsOpen ? (
           <HostsPanel
             fleet={fleet}
+            controller={controller}
             providers={providers}
             controllerVersion={controllerVersion}
             resolveHostName={resolveHostName}

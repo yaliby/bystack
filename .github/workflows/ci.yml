@@ -104,12 +104,17 @@ jobs:
       # it. Adding the check means a reformat that touches every file in the
       # crate, which is a decision worth making on its own rather than as a
       # side effect of turning on CI.
+      # `--workspace` on both, and it is not optional. `agent/` is a workspace
+      # whose *root* is also a package (ADR-0018), and cargo's default in that
+      # shape is the root package alone -- so a bare `cargo test` here would
+      # run the agent's 60 tests, report green, and never compile
+      # `bystack-release` or `bystack-manager` at all.
       - name: Lint
         working-directory: agent
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         working-directory: agent
-        run: cargo test
+        run: cargo test --workspace
 
   conformance:
     name: Conformance
@@ -145,7 +150,7 @@ jobs:
 
       - name: Build the agent
         working-directory: agent
-        run: cargo build --release
+        run: cargo build --release -p bystack-agent
       # Three runs, three carriers for the same frames. The agent-only run
       # measures the binary; `fleet` drives real enrolment over mutual TLS with
       # an internal CA; `local` drives the zero-config path a first-run user is
@@ -274,8 +279,8 @@ jobs:
       # /usr/local/bin, which makes it the last one that should be unlinted.
       - run: |
           shellcheck scripts/install-agent.sh scripts/build-agent.sh \
-                     scripts/release-agent.sh scripts/check-release-keys.sh \
-                     packaging/agent-rollback.sh
+                     scripts/build-controller.sh scripts/release-agent.sh \
+                     scripts/check-release-keys.sh packaging/agent-rollback.sh
 
       # The key a fleet trusts is written in two files, in two encodings, by
       # hand. A mismatch installs fine and then refuses every upgrade for the

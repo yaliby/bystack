@@ -1,0 +1,18 @@
+[package]
+name = "bystack-manager"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Installs a signed Controller release on the machine that runs one (ADR-0018)"
+
+[[bin]]
+name = "bystack-manager"
+path = "src/main.rs"
+
+[dependencies]
+# The whole of the trust decision, shared verbatim with the agent (ADR-0017's
+# contract, reused rather than reimplemented). Everything else this binary
+# does is `std` and two `curl` invocations, which is the point: the component
+# that runs as root on the Controller's host has no HTTP client, no TLS stack
+# and no JSON parser of its own to be wrong about.
+bystack-release = { path = "../release" }

@@ -1,0 +1,39 @@
+# The one failure `bystack-manager apply` cannot handle: not being there.
+#
+# Probation is held by the process that made the swap. If that process dies
+# between the rename and the health check -- a reboot, an OOM kill, a `Ctrl-C`
+# on a manual run -- the machine is left running a Controller nobody is
+# watching, with a record on disk saying what to put back. This is what reads
+# that record.
+#
+# Conditioned on the file rather than run unconditionally: on every ordinary
+# boot of every ordinary machine, this unit does not start at all.
+#
+#     install -m 0644 bystack-manager-rollback.service /etc/systemd/system/
+#     systemctl enable bystack-manager-rollback.service
+
+[Unit]
+Description=Undo an interrupted ByStack Controller update
+Documentation=https://github.com/yaliby/bystack
+ConditionPathExists=/opt/bystack/state/probation
+# After, not Requires. The Controller starting is what this is deciding about,
+# and a rollback that ran before it would be undoing a swap on the strength of
+# a service that had not been given the chance to start.
+After=bystack-controller.service
+Wants=bystack-controller.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bystack/bin/bystack-manager rollback
+User=root
+TimeoutStartSec=300
+
+NoNewPrivileges=yes
+PrivateNetwork=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectSystem=full
+ReadWritePaths=/opt/bystack
+
+[Install]
+WantedBy=multi-user.target

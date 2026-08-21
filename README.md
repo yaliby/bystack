@@ -126,10 +126,12 @@ echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
 docker compose up -d --build
 #    -> http://127.0.0.1:8000
 
-# 2. A wheel. Carries the agent binary and the dashboard; nothing else needed.
-python3 -m venv /opt/bystack
-/opt/bystack/bin/pip install bystack-0.4.0-py3-none-manylinux*_x86_64*.whl
-/opt/bystack/bin/bystack                        # manages this machine
+# 2. One file. Carries the Controller, its dependencies, the dashboard and the
+#    agent. Needs a python3.12, and is the only install that can update itself
+#    from the dashboard (ADR-0018).
+sudo install -D -m 0755 bystack-controller-$(uname -m) /opt/bystack/bin/bystack-controller
+sudo install -D -m 0755 bystack-manager-$(uname -m)    /opt/bystack/bin/bystack-manager
+/opt/bystack/bin/bystack-controller             # manages this machine
 
 # 3. From a checkout. `scripts/build-agent.sh` produces the static binaries.
 ./scripts/build-agent.sh && (cd frontend && npm ci && npm run build)

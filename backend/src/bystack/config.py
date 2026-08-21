@@ -44,6 +44,11 @@ See docs/MIGRATION.md for what moved and why."""
 #: quiet exception to it.
 DEFAULT_STATE_DIR = "~/.local/state/bystack"
 
+#: Where a packaged install puts the two files the Controller and
+#: `bystack-manager` talk through (ADR-0018). A module constant for the same
+#: reason as the one above: one place for a test suite to move.
+DEFAULT_MANAGER_IPC_DIR = "/opt/bystack/ipc"
+
 
 class AgentsConfig(BaseModel):
     """Where agents dial in, and on what terms.
@@ -165,6 +170,35 @@ class AgentsConfig(BaseModel):
     installer on them, which is what every host does for its first install
     anyway.
     """
+
+    manager_ipc_dir: str = Field(
+        default="",
+        description=(
+            "Where the local updater's intent and status files live. "
+            "Empty means /opt/bystack/ipc."
+        ),
+    )
+    """How this Controller asks to be updated, and reads how it went (ADR-0018).
+
+    Not `state_dir`, and the exception is the point. Everything else the
+    Controller writes goes in one place it owns; these two files are a
+    conversation with a **root** process, and the directory has to be
+    `root:bystack 1770` for that to be safe -- this account creates its own
+    intent, and the sticky bit stops it unlinking root's report. A directory
+    with those modes does not belong inside one this account owns outright.
+
+    Configurable so a second Controller on one machine, and the test suite, do
+    not have to be root to exercise the path. An operator with one packaged
+    install never sets it.
+
+    A directory that does not exist is the ordinary state for a container, a
+    checkout or a `pip install`, and the dashboard says so in a sentence rather
+    than offering a button that would write a file nothing reads.
+    """
+
+    @property
+    def manager_ipc_path(self) -> str:
+        return self.manager_ipc_dir or DEFAULT_MANAGER_IPC_DIR
 
     @property
     def releases_path(self) -> str:

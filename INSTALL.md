@@ -263,13 +263,39 @@ is why the grants are separate, opt-in, and bounded by the list you chose.
 The compose file above is the shortest path. Two others exist and are the same
 software:
 
-**A wheel**, if you would rather not run the Controller in a container. It
-carries the agent binary and the dashboard, so nothing else is needed:
+**One file**, if you would rather not run the Controller in a container. It
+carries the Controller, its dependencies, the dashboard and the agent binary,
+and it needs a `python3.12` on the host:
 
 ```bash
-python3 -m venv /opt/bystack
-/opt/bystack/bin/pip install bystack-*.whl      # from a release
-/opt/bystack/bin/bystack
+sudo install -D -m 0755 bystack-controller-$(uname -m) /opt/bystack/bin/bystack-controller
+sudo install -D -m 0755 bystack-manager-$(uname -m)    /opt/bystack/bin/bystack-manager
+sudo install -d -m 1770 -o root -g bystack /opt/bystack/ipc
+sudo install -d -m 0755 -o bystack -g bystack /opt/bystack/cache
+sudo install -m 0644 packaging/systemd/bystack-controller.service /etc/systemd/system/
+sudo install -m 0644 packaging/systemd/bystack-manager.path /etc/systemd/system/
+sudo install -m 0644 packaging/systemd/bystack-manager.service /etc/systemd/system/
+sudo install -m 0644 packaging/systemd/bystack-manager-rollback.service /etc/systemd/system/
+sudo systemctl enable --now bystack-controller bystack-manager.path bystack-manager-rollback
+```
+
+This is the only install that gets the **Update system** button, because it is
+the only one where there is a single file for the updater to replace
+(ADR-0018). `bystack-manager` is what does the replacing: it pulls the signed
+release, checks it against a key compiled into itself, swaps the file, and puts
+the previous one back if the new Controller does not come up.
+
+The `1770` on `ipc/` is load-bearing rather than decoration. The Controller
+runs as `bystack` and creates its update request in there; the sticky bit is
+what stops it also being able to delete root's report of how the update went.
+
+**A wheel**, which is what a developer checkout uses. It carries the agent
+binary and the dashboard, and it is upgraded the way it was installed:
+
+```bash
+python3 -m venv /opt/bystack-venv
+/opt/bystack-venv/bin/pip install bystack-*.whl      # from a release
+/opt/bystack-venv/bin/bystack
 ```
 
 **Systemd**, from the units in `packaging/systemd/`.
@@ -282,6 +308,9 @@ Building from a checkout without Docker is in the [README](README.md).
 
 Two steps, in this order: the Controller, then each server. What is in each
 release is [CHANGELOG.md](CHANGELOG.md).
+
+On a single-file install both steps are one button — see [If you installed the
+single file](#if-you-installed-the-single-file) below.
 
 **The order is not arbitrary.** An agent asks the Controller what it can do,
 not the other way round, so a new Controller with old agents is a working
@@ -391,15 +420,42 @@ Afterwards, **Hosts** shows each agent's version, so a host you missed is
 visible rather than merely quiet — and a host you have run this on once can be
 upgraded from the panel next time.
 
+### If you installed the single file
+
+Press **Update system** on the Hosts panel, and watch it. There is nothing else
+to do, and the two steps above happen in that order by themselves:
+
+1. The Controller is stopped, replaced and started. The dashboard goes quiet
+   for a few seconds in the middle of this — that is the swap, not a fault, and
+   the page says so. If the new Controller does not answer within three
+   minutes, the previous one is put back automatically and the panel tells you
+   the release does not run on this machine.
+2. The signed agents for the new version are downloaded, and the fleet is
+   rolled forward one host at a time — the same staged rollout as above, with
+   each host confirmed before the next is touched.
+
+From a terminal, the same thing:
+
+```bash
+sudo /opt/bystack/bin/bystack-manager request     # or `request 0.5.0`
+/opt/bystack/bin/bystack-manager status
+```
+
+Nothing is installed that is not signed by the key this Controller was built to
+trust, and the version has to be higher than the one on the disk. Downgrading
+is not an operation; rollback is, and it is automatic.
+
 ### If you installed the wheel instead
 
 ```bash
-/opt/bystack/bin/pip install --upgrade bystack-0.4.0-*.whl   # from the release
-sudo systemctl restart bystack-controller                    # if it runs as a unit
+/opt/bystack-venv/bin/pip install --upgrade bystack-0.4.0-*.whl   # from the release
+sudo systemctl restart bystack-controller                          # if it runs as a unit
 ```
 
 The wheel carries the matching agent binary, so a Controller upgraded this way
-also hands out the right version to new hosts.
+also hands out the right version to new hosts. There is no **Update system**
+button on this install — there is no single file to replace — and the dashboard
+says so rather than offering one that cannot work.
 
 ---
 

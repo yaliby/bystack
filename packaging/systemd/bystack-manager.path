@@ -1,0 +1,31 @@
+# What turns "the operator pressed a button" into "root does an update".
+#
+# A path unit, for the reason ADR-0017 gave the agent one: it needs no polkit,
+# no D-Bus method and no new syscall on the Controller's side, and **it accepts
+# no arguments**. There is no shape in which the process being replaced gets to
+# parameterise what root does — it can create a file, and that is the whole of
+# its influence. What is in the file is a version, which is checked for being
+# one and then used to compose a URL under a repository compiled into
+# `bystack-manager` (ADR-0018).
+#
+#     install -m 0644 bystack-manager.path /etc/systemd/system/
+#     systemctl enable --now bystack-manager.path
+#
+# Without this enabled, the button in the dashboard writes a file nothing
+# reads, and the panel says the update never started. That is the correct
+# behaviour for a Controller whose operator did not install this half.
+
+[Unit]
+Description=Watch for a ByStack Controller update request
+Documentation=https://github.com/yaliby/bystack
+
+[Path]
+# `PathExists=` rather than `PathChanged=`. The file is deleted by
+# `bystack-manager apply` before it does anything else, so "it is there" is
+# exactly the condition, and it re-fires correctly for a second request that
+# writes an identical file.
+PathExists=/opt/bystack/ipc/update.intent
+Unit=bystack-manager.service
+
+[Install]
+WantedBy=paths.target

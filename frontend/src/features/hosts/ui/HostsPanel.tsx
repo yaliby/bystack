@@ -30,17 +30,35 @@ import {
   type HostRow,
 } from '../model/hosts';
 import {
+  controllerOffer,
+  describeUpdate,
+  progressOf,
+  updateFailed,
+  type ControllerOffer,
+} from '../model/controller';
+import {
   describeRollout,
   rolloutFailed,
   rolloutRows,
   upgradeOffer,
   type UpgradeOffer,
 } from '../model/upgrade';
+import type { Controller } from '../model/useController';
 import type { Fleet } from '../model/useFleet';
 import { AddHostDialog } from './AddHostDialog';
 
 interface Props {
   readonly fleet: Fleet;
+  /**
+   * This Controller, and the one button that replaces it (ADR-0018).
+   *
+   * On the Hosts panel rather than in a settings screen, because it is the
+   * first half of one operation: updating the Controller is what makes the
+   * fleet behind it upgradable, and the manager fetches the agents for the
+   * version it just installed. Two buttons in two places for one intention is
+   * how half a fleet ends up on a version nobody chose.
+   */
+  readonly controller: Controller;
   /** Provider health the app already polls — how `stale` is told from `never`. */
   readonly providers: readonly ProviderHealth[];
   /** What the Controller is running, so an agent's version means something. */
@@ -57,6 +75,7 @@ const TICK_MS = 30_000;
 
 export function HostsPanel({
   fleet,
+  controller,
   providers,
   controllerVersion,
   resolveHostName,
@@ -68,6 +87,7 @@ export function HostsPanel({
   const [minting, setMinting] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [selfRefusal, setSelfRefusal] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), TICK_MS);
@@ -79,11 +99,18 @@ export function HostsPanel({
   const localNotice = localAgentNotice(fleet.terms, rows);
   const offVersion = skewCount(rows, controllerVersion);
   const offer = upgradeOffer(fleet.agents, controllerVersion, fleet.releases, fleet.rollout);
+  const self = controllerOffer(controller.self);
 
   const startUpgrade = async (version: string) => {
     setRefusal(null);
     const refused = await fleet.upgrade(version);
     if (refused) setRefusal(refused);
+  };
+
+  const updateController = async () => {
+    setSelfRefusal(null);
+    const refused = await controller.update();
+    if (refused) setSelfRefusal(refused);
   };
 
   const addHost = async () => {
@@ -166,6 +193,16 @@ export function HostsPanel({
         }}
       />
 
+      <ControllerUpdate
+        offer={self}
+        refusal={selfRefusal}
+        onUpdate={() => void updateController()}
+        onDismiss={() => {
+          setSelfRefusal(null);
+          controller.dismiss();
+        }}
+      />
+
       <div className="hosts__list">
         {rows.map((row) => (
           <HostCard
@@ -203,6 +240,109 @@ export function HostsPanel({
         />
       ) : null}
     </aside>
+  );
+}
+
+/**
+ * Updating the Controller this dashboard is served by (ADR-0018).
+ *
+ * The one component in the app that has to be correct about **its own backend
+ * going away mid-operation**. Between `applying` and the next successful poll,
+ * every request from this page fails, and none of those failures is an error:
+ * they are the update working. `useController` swallows them and leaves the
+ * last answer on screen, so what is drawn here during that window is the
+ * `applying` phase — which is exactly what is true.
+ *
+ * The bar's percentage is invented here (`progressOf`) and nowhere else. The
+ * Controller publishes named steps and no fraction, deliberately; turning six
+ * steps into a number is a presentation decision, and keeping it on this side
+ * is what stops it becoming a second model of the update that can disagree
+ * with the first.
+ */
+function ControllerUpdate({
+  offer,
+  refusal,
+  onUpdate,
+  onDismiss,
+}: {
+  offer: ControllerOffer | null;
+  refusal: string | null;
+  onUpdate: () => void;
+  onDismiss: () => void;
+}) {
+  // No claim until the first answer, and nothing at all where there is no
+  // updater: on a container or a checkout this whole section is absent rather
+  // than being a disabled button with an explanation nobody asked for. The
+  // reason is still on `GET /controller` for anyone who does.
+  if (offer === null || offer.kind === 'unavailable') return null;
+
+  if (offer.kind === 'idle') {
+    return (
+      <div className="hosts__self">
+        <p className="hosts__self-version">
+          This Controller is running <strong>{offer.version}</strong>.
+        </p>
+        <div className="actions">
+          <button type="button" className="action action--primary" onClick={onUpdate}>
+            Update system
+          </button>
+        </div>
+        <p className="hosts__upgrade-note">
+          Pulls the newest signed release, replaces this Controller and puts the previous one
+          back if it does not come up. The fleet is rolled forward afterwards, one host at a
+          time.
+        </p>
+        {refusal ? <p className="hosts__error">{refusal}</p> : null}
+      </div>
+    );
+  }
+
+  const { update } = offer;
+  const failed = updateFailed(update);
+  const percent = Math.round(progressOf(update) * 100);
+
+  return (
+    <div className={`hosts__self${failed ? ' hosts__self--failed' : ''}`}>
+      <p className="hosts__self-version">
+        {offer.kind === 'running' ? `Updating to ${update.version}` : `Update ${update.phase}`}
+      </p>
+
+      {offer.kind === 'running' ? (
+        <div
+          className="hosts__self-bar"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          aria-label={`Updating this Controller to ${update.version}`}
+        >
+          <span className="hosts__self-fill" style={{ width: `${percent}%` }} />
+        </div>
+      ) : null}
+
+      <p className="hosts__upgrade-note">{describeUpdate(update)}</p>
+
+      {update.cascade ? (
+        <p className="hosts__upgrade-note">
+          The fleet is being rolled forward to {update.cascade} below.
+        </p>
+      ) : null}
+
+      {refusal ? <p className="hosts__error">{refusal}</p> : null}
+
+      {/* No cancel button, and that is not an omission. Once the swap has
+          started there is nothing safe to stop: the process that would have to
+          honour the request is the one being replaced, and the machine already
+          undoes a swap that does not come up. A button that could only be
+          pressed too early or too late is worse than none. */}
+      {offer.kind === 'ended' ? (
+        <div className="actions">
+          <button type="button" className="action action--safe" onClick={onDismiss}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

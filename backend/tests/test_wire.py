@@ -125,13 +125,25 @@ def test_the_manifest_vocabulary_agrees_across_languages() -> None:
     kind and it is silent -- a Controller that indexes a release every host
     refuses, or worse, one that skips a field an agent enforces.
     """
-    assert _rust_string("upgrade.rs", "MAGIC") == releases.MAGIC, (
+    assert _release_string("MAGIC") == releases.MAGIC, (
         "the manifest format string differs; the Controller would offer a "
         "release every agent in the fleet refuses to read"
     )
-    assert _rust_string("upgrade.rs", "ARTIFACT_NAME") == releases.ARTIFACT, (
+    assert _release_string("AGENT") == releases.ARTIFACT, (
         "what is being signed is spelled differently on the two sides"
     )
+    # ADR-0018 gave the same key a second artifact to sign, which is exactly
+    # the situation the `name` field was put inside the document for: a key
+    # that signs two things must not let one be presented as the other. The
+    # signing tool and the Rust verifier have to spell the second one the same
+    # way, or `scripts/build-controller.sh` produces releases the manager will
+    # refuse as "a signed bystack-controller, not a bystack-controller".
+    signer = (BACKEND.parent / "scripts" / "sign-agent.py").read_text()
+    for name in (_release_string("AGENT"), _release_string("CONTROLLER")):
+        assert f'"{name}"' in signer, (
+            f"{name} is what a Rust verifier checks for and sign-agent.py cannot "
+            f"produce it; every release of that artifact would be refused"
+        )
     # The capability, which is what stops a two-megabyte transfer to a host
     # that was always going to refuse it.
     agent_source = (BACKEND.parent / "agent" / "src" / "session.rs").read_text()
@@ -237,6 +249,20 @@ def _rust_string(filename: str, name: str) -> str:
     source = (BACKEND.parent / "agent" / "src" / filename).read_text()
     found = re.search(rf'\b{name}\s*:\s*&str\s*=\s*"([^"]*)"', source)
     assert found is not None, f"{name} is no longer defined in agent/src/{filename}"
+    return found.group(1)
+
+
+def _release_string(name: str) -> str:
+    """A string literal out of `bystack-release`, which both binaries link.
+
+    Its own reader because that crate is not under `agent/src`: the manifest
+    parser, the key set and the version ordering moved into `agent/release`
+    when ADR-0018 gave the Controller's updater the same contract, so there is
+    one copy in Rust rather than two.
+    """
+    source = (BACKEND.parent / "agent" / "release" / "src" / "lib.rs").read_text()
+    found = re.search(rf'\b{name}\s*:\s*&str\s*=\s*"([^"]*)"', source)
+    assert found is not None, f"{name} is no longer defined in agent/release/src/lib.rs"
     return found.group(1)
 
 

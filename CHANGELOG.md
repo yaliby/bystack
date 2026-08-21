@@ -10,6 +10,72 @@ to point at a release where the agent binary exists.
 
 ---
 
+## Unreleased
+
+### The Controller updates itself ([ADR-0018](docs/adr/0018-controller-self-update.md))
+
+**Hosts → Update system.** The machine that runs the Controller pulls the newest
+signed release, replaces the Controller with it, and puts the previous one back
+if it does not come up. Then it fetches the signed agents for that version and
+rolls the fleet forward — the staged, one-host-at-a-time rollout from v0.4.0,
+started for you rather than by you.
+
+That second half is why this is one button and not two. Before it, a fleet
+stayed behind because the Controller only ever held releases somebody had
+copied onto it, and copying them meant upgrading the Controller, which was the
+scary one.
+
+**It reuses v0.4.0's security contract exactly and adds nothing to it.** The
+same key, the same signed manifest, the same signing script, the same
+anti-downgrade rule. The one field that differs is `name` — which is precisely
+what that field was put inside the signed document for, because a key that
+signs two artifacts must not let one be presented as the other. The Rust
+manifest parser, key set and version ordering now live in one crate that both
+the agent and the updater link, so there is no second copy to drift.
+
+**The rollback is the point, as it was for the fleet.** The swap is a `rename`
+with the previous inode kept beside it, armed *before* it happens, and the new
+Controller is on probation until `/healthz` reports the version that was
+installed. Not "the port answers" — the old process that never stopped would
+satisfy that. If this is interrupted by a reboot, a unit at boot finishes the
+undo.
+
+**Failures that can be found before an outage are.** The downloaded Controller
+is run once, while everything is still up, and has to report the version its
+signed manifest claims. A host that cannot run it refuses the update in two
+seconds instead of taking a minute of downtime to discover the same thing by
+rolling back.
+
+#### What you have to do about it
+
+Nothing, unless you want the button. It needs the new single-file install:
+
+```bash
+sudo install -D -m 0755 bystack-controller-$(uname -m) /opt/bystack/bin/bystack-controller
+sudo install -D -m 0755 bystack-manager-$(uname -m)    /opt/bystack/bin/bystack-manager
+sudo install -d -m 1770 -o root -g bystack /opt/bystack/ipc
+```
+
+plus the three units in `packaging/systemd/`. See
+[INSTALL.md](INSTALL.md#upgrading).
+
+**Containers, wheels and checkouts are unaffected and keep working.** None of
+them has a single file to replace, so none of them gets the button — and the
+dashboard says which install you are on rather than offering one that cannot
+work. `pip install --upgrade` is still how a venv install moves.
+
+#### Also
+
+- `bystack --version`, which the updater reads to decide whether a release is
+  actually an upgrade.
+- `scripts/build-controller.sh` assembles the single-file Controller.
+  `scripts/build-agent.sh --package bystack-manager` builds the updater, and
+  `scripts/release-agent.sh` signs both new artifacts alongside the agents.
+- A release is now four artifacts per architecture. The workflow refuses to
+  publish a partial one, and the signing script refuses to attach one.
+
+---
+
 ## v0.4.0
 
 ### Upgrade the fleet from the dashboard ([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md))

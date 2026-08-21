@@ -1,3 +1,23 @@
+# The agent is the workspace root, and the other two members are here rather
+# than beside it (ADR-0018). One lockfile, so the agent and the manager verify
+# a release with the identical `ring`; one `cargo test`, so neither can be
+# refactored past the other; and `agent/target/` stays the target directory,
+# which is what `scripts/build-agent.sh`, the Dockerfile and CI's cache all
+# already name.
+#
+# Two things about this shape are easy to get wrong and are both load-bearing:
+#
+#   * A workspace whose root is also a package defaults to **the root package
+#     alone**. `cargo test` here runs the agent's tests, reports green, and
+#     never compiles the other two -- so CI passes `--workspace` to test and
+#     clippy, deliberately and with a comment saying why.
+#   * `cargo build --release` *does* build all three. The agent's release path
+#     does not want the manager in it, so every consumer of a single artifact
+#     passes `-p`.
+[workspace]
+members = ["release", "manager"]
+resolver = "2"
+
 [package]
 name = "bystack-agent"
 version = "0.4.0"
@@ -65,6 +85,12 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"]
 # Already in the tree via rustls; used directly for the one SHA-256 that
 # checks the CA fingerprint out of a join token.
 ring = "0.17"
+
+# The signed-release contract: the manifest parser, the compiled-in key set,
+# the ed25519 check and the version ordering (ADR-0017), shared verbatim with
+# `bystack-manager` (ADR-0018). It brings no dependency that is not already on
+# this line above it.
+bystack-release = { path = "release" }
 
 [build-dependencies]
 # Reads the checked-in descriptor set rather than shelling out to protoc, so

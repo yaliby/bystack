@@ -501,3 +501,45 @@ export interface Inventory {
    */
   readonly total: number;
 }
+
+/**
+ * How far the local updater has got with replacing this Controller (ADR-0018).
+ *
+ * Everything here is what a root process wrote to a file. Nothing is held in
+ * the Controller's memory, and that is not a limitation being worked around --
+ * the middle of a successful update is *the process serving this API being
+ * stopped and replaced*, so anything in memory would be lost at the moment
+ * somebody is watching it.
+ */
+export interface ControllerUpdate {
+  /**
+   * `fetching`, `verifying`, `applying`, `probation`, `cascading`, `success`,
+   * `failed` or `rolled_back`.
+   *
+   * A closed set rather than a percentage. `rolled_back` in particular is not
+   * a failure to draw as one: the machine is working, on the version it was.
+   */
+  readonly phase: string;
+  readonly version: string;
+  readonly detail: string;
+  /** The version the fleet is being rolled to behind this. Empty until there is one. */
+  readonly cascade: string;
+  readonly updated_at: number;
+  readonly running: boolean;
+}
+
+/** This Controller, and whether it has a local updater to talk to. */
+export interface ControllerSelf {
+  readonly version: string;
+  readonly updatable: boolean;
+  /**
+   * Why not, in a sentence, when `updatable` is false.
+   *
+   * Which is most installs — a container, a checkout, a `pip install`. A panel
+   * that silently has no button looks broken; one that says "this is a
+   * container, upgrade the image" is documentation where the question is asked.
+   */
+  readonly reason: string;
+  readonly read_only: boolean;
+  readonly update: ControllerUpdate | null;
+}

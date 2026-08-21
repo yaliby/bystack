@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 #
-# Build the agent as a static binary, once per architecture.
+# Build a static binary out of the agent workspace, once per architecture.
 #
 #     scripts/build-agent.sh                      # every target, in a container
 #     scripts/build-agent.sh --target aarch64-unknown-linux-musl
 #     scripts/build-agent.sh --native             # this host's toolchain
+#     scripts/build-agent.sh --package bystack-manager
 #
-# What comes out is `dist/bystack-agent-<arch>` and a `SHA256SUMS` beside it.
+# What comes out is `dist/<package>-<arch>` and a `SHA256SUMS` beside it.
+#
+# ## Why the manager builds through here
+#
+# `bystack-manager` (ADR-0018) is the same kind of artifact for the same
+# reasons: a static musl binary, cross-built for both architectures, checked
+# for not wanting a dynamic loader. A second script would be these 130 lines
+# with two words changed -- and the copy that rotted would be the one nobody
+# was looking at. So the package is a flag, and it defaults to the agent
+# because that is what every existing caller means.
 # One file per architecture and nothing else: an agent is installed by copying
 # a single file onto a machine (`agent/src/main.rs`), and the whole reason it
 # has no config file is that there is nothing to deploy alongside it. A
@@ -39,6 +49,10 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${REPO}/dist"
 
+#: Which workspace member to build. The binary is named after it, which is why
+#: one variable serves as both the `-p` argument and the output prefix.
+PACKAGE="bystack-agent"
+
 # musl for every target, for the reason above. Two architectures because those
 # are the two anyone runs Docker on; adding a third is a line here plus an
 # image tag, and nothing else in the tree knows how many there are.
@@ -67,6 +81,10 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--target)
 		targets+=("${2:?--target needs a triple}")
+		shift 2
+		;;
+	--package)
+		PACKAGE="${2:?--package needs a workspace member}"
 		shift 2
 		;;
 	--native)
@@ -142,7 +160,7 @@ build_in_container() {
 	# target directory. Engine-managed, so it has none of the ownership
 	# problems a bind mount would, and it is what makes the second build of
 	# the day take seconds instead of four minutes.
-	local cache="bystack-agent-build-${target}"
+	local cache="bystack-build-${PACKAGE}-${target}"
 
 	echo "==> $target via $engine ($image)" >&2
 	# `label=disable` rather than a `:z` mount. On an SELinux host the source
@@ -157,7 +175,7 @@ build_in_container() {
 		-v "${REPO}:/src:ro" \
 		-v "${cache}:/cache" \
 		-e CARGO_TARGET_DIR=/cache/target \
-		-e BIN="/cache/target/${target}/release/bystack-agent" \
+		-e BIN="/cache/target/${target}/release/${PACKAGE}" \
 		-w /src/agent \
 		"$image" \
 		sh -euc "
@@ -176,19 +194,19 @@ build_in_container() {
 			 done
 			 export CARGO_HOME=/cache/cargo
 
-			 cargo build --release --locked --target ${target} >&2
+			 cargo build --release --locked -p ${PACKAGE} --target ${target} >&2
 			 ${assert_static}
 			 cat \"\$BIN\"" \
-		>"${OUT}/bystack-agent-$(arch_of "$target")"
+		>"${OUT}/${PACKAGE}-$(arch_of "$target")"
 }
 
 build_native() {
 	local target="$1"
 	echo "==> $target natively" >&2
-	(cd "${REPO}/agent" && cargo build --release --locked --target "$target" >&2)
-	local bin="${REPO}/agent/target/${target}/release/bystack-agent"
+	(cd "${REPO}/agent" && cargo build --release --locked -p "$PACKAGE" --target "$target" >&2)
+	local bin="${REPO}/agent/target/${target}/release/${PACKAGE}"
 	BIN="$bin" sh -euc "${assert_static}"
-	cp "$bin" "${OUT}/bystack-agent-$(arch_of "$target")"
+	cp "$bin" "${OUT}/${PACKAGE}-$(arch_of "$target")"
 }
 
 for target in "${targets[@]}"; do
@@ -197,7 +215,7 @@ for target in "${targets[@]}"; do
 	else
 		build_in_container "$target"
 	fi
-	chmod +x "${OUT}/bystack-agent-$(arch_of "$target")"
+	chmod +x "${OUT}/${PACKAGE}-$(arch_of "$target")"
 done
 
 # A signature made for the *previous* build of this architecture is worse than
@@ -209,18 +227,25 @@ done
 # only manifest in this directory is one `scripts/release-agent.sh` made for
 # the binary that is actually sitting next to it.
 for target in "${targets[@]}"; do
-	rm -f "${OUT}/bystack-agent-$(arch_of "$target")".manifest \
-		"${OUT}/bystack-agent-$(arch_of "$target")".manifest.sig
+	rm -f "${OUT}/${PACKAGE}-$(arch_of "$target")".manifest \
+		"${OUT}/${PACKAGE}-$(arch_of "$target")".manifest.sig
 done
 
 # Written last and covering only what this run produced. A checksum file that
 # accumulated lines from previous runs would vouch for binaries nobody built
 # today, which is worse than having none.
+#
+# One file per package, for that same reason: building the agent and then the
+# manager into the same directory would otherwise leave a `SHA256SUMS` that
+# names two binaries and covers one. The agent keeps the bare name because
+# `scripts/install-agent.sh` fetches a file called exactly that.
+sums="SHA256SUMS"
+[ "$PACKAGE" = "bystack-agent" ] || sums="SHA256SUMS.${PACKAGE}"
 (
 	cd "$OUT"
 	names=()
-	for target in "${targets[@]}"; do names+=("bystack-agent-$(arch_of "$target")"); done
-	sha256sum "${names[@]}" >SHA256SUMS
+	for target in "${targets[@]}"; do names+=("${PACKAGE}-$(arch_of "$target")"); done
+	sha256sum "${names[@]}" >"$sums"
 )
 
 echo >&2

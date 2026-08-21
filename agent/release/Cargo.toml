@@ -1,0 +1,13 @@
+[package]
+name = "bystack-release"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.75"
+description = "The signed-release contract: one manifest parser, one key set, one verifier"
+
+[dependencies]
+# The whole of this crate's cryptography, and the reason it costs the agent
+# nothing: `ring` is already in that binary for TLS and for the join token's
+# fingerprint (ADR-0011), so sharing this crate adds no dependency to the
+# component that runs on every host in every fleet.
+ring = "0.17"

@@ -1,0 +1,66 @@
+# Fetch a signed Controller release, install it, and undo it if the Controller
+# does not come back (ADR-0018).
+#
+# `Type=oneshot`, so there is **no resident root daemon**. The agent needs an
+# independent timer for its probation because the evidence that it works
+# arrives on somebody else's connection; the Controller's evidence is a GET to
+# loopback, so the process that made the change waits for it and rolls back
+# itself. The only thing left for a unit to cover is this process dying, and
+# that is bystack-manager-rollback.service.
+#
+#     install -m 0644 bystack-manager.service /etc/systemd/system/
+#
+# Not enabled and never started directly: bystack-manager.path starts it.
+
+[Unit]
+Description=Install a signed ByStack Controller release
+Documentation=https://github.com/yaliby/bystack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bystack/bin/bystack-manager apply
+
+# Root, and it has to be: it replaces a file in /opt/bystack/bin and stops and
+# starts a system unit. What that buys is bounded by what it can be asked to
+# do -- one version string, from a file, checked for being a version.
+User=root
+
+# Long enough for a slow uplink to move tens of megabytes, plus the three
+# minutes of probation, plus the fleet's artifacts afterwards. A timeout that
+# fires mid-probation would kill the process that is holding the rollback --
+# which is survivable, because the boot-time unit picks it up, and is still
+# not a thing to arrange on purpose.
+TimeoutStartSec=1800
+
+# No PrivateNetwork: this is the one component in the project that pulls, and
+# it pulls because the Controller has no parent to push to it. Everything it
+# downloads is refused unless it is signed by a key compiled into the binary,
+# so the network it has buys an attacker the ability to withhold an update.
+#
+# The rest is as tight as a process that installs an executable can be.
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# `ProtectSystem=full` and not `strict`: this writes to /opt/bystack, which is
+# the one directory it is allowed to touch. `strict` plus a ReadWritePaths for
+# the same directory would say the same thing with more moving parts, and
+# `full` leaves /usr read-only, which is the property that actually matters
+# here -- an updater that can only write inside the deployment it manages.
+ProtectSystem=full
+ReadWritePaths=/opt/bystack
+
+[Install]
+WantedBy=multi-user.target

@@ -32,15 +32,18 @@
 //! and it cannot produce a binary this agent will run.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::io::{Seek, SeekFrom, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use bystack_release::{
+    copy_capped, newer, sha256_file, verify_with, Manifest, AGENT as ARTIFACT_NAME, MAX_DOCUMENT,
+    SIGNING_KEYS,
+};
+
 use crate::session::{log, unix_time};
 use crate::wire::{self, AGENT_VERSION};
-
-include!(concat!(env!("OUT_DIR"), "/signing_keys.rs"));
 
 /// Where the daemon stages, under its own `StateDirectory`.
 const STAGE_DIR: &str = "upgrade";
@@ -92,172 +95,31 @@ const PROBATION_MINUTES: u64 = 10;
 /// "the Controller said so" is not a reason to fill it.
 const MAX_ARTIFACT: u64 = 64 * 1024 * 1024;
 
-/// The manifest, small by construction.
-const MAX_DOCUMENT: u64 = 4 * 1024;
-
 // --------------------------------------------------------------------------
-// The signed document
+// The document, the signature and the version ordering are `bystack-release`.
+//
+// They were here until ADR-0018 gave the Controller's updater the same
+// contract, and they moved whole rather than being copied: one manifest
+// parser, one compiled-in key set, one answer to whether `0.10.0` outranks
+// `0.9.0`. What stayed is everything about *this* component -- how bytes
+// arrive over a stream it did not open, and how root installs them from a unit
+// with no network.
 // --------------------------------------------------------------------------
 
-/// What a signature covers: `{name, version, arch, sha256, released_at}`.
+/// [`bystack_release::verify`], with the sentence that names *this*
+/// component's way out.
 ///
-/// A text document rather than a protobuf message, because **the bytes are the
-/// contract**. Protobuf serialization is not canonical — field order and
-/// varint width are the encoder's business — so a signer and a verifier
-/// building the same message can produce different bytes, and a signature over
-/// "the message" would be a signature over whichever encoder ran first. This
-/// is parsed from exactly the bytes that were signed and exactly the bytes
-/// that crossed the wire.
-///
-/// ```text
-/// bystack-manifest/1
-/// name bystack-agent
-/// version 0.4.0
-/// arch x86_64
-/// sha256 6f1b…
-/// released_at 1755388800
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Manifest {
-    pub name: String,
-    pub version: String,
-    pub arch: String,
-    pub sha256: [u8; 32],
-    pub released_at: i64,
-}
-
-/// The first line, and the only place a format change may be announced.
-const MAGIC: &str = "bystack-manifest/1";
-
-/// What this agent is. A manifest naming anything else is refused, because a
-/// key that ever signs a second artifact must not let one be presented as the
-/// other.
-const ARTIFACT_NAME: &str = "bystack-agent";
-
-impl Manifest {
-    /// Parse, refusing anything not fully understood.
-    ///
-    /// **Unknown keys are an error, not something to skip.** Skipping is the
-    /// forgiving choice and the wrong one here: a field added in a later
-    /// format because it carries a constraint — an expiry, a target list — is
-    /// a field an older agent must not quietly ignore while accepting the
-    /// signature over it. The way this document grows is `bystack-manifest/2`
-    /// and a release, which is the same shape as key rotation and for the same
-    /// reason.
-    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
-        let text = std::str::from_utf8(bytes).map_err(|_| "the manifest is not UTF-8")?;
-        let mut lines = text.lines();
-        match lines.next().map(str::trim) {
-            Some(MAGIC) => {}
-            Some(other) => {
-                return Err(format!("unknown manifest format {other:?}; this agent reads {MAGIC}"))
-            }
-            None => return Err("the manifest is empty".into()),
+/// The shared crate cannot know it: the manager's answer to "no keys" is to
+/// install a release build, and the agent's is a script. Everything about the
+/// check itself is shared; only the last sentence is the caller's.
+fn verify(document: &[u8], signature: &[u8]) -> Result<(), String> {
+    verify_with(SIGNING_KEYS, document, signature).map_err(|reason| {
+        if SIGNING_KEYS.is_empty() {
+            format!("{reason} Install it with scripts/install-agent.sh instead.")
+        } else {
+            reason
         }
-
-        let (mut name, mut version, mut arch, mut sha256, mut released_at) =
-            (None, None, None, None, None);
-
-        for line in lines {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let (key, value) = line
-                .split_once(char::is_whitespace)
-                .ok_or_else(|| format!("manifest line {line:?} is not `key value`"))?;
-            let value = value.trim();
-            let seen = match key {
-                "name" => name.replace(value.to_string()).is_some(),
-                "version" => version.replace(value.to_string()).is_some(),
-                "arch" => arch.replace(value.to_string()).is_some(),
-                "sha256" => sha256.replace(parse_sha256(value)?).is_some(),
-                "released_at" => released_at
-                    .replace(
-                        value
-                            .parse::<i64>()
-                            .map_err(|_| format!("released_at {value:?} is not a unix time"))?,
-                    )
-                    .is_some(),
-                other => return Err(format!("unknown manifest key {other:?}")),
-            };
-            // A repeated key is a document with two answers, and which one
-            // wins would be a property of this parser rather than of the
-            // signature.
-            if seen {
-                return Err(format!("manifest names {key:?} twice"));
-            }
-        }
-
-        let missing = |what: &str| format!("the manifest has no {what}");
-        Ok(Self {
-            name: name.ok_or_else(|| missing("name"))?,
-            version: version.ok_or_else(|| missing("version"))?,
-            arch: arch.ok_or_else(|| missing("arch"))?,
-            sha256: sha256.ok_or_else(|| missing("sha256"))?,
-            released_at: released_at.ok_or_else(|| missing("released_at"))?,
-        })
-    }
-
-    /// Whether this artifact is for this agent, on this machine.
-    pub fn check_target(&self) -> Result<(), String> {
-        if self.name != ARTIFACT_NAME {
-            return Err(format!(
-                "this is a signed {:?}, not a {ARTIFACT_NAME}",
-                self.name
-            ));
-        }
-        if self.arch != std::env::consts::ARCH {
-            return Err(format!(
-                "this host runs {}, and the release is for {}",
-                std::env::consts::ARCH,
-                self.arch
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// Check the signature against every key compiled into this binary.
-///
-/// Ed25519 through `ring`, which is already here for TLS and for the join
-/// token's fingerprint — so the whole of this feature's cryptography costs no
-/// dependency and no bytes the binary was not already carrying.
-///
-/// An agent with **no** keys refuses everything and says so in those words.
-/// That is a build, not a fault: it is what a checkout produces, and the
-/// Controller never sends to one because the `upgrade` capability is not
-/// advertised (see [`available`]).
-pub fn verify(document: &[u8], signature: &[u8]) -> Result<(), String> {
-    verify_with(SIGNING_KEYS, document, signature)
-}
-
-/// The check itself, against a key set given rather than compiled in.
-///
-/// Split out for the tests, which have to be able to hold a private key — and
-/// a checkout compiles in no public one, so a suite that could only use
-/// [`SIGNING_KEYS`] would be a suite that never verifies a real signature. The
-/// production caller passes exactly one key set and there is no way to reach
-/// this with another.
-fn verify_with(keys: &[[u8; 32]], document: &[u8], signature: &[u8]) -> Result<(), String> {
-    if keys.is_empty() {
-        return Err(
-            "this agent was built with no release signing keys, so it cannot verify an \
-             upgrade. Install it with scripts/install-agent.sh instead."
-                .into(),
-        );
-    }
-    for key in keys {
-        let public = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key);
-        if public.verify(document, signature).is_ok() {
-            return Ok(());
-        }
-    }
-    Err(
-        "the manifest is not signed by any key this agent trusts. A rotated key arrives \
-         in a release, so the agent that accepts the new one is the one before it."
-            .into(),
-    )
+    })
 }
 
 /// Whether this build can be upgraded over the wire at all.
@@ -267,51 +129,7 @@ fn verify_with(keys: &[[u8; 32]], document: &[u8], signature: &[u8]) -> Result<(
 /// refuses to start a transfer with a sentence instead of pushing two
 /// megabytes to a host that was always going to refuse them.
 pub fn available() -> bool {
-    !SIGNING_KEYS.is_empty()
-}
-
-// --------------------------------------------------------------------------
-// Versions
-// --------------------------------------------------------------------------
-
-/// Whether `candidate` is strictly higher than `floor`.
-///
-/// **The floor is the binary on the disk, never a stored number.** Any floor
-/// written to a file is a floor something can lower, and the obvious place to
-/// write it — the daemon's own state directory — is writable by exactly the
-/// process this check exists to survive. It would also be a second source of
-/// truth about which version is installed, able to disagree with the file that
-/// actually runs.
-///
-/// So downgrade is not an operation. Rollback is, and it is local, automatic
-/// and root's (see [`apply_update`]).
-///
-/// Numeric per component, with a pre-release ordering underneath: `0.4.0` is
-/// higher than `0.4.0-rc1`, which is higher than `0.3.9`. Compared component
-/// by component rather than as strings, because `0.10.0` sorts before `0.9.0`
-/// as text and that is a fleet that cannot be upgraded past nine.
-pub fn newer(candidate: &str, floor: &str) -> bool {
-    order(candidate) > order(floor)
-}
-
-/// `(major, minor, patch, release?, pre-release tag)`, ordered.
-///
-/// The fourth element is what puts `0.4.0` above `0.4.0-rc1`: a release has
-/// nothing after the dash and must outrank everything that has.
-fn order(version: &str) -> (u64, u64, u64, bool, String) {
-    let version = version.trim();
-    let (core, pre) = match version.split_once(['-', '+']) {
-        Some((core, pre)) => (core, pre.to_string()),
-        None => (version, String::new()),
-    };
-    let mut parts = core.split('.').map(|part| part.parse::<u64>().unwrap_or(0));
-    (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        pre.is_empty(),
-        pre,
-    )
+    bystack_release::available()
 }
 
 // --------------------------------------------------------------------------
@@ -366,7 +184,7 @@ pub fn offer(
         Ok(manifest) => manifest,
         Err(reason) => return refuse(reason),
     };
-    if let Err(reason) = manifest.check_target() {
+    if let Err(reason) = manifest.check_target(ARTIFACT_NAME) {
         return refuse(reason);
     }
     if !newer(&manifest.version, AGENT_VERSION) {
@@ -637,7 +455,7 @@ pub fn apply_update() -> Result<(), String> {
     let signature = fs::read(work.join(SIGNATURE)).map_err(|e| e.to_string())?;
     verify(&document, &signature)?;
     let manifest = Manifest::parse(&document)?;
-    manifest.check_target()?;
+    manifest.check_target(ARTIFACT_NAME)?;
 
     if sha256_file(&work.join(STAGED))? != manifest.sha256 {
         return Err("the staged binary does not match the digest in its signed manifest".into());
@@ -705,26 +523,6 @@ fn private_workspace() -> Result<PathBuf, String> {
         return Err(format!("{} is not owned by root", dir.display()));
     }
     Ok(dir)
-}
-
-/// Copy, refusing anything over `cap` without reading it.
-fn copy_capped(from: &Path, to: &Path, cap: u64) -> Result<(), String> {
-    let mut source = File::open(from).map_err(|e| format!("cannot read {}: {e}", from.display()))?;
-    let size = source.metadata().map_err(|e| e.to_string())?.len();
-    if size > cap {
-        return Err(format!("{} is {size} bytes, which is more than this will install", from.display()));
-    }
-    let mut destination = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(to)
-        .map_err(|e| format!("cannot write {}: {e}", to.display()))?;
-    std::io::copy(&mut source, &mut destination)
-        .map_err(|e| format!("cannot copy {}: {e}", from.display()))?;
-    destination.sync_all().map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// Put the new binary in place, keeping the old inode beside it.
@@ -857,36 +655,6 @@ fn run(program: &str, args: &[&str]) {
     }
 }
 
-fn sha256_file(path: &Path) -> Result<[u8; 32], String> {
-    let mut file = File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        context.update(&buffer[..read]);
-    }
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(context.finish().as_ref());
-    Ok(digest)
-}
-
-fn parse_sha256(hex: &str) -> Result<[u8; 32], String> {
-    if hex.len() != 64 {
-        return Err("the manifest's sha256 is not a SHA-256".to_string());
-    }
-    let mut out = [0u8; 32];
-    for (index, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "the manifest's sha256 is not hexadecimal".to_string())?;
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,12 +702,12 @@ mod tests {
     #[test]
     fn an_artifact_for_another_agent_or_another_machine_is_refused() {
         let other = Manifest::parse(&document("0.4.0", "sparc64", &"ab".repeat(32))).unwrap();
-        assert!(other.check_target().is_err());
+        assert!(other.check_target(ARTIFACT_NAME).is_err());
 
         let renamed = String::from_utf8(document("0.4.0", std::env::consts::ARCH, &"ab".repeat(32)))
             .unwrap()
             .replace("name bystack-agent", "name bystack-agent-experimental");
-        assert!(Manifest::parse(renamed.as_bytes()).unwrap().check_target().is_err());
+        assert!(Manifest::parse(renamed.as_bytes()).unwrap().check_target(ARTIFACT_NAME).is_err());
     }
 
     #[test]

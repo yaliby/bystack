@@ -24,6 +24,11 @@
 #
 #     scripts/release-agent.sh v0.4.0 --attach
 #
+# Since ADR-0018 that signs `bystack-controller-<arch>` as well as the agent,
+# under the same key and the same manifest format. Until it runs, a Controller
+# with a local updater declines to update itself for the same reason it
+# declines to push an unsigned release to a fleet.
+#
 # It downloads exactly what was published here, signs it, verifies it under two
 # implementations, and uploads the `.manifest` and `.manifest.sig`. Until it
 # runs, the release is usable and unsigned: `install-agent.sh` falls back to
@@ -50,28 +55,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # `bystack-agent` and `bystack-manager` in one matrix. Both are static musl
+  # binaries out of the same workspace, built by the same script (ADR-0018);
+  # splitting them into two jobs would double the toolchain setup to save
+  # nothing.
   agent:
-    name: Agent (${{ matrix.arch }})
+    name: ${{ matrix.package }} (${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Spelled out rather than composed from two lists. A `package` axis plus
+      # an `include` that carries the target triple looks equivalent and is
+      # not: entries in `include` that match no existing combination are added
+      # as extra jobs, which would build the agent twice and the manager not at
+      # all.
       matrix:
         include:
-          - arch: x86_64
-            target: x86_64-unknown-linux-musl
-          - arch: aarch64
-            target: aarch64-unknown-linux-musl
+          - { package: bystack-agent, arch: x86_64, target: x86_64-unknown-linux-musl }
+          - { package: bystack-agent, arch: aarch64, target: aarch64-unknown-linux-musl }
+          - { package: bystack-manager, arch: x86_64, target: x86_64-unknown-linux-musl }
+          - { package: bystack-manager, arch: aarch64, target: aarch64-unknown-linux-musl }
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
       # The same script a contributor runs, containers and all. A release path
       # that differs from the local one is a release path nobody has tested.
-      - run: ./scripts/build-agent.sh --target ${{ matrix.target }}
+      - run: ./scripts/build-agent.sh --package ${{ matrix.package }} --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-${{ matrix.arch }}
-          path: dist/bystack-agent-${{ matrix.arch }}
+          name: ${{ matrix.package }}-${{ matrix.arch }}
+          path: dist/${{ matrix.package }}-${{ matrix.arch }}
           if-no-files-found: error
 
   dashboard:
@@ -111,7 +125,7 @@ jobs:
       - run: pip install build
       - uses: actions/download-artifact@v4
         with:
-          name: agent-${{ matrix.arch }}
+          name: bystack-agent-${{ matrix.arch }}
           path: dist
       - uses: actions/download-artifact@v4
         with:
@@ -138,6 +152,46 @@ jobs:
         with:
           name: wheel-${{ matrix.arch }}
           path: wheels/*.whl
+          if-no-files-found: error
+
+  # The Controller as one file (ADR-0018). After `wheels` rather than beside
+  # it, because the zipapp is assembled *from* a wheel and from the dashboard,
+  # and building either of those twice would be two chances for the release to
+  # contain two different Controllers.
+  controller:
+    name: Controller (${{ matrix.arch }})
+    needs: [agent, dashboard]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      # The interpreter the artifact is pinned to, and the one that assembles
+      # it. `build-controller.sh` cross-builds for any of them, but running the
+      # `--version` check at the end needs the matching one to be here -- and
+      # that check is the difference between finding out a release cannot start
+      # in CI and finding out on somebody's Controller.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: bystack-agent-${{ matrix.arch }}
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard
+          path: frontend/dist
+      - run: |
+          chmod +x dist/bystack-agent-${{ matrix.arch }}
+          ./scripts/build-controller.sh --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bystack-controller-${{ matrix.arch }}
+          path: dist/bystack-controller-${{ matrix.arch }}
           if-no-files-found: error
 
   image:
@@ -178,7 +232,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [agent, wheels, image]
+    needs: [agent, wheels, controller, image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,7 +241,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: staged
-          pattern: "{agent-*,wheel-*}"
+          pattern: "{bystack-agent-*,bystack-manager-*,bystack-controller-*,wheel-*}"
           merge-multiple: true
 
       # Written here rather than carried from the build jobs, because those
@@ -197,19 +251,25 @@ jobs:
       - name: Checksums
         working-directory: staged
         run: |
-          chmod +x bystack-agent-*
-          sha256sum bystack-agent-* *.whl > SHA256SUMS
+          chmod +x bystack-agent-* bystack-manager-* bystack-controller-*
+          sha256sum bystack-agent-* bystack-manager-* bystack-controller-* *.whl > SHA256SUMS
           cat SHA256SUMS
 
       # Both architectures, or no release. `install-agent.sh` picks by
       # `uname -m` and reports "no prebuilt agent" for anything it cannot find
       # -- a release missing aarch64 would be a working install on half a
       # fleet and a puzzle on the other half.
-      - name: Both architectures are here
+      # Every artifact, both architectures, or no release. `install-agent.sh`
+      # picks by `uname -m` and `bystack-manager` composes its download URL the
+      # same way, so a release missing one arch is a working upgrade on half a
+      # fleet and a 404 on the other half.
+      - name: Everything is here, for both architectures
         working-directory: staged
         run: |
-          test -f bystack-agent-x86_64
-          test -f bystack-agent-aarch64
+          for name in bystack-agent bystack-manager bystack-controller; do
+            test -f "${name}-x86_64" || { echo "::error::no ${name}-x86_64" && exit 1; }
+            test -f "${name}-aarch64" || { echo "::error::no ${name}-aarch64" && exit 1; }
+          done
           test "$(ls -1 ./*.whl | wc -l)" -eq 2
 
       - uses: softprops/action-gh-release@v2

@@ -51,7 +51,7 @@ COPY agent/ ./
 # pipeline, a missing readelf leaves grep reading nothing, grep exits 1, and
 # the leading `!` turns that into a pass. A check that a base image can silently
 # retire by dropping binutils is not a check.
-RUN cargo build --release --locked \
+RUN cargo build --release --locked -p bystack-agent \
 	&& readelf -l target/release/bystack-agent > /tmp/elf.txt \
 	&& ! grep -q INTERP /tmp/elf.txt
 

@@ -18,7 +18,15 @@ from bystack import __version__
 from bystack.api.deps import AppContext
 from bystack.api.routes import agents as agent_routes
 from bystack.api.routes import commands as commands_routes
-from bystack.api.routes import enrollment, graph, health, stream, upgrades, watch
+from bystack.api.routes import (
+    controller,
+    enrollment,
+    graph,
+    health,
+    stream,
+    upgrades,
+    watch,
+)
 from bystack.api.web import mount_web
 from bystack.config import Settings
 from bystack.core.graph.store import InMemoryGraphStore
@@ -27,12 +35,14 @@ from bystack.core.ports.watch import WatchStore
 from bystack.infra.audit.durable import DurableAuditLog
 from bystack.infra.audit.memory import InMemoryAuditLog
 from bystack.infra.eventbus.memory import InMemoryEventBus
+from bystack.infra.manager import ManagerLink
 from bystack.infra.releases import ReleaseStore
 from bystack.infra.watch.durable import DurableWatchStore
 from bystack.infra.watch.memory import InMemoryWatchStore
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
 from bystack.runtime.localagent import LocalAgent
+from bystack.runtime.selfupdate import SelfUpdateService
 from bystack.runtime.trust import AgentTrust
 from bystack.runtime.upgrade import UpgradeService
 
@@ -81,6 +91,17 @@ def build_context(settings: Settings) -> AppContext:
         upgrades=UpgradeService(
             ReleaseStore(settings.agents.releases_path),
             lambda: collector.providers,
+            read_only=settings.read_only,
+        ),
+        selfupdate=SelfUpdateService(
+            ManagerLink(settings.agents.manager_ipc_path),
+            version=__version__,
+            # Loopback, never `api.host`. A Controller bound to `0.0.0.0` still
+            # answers here, and the manager refuses a health URL that is not on
+            # this machine -- a probation check that can be pointed elsewhere is
+            # one that always passes (ADR-0018).
+            health=f"http://127.0.0.1:{settings.api.port}{API_PREFIX}/healthz",
+            state_dir=settings.agents.state_dir,
             read_only=settings.read_only,
         ),
     )
@@ -146,6 +167,14 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
         # rather than stalling startup.
         await context.collector.start()
         log.info("collector started with %d provider(s)", len(context.collector.providers))
+        # Phase two of ADR-0018, and only ever for an update *this machine*
+        # just performed: if the local updater installed this exact version and
+        # left signed agents beside it, roll the fleet forward. The window is
+        # bounded and the run is recorded, so a restart is not a second
+        # rollout.
+        context.selfupdate.start(
+            lambda version: context.upgrades.start(version)  # type: ignore[arg-type,return-value]
+        )
         try:
             yield
         finally:
@@ -153,6 +182,7 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
             # and waiting on a host, and stopping the providers underneath it
             # would leave it waiting out a deadline for an answer that cannot
             # arrive.
+            await context.selfupdate.aclose()
             await context.upgrades.aclose()
             await context.collector.stop()
             await context.bus.aclose()
@@ -189,6 +219,10 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
     # decides *whether* a host is managed, and this decides *what* is watched
     # on one that already is. They share a path prefix and nothing else.
     app.include_router(watch.router, prefix=API_PREFIX)
+    # This Controller updating *itself*, which is a different question from
+    # upgrading the fleet and lives under its own prefix for that reason
+    # (ADR-0018).
+    app.include_router(controller.router, prefix=API_PREFIX)
     # Last, and that ordering is load-bearing: Starlette matches in
     # registration order, so the dashboard's catch-all only sees paths no API
     # route claimed. See `api/web.py`.
