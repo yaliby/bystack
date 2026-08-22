@@ -67,6 +67,12 @@ ARG TARGETARCH
 ENV BYSTACK_TARGET_ARCH=$TARGETARCH
 
 COPY backend/ /src/backend/
+# The installer, which the wheel carries and the Controller uploads when it
+# deploys an agent over SSH (ADR-0019). `hatch_build.py` reads it from here and
+# *fails the build* if it is absent, deliberately: a Controller without it has
+# a button in its dashboard that cannot work, and that is not a thing to find
+# out from an image.
+COPY scripts/install-agent.sh /src/scripts/install-agent.sh
 COPY --from=agent /build/target/release/bystack-agent /src/dist/bystack-agent-placeholder
 COPY --from=web /build/dist/ /src/frontend/dist/
 

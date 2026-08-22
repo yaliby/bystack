@@ -278,11 +278,12 @@ jobs:
       # `agent-rollback.sh` is the one that runs as root with write access to
       # /usr/local/bin, which makes it the last one that should be unlinted.
       - run: |
-          shellcheck scripts/install-agent.sh scripts/build-agent.sh \
+          shellcheck scripts/install-agent.sh scripts/install-controller.sh \
+                     scripts/build-agent.sh \
                      scripts/build-controller.sh scripts/release-agent.sh \
                      scripts/check-release-keys.sh packaging/agent-rollback.sh
 
-      # The key a fleet trusts is written in two files, in two encodings, by
+      # The key a fleet trusts is written in three files, in two encodings, by
       # hand. A mismatch installs fine and then refuses every upgrade for the
       # life of the host, so it is checked where it is cheap.
       - name: The release signing keys agree

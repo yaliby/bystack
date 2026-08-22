@@ -57,6 +57,12 @@ TimeoutStopSec=30
 # works, this machine simply stops appearing in its own topology.
 User=bystack
 Group=bystack
+# Delete this line on a host with no container engine. `SupplementaryGroups=`
+# naming a group that does not exist is not a warning: systemd fails at step
+# GROUP with status 216 before the binary is executed, and the journal line
+# ("Failed to determine supplementary groups") mentions neither Docker nor the
+# group. `scripts/install-controller.sh` writes the line only when there is a
+# group to name, which is why the installed unit and this one can differ here.
 SupplementaryGroups=docker
 
 # /var/lib/bystack, 0700. The CA private key, the enrolment registry and

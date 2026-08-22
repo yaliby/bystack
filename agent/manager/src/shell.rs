@@ -147,7 +147,22 @@ pub fn download(url: &str, to: &Path, max_bytes: u64) -> Result<(), String> {
 /// binary for a document somebody else's server controls. What comes back is
 /// still only a *hint*: it names a tag, and everything that tag produces is
 /// refused unless it is signed and higher than what is installed.
+///
+/// **A configured mirror is refused rather than answered.** A mirror is a
+/// directory of releases, not an API, so there is nothing on it to ask — and
+/// falling back to GitHub would be worse than failing: an air-gapped machine
+/// would hang on a host it cannot reach, and a connected one would be told
+/// about a version its mirror does not carry, then fail on the download two
+/// steps later with a 404 instead of a sentence.
 pub fn latest_tag() -> Result<String, String> {
+    if let Some(base) = mirror() {
+        return Err(format!(
+            "this machine installs from the mirror at {base}, and a mirror has nothing \
+             to ask which release is newest. Name the version instead -- \
+             `bystack-manager request <version>`, or type it into the update box."
+        ));
+    }
+
     let output = Command::new("curl")
         .args([
             "--proto",

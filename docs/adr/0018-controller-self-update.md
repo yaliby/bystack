@@ -244,6 +244,53 @@ offers and a button. Only an update *this machine performed* starts a fleet-wide
 change without being asked, because only then is there evidence about what just
 changed and why.
 
+### The arrangement is installed by a script, because it is an arrangement
+
+Everything above describes a *shape*: an account, one directory with five
+subdirectories and three different owners, two binaries, four units, and a
+configuration file naming two paths that have to agree with the updater's
+`Layout`. None of it is checked at runtime, and a Controller assembled slightly
+wrong starts perfectly.
+
+That is the argument for `scripts/install-controller.sh` rather than a
+paragraph of `install` commands in a document. Two of the settings it writes
+are not preferences and fail silently when they are wrong:
+
+- `agents.releases_dir` must be where the manager cascades to. The default
+  puts it in the *state* directory — beside the CA key, which is backed up —
+  and the manager writes to the *deployment* directory, whose contents are
+  re-downloadable. Both defaults are right on their own. Joined incorrectly,
+  the Controller updates itself, reports success, and never offers the fleet
+  the release that was fetched for it.
+- `agents.manager_ipc_dir` must be the `1770` directory, or the button writes
+  a file nothing reads.
+
+`test_manager.py` asserts both against the Rust `Layout`, because a comment
+saying they must agree is not a thing that fails when they stop agreeing.
+
+**The installer also checks for the interpreter before it downloads anything**,
+which is the same check the manager makes before it stops anything, one step
+earlier. A first install has no working Controller to fall back to, so there is
+nothing there for a rollback to restore.
+
+### The manager is signed, though nothing ever verifies one
+
+Nothing upgrades `bystack-manager` — stated below as a consequence, and
+unchanged. But it is the binary holding the key set that every later update is
+checked against, so the one moment it *can* be verified is the moment it is
+installed.
+
+Without a signature, the root of the trust chain would be the only file on the
+machine proved by a checksum fetched over the same connection as the bytes it
+describes, while the Controller beside it was proved against an offline key.
+Adding it costs one entry in `sign-agent.py`'s closed set of names — the same
+set, the same key, the same manifest — and makes `install-controller.sh` able
+to say that the whole of what it installed was signed by a key that is not on
+any machine involved in serving it.
+
+This is the third artifact under one key, which is the third reason `name` is
+inside the signed document.
+
 ### The dashboard is served by the process being replaced
 
 Which means the one thing this UI has to be correct about is **its own backend
@@ -284,6 +331,7 @@ undoes a swap that does not come up.
 | The Controller's end of the two files | `backend/.../infra/manager.py` |
 | Phase two, and the one condition it fires under | `backend/.../runtime/selfupdate.py` |
 | The operator surface | `backend/.../api/routes/controller.py` |
+| The arrangement, installed | `scripts/install-controller.sh` |
 | A page that survives its own backend | `frontend/src/features/hosts/model/useController.ts` |
 
 Two of them are checked across the language boundary rather than by comment.

@@ -5,6 +5,11 @@
 //!     bin/bystack-controller        what runs. Replaced by `rename` in this
 //!     bin/bystack-controller.prev   directory, so the swap is atomic and the
 //!     bin/bystack-manager           previous inode survives it.
+//!     bin/bystack-controller.failed left behind by a rollback: the release
+//!                                   that was installed and did not serve. One
+//!                                   file, overwritten by the next rollback,
+//!                                   kept because "which build was it" is the
+//!                                   first question afterwards. Safe to delete.
 //!     ipc/update.intent             the Controller writes this. Root reads it.
 //!     ipc/update.status             root writes this. The Controller reads it.
 //!     state/probation               root only. What to undo, and by when.

@@ -19,6 +19,7 @@ from bystack.core.ports.eventbus import EventBus
 from bystack.core.ports.watch import WatchStore
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
+from bystack.runtime.deploy import DeployService
 from bystack.runtime.localagent import LocalAgent
 from bystack.runtime.selfupdate import SelfUpdateService
 from bystack.runtime.trust import AgentTrust
@@ -73,6 +74,20 @@ class AppContext:
     careful about (ADR-0018).
     """
 
+    deploy: DeployService
+    """Installing an agent on a machine that does not have one (ADR-0019).
+
+    The only thing in this context that ever holds a credential, and it holds
+    one for the length of one run and writes it nowhere. Beside `upgrades`
+    rather than inside it for the reason `selfupdate` is: that service
+    distributes to hosts that already trust us and verify for themselves, and
+    this one opens an outbound connection to a machine that has never heard of
+    this Controller. Same fleet, opposite trust boundary.
+
+    Reached from the API only. Nothing on the agent listener can start a
+    deployment, which is the same rule enrollment follows.
+    """
+
     local_agent: LocalAgent
     """The agent this Controller spawned for its own machine.
 
@@ -116,6 +131,10 @@ def get_selfupdate(context: Annotated[AppContext, Depends(get_context)]) -> Self
     return context.selfupdate
 
 
+def get_deploy(context: Annotated[AppContext, Depends(get_context)]) -> DeployService:
+    return context.deploy
+
+
 Context = Annotated[AppContext, Depends(get_context)]
 Store = Annotated[GraphStore, Depends(get_store)]
 Bus = Annotated[EventBus, Depends(get_bus)]
@@ -124,3 +143,4 @@ Commands = Annotated[CommandService, Depends(get_commands)]
 Trust = Annotated[AgentTrust, Depends(get_trust)]
 Upgrades = Annotated[UpgradeService, Depends(get_upgrades)]
 SelfUpdate = Annotated[SelfUpdateService, Depends(get_selfupdate)]
+Deploy = Annotated[DeployService, Depends(get_deploy)]

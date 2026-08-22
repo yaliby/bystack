@@ -2387,6 +2387,266 @@ body {
   line-height: 1.6;
 }
 
+/* -- add a host: two ways in (ADR-0019) ------------------------------------
+ *
+ * A tab strip rather than a disclosure, because the two are peers: one is for
+ * a host this Controller can reach, the other for one it cannot, and folding
+ * either away would make it look like the exception.
+ */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin: 14px 0 4px;
+  padding: 3px;
+  border-radius: var(--r-inner);
+  background: var(--well);
+}
+
+.tabs__tab {
+  flex: 1;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: calc(var(--r-inner) - 3px);
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.tabs__tab:hover {
+  color: var(--ink-secondary);
+}
+
+.tabs__tab--on {
+  background: var(--surface-raised);
+  color: var(--ink);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 12%, transparent);
+}
+
+.field {
+  display: block;
+  margin-top: 14px;
+}
+
+.field__label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.field__input {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-inner);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.field__input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 75%, transparent);
+  outline-offset: 1px;
+}
+
+.field__input:disabled {
+  background: var(--well);
+  color: var(--ink-muted);
+}
+
+.field__input--area {
+  resize: vertical;
+  min-height: 62px;
+  line-height: 1.55;
+}
+
+.field__input--mono {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+
+.field__hint {
+  display: block;
+  margin-top: 5px;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.field-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.field-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-inner);
+  background: var(--well);
+}
+
+.segmented__part {
+  flex: 1;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: calc(var(--r-inner) - 3px);
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.segmented__part--on {
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.segmented__part:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.modal__submit {
+  width: 100%;
+  margin-top: 16px;
+}
+
+/* -- the run, one row per machine ---------------------------------------- */
+
+.deploy {
+  margin-top: 16px;
+  padding: 12px;
+  border-radius: var(--r-inner);
+  background: var(--well);
+}
+
+.deploy__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.deploy__row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, auto) minmax(0, 1fr);
+  gap: 4px 9px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 12px;
+}
+
+.deploy__row:last-child {
+  border-bottom: 0;
+}
+
+.deploy__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-muted);
+  transform: translateY(-1px);
+}
+
+.deploy__dot--pending {
+  background: color-mix(in srgb, var(--ink-muted) 45%, transparent);
+}
+
+.deploy__dot--busy {
+  background: var(--accent);
+  animation: deploy-pulse 1.4s ease-in-out infinite;
+}
+
+.deploy__dot--good {
+  background: var(--good);
+}
+
+.deploy__dot--bad {
+  background: var(--critical);
+}
+
+@keyframes deploy-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Motion is information here -- it is the only thing distinguishing a host
+ * being worked on from one that is waiting. Reduced motion gets the same
+ * distinction as a ring rather than nothing at all. */
+@media (prefers-reduced-motion: reduce) {
+  .deploy__dot--busy {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+  }
+}
+
+.deploy__host {
+  color: var(--ink);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.deploy__phase {
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.deploy__detail {
+  grid-column: 2 / -1;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.deploy__print {
+  grid-column: 2 / -1;
+  color: var(--ink-muted);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.deploy__summary {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.deploy__summary--busy {
+  color: var(--accent);
+}
+
+.deploy__summary--good {
+  color: var(--good);
+}
+
+.deploy__summary--bad {
+  color: var(--critical);
+}
+
 .modal__meta {
   display: flex;
   gap: 12px;

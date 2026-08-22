@@ -8,8 +8,10 @@ keeps the dependency graph acyclic and every module independently testable.
 from __future__ import annotations
 
 import logging
+import platform
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +22,7 @@ from bystack.api.routes import agents as agent_routes
 from bystack.api.routes import commands as commands_routes
 from bystack.api.routes import (
     controller,
+    deploy,
     enrollment,
     graph,
     health,
@@ -37,11 +40,14 @@ from bystack.infra.audit.memory import InMemoryAuditLog
 from bystack.infra.eventbus.memory import InMemoryEventBus
 from bystack.infra.manager import ManagerLink
 from bystack.infra.releases import ReleaseStore
+from bystack.infra.ssh import KnownHosts
 from bystack.infra.watch.durable import DurableWatchStore
 from bystack.infra.watch.memory import InMemoryWatchStore
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
-from bystack.runtime.localagent import LocalAgent
+from bystack.runtime.deploy import DeployService, Sources
+from bystack.runtime.localagent import BUNDLED_INSTALLER, IN_TREE_INSTALLER, LocalAgent
+from bystack.runtime.localagent import find_binary as find_agent
 from bystack.runtime.selfupdate import SelfUpdateService
 from bystack.runtime.trust import AgentTrust
 from bystack.runtime.upgrade import UpgradeService
@@ -49,6 +55,13 @@ from bystack.runtime.upgrade import UpgradeService
 log = logging.getLogger(__name__)
 
 API_PREFIX = "/api/v1"
+
+#: `platform.machine()` spells two architectures differently from `uname -m`,
+#: which is what the agent artifacts are named after and what a target machine
+#: reports. Only the disagreements are listed; the same table is in
+#: `hatch_build.py` and in `runtime/deploy.py`, because each is answering the
+#: question for a different machine.
+_ARCH_ALIASES = {"amd64": "x86_64", "arm64": "aarch64"}
 
 
 def build_context(settings: Settings) -> AppContext:
@@ -61,6 +74,10 @@ def build_context(settings: Settings) -> AppContext:
     store = InMemoryGraphStore()
     bus = InMemoryEventBus()
     collector = Collector.from_settings(settings, store, bus)
+    # Built here rather than inside the service so that the one object holding
+    # a CA is created once and shared, the way the listener and the API share
+    # it: `deploy` mints a join token like any other caller of this.
+    trust = AgentTrust.from_settings(settings)
     commands = CommandService(
         store,
         _audit(settings),
@@ -80,7 +97,7 @@ def build_context(settings: Settings) -> AppContext:
         # Opened whether or not the listener is enabled: minting a token is
         # how an operator gets to the point of enabling it, and the CA has to
         # exist before there is a fingerprint to put in one.
-        trust=AgentTrust.from_settings(settings),
+        trust=trust,
         # Constructed whether or not it can run, so that a Controller which
         # could not spawn one can say why rather than showing an empty fleet.
         local_agent=LocalAgent(settings),
@@ -104,6 +121,38 @@ def build_context(settings: Settings) -> AppContext:
             state_dir=settings.agents.state_dir,
             read_only=settings.read_only,
         ),
+        deploy=DeployService(
+            sources=_deploy_sources(settings),
+            known_hosts=KnownHosts(Path(settings.agents.state_dir).expanduser() / "known_hosts"),
+            # Three callables rather than the trust store, the registry and
+            # the settings. This needs to mint a token, ask which engines are
+            # enrolled, and know where agents dial; holding the CA would let a
+            # deployment service grow opinions about enrolment that belong to
+            # ADR-0011.
+            mint_token=trust.mint_token,
+            enrolled_ids=lambda: {agent.engine_id for agent in trust.registry.all()},
+            dial_url=lambda: settings.agents.dial_url,
+            read_only=settings.read_only,
+        ),
+    )
+
+
+def _deploy_sources(settings: Settings) -> Sources:
+    """What this Controller can put on a machine without it reaching GitHub.
+
+    The signed releases first, then its own bundled agent, then nothing --
+    which is not a failure, it is the case where the host fetches its own
+    binary exactly as the pasted command has always made it do (ADR-0019).
+    """
+    installer = BUNDLED_INSTALLER if BUNDLED_INSTALLER.is_file() else None
+    if installer is None and IN_TREE_INSTALLER.is_file():
+        installer = IN_TREE_INSTALLER
+    agent, _ = find_agent(settings.local_agent.binary)
+    return Sources(
+        installer=installer,
+        releases_dir=Path(settings.agents.releases_path).expanduser(),
+        bundled_agent=agent,
+        bundled_arch=_ARCH_ALIASES.get(platform.machine().lower(), platform.machine().lower()),
     )
 
 
@@ -215,6 +264,9 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
     # Before the routes that end in a path parameter, so `/agents/upgrades`
     # cannot be matched as an engine id by something registered earlier.
     app.include_router(upgrades.router, prefix=API_PREFIX)
+    # Same rule, same reason: `/agents/deploy` is a fixed path under a prefix
+    # whose other routes take an engine id (ADR-0019).
+    app.include_router(deploy.router, prefix=API_PREFIX)
     # Also under `/agents`, and a separate module on purpose: enrollment
     # decides *whether* a host is managed, and this decides *what* is watched
     # on one that already is. They share a path prefix and nothing else.

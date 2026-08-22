@@ -256,6 +256,46 @@ export interface JoinToken {
   readonly manual: string;
 }
 
+/**
+ * One machine in a deployment run (ADR-0019).
+ *
+ * `skipped` is not a failure and must not be drawn as one: a machine that
+ * already runs an agent is a correct outcome for "make this machine managed".
+ */
+export interface DeployHost {
+  readonly host: string;
+  readonly port: number;
+  readonly phase:
+    | 'waiting'
+    | 'connecting'
+    | 'preparing'
+    | 'installing'
+    | 'enrolling'
+    | 'done'
+    | 'skipped'
+    | 'failed';
+  readonly detail: string;
+  readonly engine_id: string;
+  /** The host key that address answered with, as `ssh-keygen -l` prints it. */
+  readonly fingerprint: string;
+}
+
+/**
+ * A deployment, in flight or finished.
+ *
+ * There is no field here for the credential and there is no route that returns
+ * one — the Controller holds it for the length of the run and writes it
+ * nowhere (ADR-0019). Nothing in this file should ever grow one.
+ */
+export interface DeployRun {
+  readonly running: boolean;
+  readonly started_at: number;
+  readonly finished_at: number;
+  /** Why the run stopped. Hosts after the failure stay `waiting`. */
+  readonly error: string;
+  readonly hosts: readonly DeployHost[];
+}
+
 /** Whether a host can join at all, and on what terms. Configuration, not state. */
 export interface EnrollmentTerms {
   readonly enabled: boolean;

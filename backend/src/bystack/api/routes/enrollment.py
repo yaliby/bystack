@@ -225,18 +225,12 @@ class AgentOut(BaseModel):
 def _dial_url(context: Context) -> str:
     """The address a host on the network types to reach this listener.
 
-    Not `listen`, which is a bind. `0.0.0.0` is a correct thing to bind and a
-    meaningless thing to dial, so a wildcard falls back to the first name the
-    listener issued itself a certificate for -- and that is the right fallback
-    rather than a convenient one: an agent that dialled any *other* name would
-    reject the certificate and refuse to connect, so the names in
-    `server_names` are exactly the set of addresses this command can work at.
+    On `AgentsConfig` rather than here since ADR-0019, because the deployment
+    service composes the same address for the installer it runs itself -- and
+    two spellings of it is how a host added one way reaches this listener and a
+    host added the other way does not.
     """
-    host, port = context.settings.agents.listen_address
-    reachable = (
-        context.settings.agents.server_names[0] if host in ("0.0.0.0", "::", "") else host
-    )
-    return f"wss://{reachable}:{port}"
+    return context.settings.agents.dial_url
 
 
 @router.post("/tokens", response_model=TokenOut, summary="Mint a join token")

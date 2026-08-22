@@ -47,8 +47,15 @@ DOCUMENTS = (
     "INSTALL.md",
     "install.html",
     "scripts/install-agent.sh",
+    "scripts/install-controller.sh",
     ".github/workflows/release.yml",
 )
+
+#: The installers, whose `VERSION` default is what they fetch when nobody
+#: overrides it. Both compose their download URLs out of it rather than out of
+#: the URL they were themselves fetched from, so a stale default is a correctly
+#: pasted command that installs the previous release.
+INSTALLERS = ("scripts/install-agent.sh", "scripts/install-controller.sh")
 
 #: Every shape in which a version is written down somewhere it will be acted
 #: on, with the version as the one capture group.
@@ -61,7 +68,11 @@ PATTERNS = (
     # Wheel filenames, which a `pip install` line names in full.
     re.compile(r"bystack-([0-9][0-9A-Za-z.]*)-"),
     # The command that cuts the release, quoted as an example in two places.
+    # Both halves of it: `git tag v0.5.0 && git push origin v0.4.0` is a real
+    # thing a bump left behind, it reads correctly at a glance, and it pushes a
+    # tag that has nothing to do with the release being cut.
     re.compile(r"git tag v([0-9][0-9A-Za-z.]*)"),
+    re.compile(r"git push origin v([0-9][0-9A-Za-z.]*)"),
 )
 
 
@@ -90,19 +101,25 @@ def test_the_build_files_carry_the_controllers_version() -> None:
     )
 
 
-def test_the_installers_default_version_is_this_release() -> None:
+@pytest.mark.parametrize("installer", INSTALLERS)
+def test_the_installers_default_version_is_this_release(installer: str) -> None:
     """The copy that fails silently.
 
-    `install-agent.sh` fetches the binary and `SHA256SUMS` from `VERSION`, not
-    from the URL it was itself fetched from. A stale default means the right
-    script installs the wrong agent and says nothing, on every host added or
-    upgraded until somebody notices the fleet is uniformly one release behind.
+    Both installers fetch their binaries and `SHA256SUMS` from `VERSION`, not
+    from the URL they were themselves fetched from. A stale default means the
+    right script installs the wrong software and says nothing -- a fleet
+    uniformly one release behind, or a Controller installed at a version whose
+    dashboard hands out a different one.
+
+    It is worse on the Controller's side than the agent's. The version it
+    installs is the anti-downgrade floor for every update after it
+    (`bystack-manager` reads `--version` off the file that actually runs), so a
+    machine installed a release ahead of where it should be is one that refuses
+    the release it was supposed to get.
     """
-    default = re.search(
-        r'^VERSION="\$\{BYSTACK_VERSION:-v([^}"]+)\}"', _read("scripts/install-agent.sh"), re.M
-    )
+    default = re.search(r'^VERSION="\$\{BYSTACK_VERSION:-v([^}"]+)\}"', _read(installer), re.M)
     assert default and default.group(1) == __version__, (
-        f"scripts/install-agent.sh defaults to v{default.group(1) if default else '?'}; "
+        f"{installer} defaults to v{default.group(1) if default else '?'}; "
         f"this release is v{__version__}. It would install the wrong binary from a "
         f"correctly-pasted command."
     )

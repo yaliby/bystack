@@ -56,6 +56,18 @@ IN_TREE = (
     Path(__file__).resolve().parents[4] / "agent" / "target" / "release" / "bystack-agent"
 )
 
+#: `scripts/install-agent.sh`, as carried in the wheel (`hatch_build.py`).
+#:
+#: Uploaded to a machine the Controller is deploying an agent to (ADR-0019), so
+#: that the target needs no outbound internet of its own. It is text and it is
+#: never executed here.
+BUNDLED_INSTALLER = Path(__file__).resolve().parent.parent / "_bundled" / "install-agent.sh"
+
+#: The same file in a development checkout, for the same reason `IN_TREE`
+#: exists: a contributor running from source gets the working button rather
+#: than a sentence about a wheel they did not build.
+IN_TREE_INSTALLER = Path(__file__).resolve().parents[4] / "scripts" / "install-agent.sh"
+
 #: Restart backoff. Same shape and the same reason as the agent's own
 #: (`agent/src/main.rs`): a child that cannot start must not be respawned in a
 #: hot loop, and a Docker daemon that is slow to come up is an ordinary cause.
@@ -354,6 +366,17 @@ class LocalAgent:
 
 def _resolve(configured: str, fallback: Path) -> Path:
     return Path(configured).expanduser() if configured else fallback
+
+
+def find_binary(configured: str = "") -> tuple[Path | None, str]:
+    """`_find_binary`, for callers outside this module.
+
+    The deploy service needs the same answer this one does -- which agent
+    binary this Controller holds -- and asking it twice in two ways is how the
+    machine it spawns for itself and the machine it installs on somebody else
+    end up on different builds.
+    """
+    return _find_binary(configured)
 
 
 def _find_binary(configured: str) -> tuple[Path | None, str]:

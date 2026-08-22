@@ -197,6 +197,27 @@ class AgentsConfig(BaseModel):
     """
 
     @property
+    def dial_url(self) -> str:
+        """The address a host on the network types to reach this listener.
+
+        Not ``listen``, which is a bind. ``0.0.0.0`` is a correct thing to bind
+        and a meaningless thing to dial, so a wildcard falls back to the first
+        name the listener issued itself a certificate for -- and that is the
+        right fallback rather than a convenient one: an agent that dialled any
+        *other* name would reject the certificate, so ``server_names`` is
+        exactly the set of addresses this can work at.
+
+        Here rather than beside one of its callers because there are two now:
+        the command an operator pastes (`routes/enrollment.py`) and the one the
+        Controller runs over SSH itself (ADR-0019). Two spellings of the same
+        address is how a host added one way reaches a listener and a host added
+        the other way does not.
+        """
+        host, port = self.listen_address
+        reachable = self.server_names[0] if host in ("0.0.0.0", "::", "") else host
+        return f"wss://{reachable}:{port}"
+
+    @property
     def manager_ipc_path(self) -> str:
         return self.manager_ipc_dir or DEFAULT_MANAGER_IPC_DIR
 

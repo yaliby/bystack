@@ -71,18 +71,27 @@ MAGIC = "bystack-manifest/1"
 #: What this key is allowed to sign, and the whole of the difference between
 #: ADR-0017's feature and ADR-0018's.
 #:
-#: The key signs two artifacts now, which is exactly the situation the `name`
+#: The key signs three artifacts now, which is exactly the situation the `name`
 #: field was put inside the document for: **a key that ever signs a second
 #: artifact must not let one be presented as the other.** Without it, a
 #: genuine, current, correctly signed Controller could be handed to a managed
 #: host as its agent, and every check but that one would pass.
 #:
+#: `bystack-manager` is here for a narrower reason than the other two, and it
+#: is worth stating because nothing at *runtime* ever checks it. Nothing
+#: upgrades the manager -- it is the root of the chain, the binary that holds
+#: the key set every later update is verified against, and ADR-0018 says
+#: plainly that it is replaced by the same hands that installed it. Signing it
+#: is what lets `install-controller.sh` verify the whole of what it puts on a
+#: machine against a key that is not on the machine serving the bytes, instead
+#: of falling back to a checksum fetched over the same connection.
+#:
 #: A closed set rather than a free string. `--name` picks between these and
-#: cannot invent a third, because the two verifiers -- `bystack-release` in
-#: Rust and `install-agent.sh` in shell -- each compare against a constant they
-#: were built with, and a name nothing checks for is a signature nothing will
-#: accept.
-ARTIFACTS = ("bystack-agent", "bystack-controller")
+#: cannot invent a fourth, because every verifier -- `bystack-release` in Rust,
+#: `install-agent.sh` and `install-controller.sh` in shell -- compares against
+#: a constant it was built with, and a name nothing checks for is a signature
+#: nothing will accept.
+ARTIFACTS = ("bystack-agent", "bystack-controller", "bystack-manager")
 
 #: The default, because it is what the overwhelming majority of signing runs
 #: are and what every existing invocation means.
@@ -127,8 +136,9 @@ def cmd_keygen(args: argparse.Namespace) -> int:
     print()
     print(f"  {_hex(public)}")
     print()
-    print("And this in RELEASE_KEYS_PEM at the top of scripts/install-agent.sh, so the")
-    print("first install on a host is verified on the same terms as every upgrade after it:")
+    print("And this in RELEASE_KEYS_PEM at the top of BOTH scripts/install-agent.sh and")
+    print("scripts/install-controller.sh, so the first install on a host -- and on the")
+    print("Controller -- is verified on the same terms as every upgrade after it:")
     print()
     print(_public_pem(public).strip())
     return 0

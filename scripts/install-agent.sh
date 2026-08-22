@@ -2,7 +2,7 @@
 #
 # Put the ByStack agent on this machine.
 #
-#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
+#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-agent.sh \
 #       | sudo sh -s -- --controller wss://controller:8443 --token bst1.<ca>.<secret>
 #
 # That is the command the dashboard hands out. Everything below is what it
@@ -15,7 +15,7 @@
 #
 # The same command with the new tag in the URL and *no* `--token`:
 #
-#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
+#     curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-agent.sh \
 #       | sudo sh -s -- --controller wss://controller:8443
 #
 # Dropping the token is what makes it an upgrade rather than a second host.
@@ -66,7 +66,7 @@
 set -eu
 
 REPO="${BYSTACK_REPO:-yaliby/bystack}"
-VERSION="${BYSTACK_VERSION:-v0.4.0}"
+VERSION="${BYSTACK_VERSION:-v0.5.0}"
 
 BIN_DIR="${BYSTACK_BIN_DIR:-/usr/local/bin}"
 CONF_DIR=/etc/bystack
@@ -507,7 +507,15 @@ fi
 # is not called anything at all on a host with no engine yet.
 socket="${docker_socket:-/var/run/docker.sock}"
 if [ -S "$socket" ]; then
-	socket_group="$(stat -c '%G' "$socket" 2>/dev/null || echo docker)"
+	# `-L`, and it is load-bearing. GNU `stat` reports the *symlink* when it is
+	# given one, and /var/run/docker.sock is a symlink on more hosts than not:
+	# a podman-compat setup points it at /run/podman/podman.sock, and several
+	# distributions link /var/run at /run. Without `-L` this reads the link's
+	# own group -- `root`, mode 777, always -- writes `SupplementaryGroups=root`
+	# into the unit, and the agent starts and cannot open the socket. The
+	# symptom is "cannot reach the docker socket: Permission denied" on a host
+	# whose socket is plainly readable by the group the operator checked.
+	socket_group="$(stat -Lc '%G' "$socket" 2>/dev/null || echo docker)"
 else
 	socket_group=docker
 	echo "note: no socket at ${socket} yet; the agent will say so and the unit will restart"
@@ -528,7 +536,7 @@ if getent group "$socket_group" >/dev/null 2>&1; then
 else
 	echo "note: no '${socket_group}' group on this host, so the unit does not join one."
 	echo "      Once the engine is installed:"
-	echo "        usermod -aG \$(stat -c '%G' ${socket}) ${SERVICE_USER}"
+	echo "        usermod -aG \$(stat -Lc '%G' ${socket}) ${SERVICE_USER}"
 	echo "        # then add SupplementaryGroups= to ${UNIT} and reload"
 fi
 

@@ -2,16 +2,25 @@
 #
 # Sign a release, on the machine that holds the key, and attach the signatures.
 #
-# Two artifacts now, under one key: `bystack-agent-<arch>`, which a fleet
-# installs (ADR-0017), and `bystack-controller-<arch>`, which the machine
-# running the Controller installs on itself (ADR-0018). The only difference
-# between their manifests is the `name` field -- which is exactly the situation
-# that field was put inside the signed document for, because a key that signs
-# two things must not let one be presented as the other.
+# Three artifacts now, under one key: `bystack-agent-<arch>`, which a fleet
+# installs (ADR-0017); `bystack-controller-<arch>`, which the machine running
+# the Controller installs on itself; and `bystack-manager-<arch>`, the root
+# component that performs that install (ADR-0018). The only difference between
+# their manifests is the `name` field -- which is exactly the situation that
+# field was put inside the signed document for, because a key that signs three
+# things must not let one be presented as another.
 #
-#     scripts/release-agent.sh v0.4.0                 # fetch the published tag, sign
-#     scripts/release-agent.sh v0.4.0 --attach        # ... and upload the signatures
-#     scripts/release-agent.sh v0.4.0 --local         # sign what build-agent.sh made
+# The manager is signed even though nothing at runtime ever verifies one.
+# Nothing upgrades it: it is the binary holding the key set that every later
+# update is checked against, so the only moment it can be verified at all is
+# the moment it is installed -- and `install-controller.sh` is what does that.
+# Without a signature there, the root of the trust chain would be the one file
+# on the machine proved by a checksum fetched over the same connection as the
+# bytes it describes.
+#
+#     scripts/release-agent.sh v0.5.0                 # fetch the published tag, sign
+#     scripts/release-agent.sh v0.5.0 --attach        # ... and upload the signatures
+#     scripts/release-agent.sh v0.5.0 --local         # sign what build-agent.sh made
 #
 # ## Why this is not a CI job
 #
@@ -49,7 +58,7 @@
 #   - and under openssl, which is the implementation `install-agent.sh` uses.
 #     Two verifiers, because the one bug that would be invisible to a single
 #     one is a manifest that only one of them can read.
-#   - both architectures of both artifacts, or none. A tag with one signed
+#   - both architectures of every artifact, or none. A tag with one signed
 #     artifact is a fleet that upgrades on half its hosts and refuses on the
 #     other half -- or a Controller that updates itself and then has nothing
 #     signed to hand the fleet.
@@ -64,8 +73,10 @@ ARCHES=(x86_64 aarch64)
 
 #: What this signs, in the order it signs them. The agent first because it is
 #: the one a fleet cannot do without; a run that dies half-way has at least
-#: left the fleet upgradable.
-ARTIFACTS=(bystack-agent bystack-controller)
+#: left the fleet upgradable. The manager last because it is the one nothing
+#: downstream re-checks, so a half-signed release that is missing it is a
+#: Controller nobody can *install* rather than one nobody can upgrade.
+ARTIFACTS=(bystack-agent bystack-controller bystack-manager)
 
 tag=""
 local_build=false
@@ -91,7 +102,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-[ -n "$tag" ] || die "which tag? e.g. release-agent.sh v0.4.0"
+[ -n "$tag" ] || die "which tag? e.g. release-agent.sh v0.5.0"
 case "$tag" in
 v*) ;;
 *) die "the tag is the one CI published, and those start with v: got '$tag'" ;;

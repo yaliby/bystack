@@ -44,6 +44,16 @@ no port, publish no Docker socket, and need no inbound firewall rule or public
 address — which is what makes the model work behind NAT, where most of the
 target deployments live.
 
+**There is exactly one exception, and it is a bootstrap.** The Controller can
+open an SSH connection to a machine that has no agent yet, install one, and
+hang up ([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md)). The
+credential is a parameter of that one request and is never stored, so what
+ADR-0008 actually deleted — a Controller holding root for every host, able to
+reach in at will — stays deleted. Nothing above changes for a host that is
+already managed: the connection is outbound, the socket is local, and the
+Controller cannot reach the machine. A host it cannot reach on SSH is added by
+running the installer there, which is the path that has always existed.
+
 **The Controller's own machine is not an exception to any of this.** It runs
 the same agent, spawned as a child process and dialling a unix socket instead
 of a TLS port, and everything above the transport — the informer, the frames,
@@ -541,7 +551,9 @@ alongside the behaviours that are invisible at runtime.
 
 The Controller got *cheaper* in the pivot: it no longer maintains N SSH
 tunnels, N HTTP clients and N remote event streams, and it no longer re-Lists
-every host over the network every five minutes.
+every host over the network every five minutes. The bootstrap connection above
+does not change that number: it is one connection, held for the length of one
+install, and closed.
 
 Design consequences, non-negotiable:
 

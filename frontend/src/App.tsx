@@ -9,6 +9,7 @@ import { neighborsOf } from './features/topology/model/graphStore';
 import { deriveStatus, explainEmpty } from './features/topology/model/status';
 import { pendingCount } from './features/hosts/model/hosts';
 import { useController } from './features/hosts/model/useController';
+import { useDeploy } from './features/hosts/model/useDeploy';
 import { useFleet } from './features/hosts/model/useFleet';
 import { HostsPanel } from './features/hosts/ui/HostsPanel';
 import { useActivity } from './features/activity/model/useActivity';
@@ -102,6 +103,11 @@ export default function App() {
   // open would forget a run the moment somebody went back to the map to wait
   // it out. Thirty seconds when nothing is happening; two while one is.
   const controller = useController(API_BASE);
+  // Here rather than inside the Hosts panel so a deployment survives the panel
+  // being closed. The credential does not -- it never leaves the dialog -- but
+  // an install that is still running is worth still being able to look at
+  // (ADR-0019).
+  const deployment = useDeploy(API_BASE);
   const activity = useActivity(API_BASE, activityOpen);
   // Loaded when a host is chosen and at no other time. Nothing here polls:
   // the list changes when this operator changes it, and the *states* arrive on
@@ -573,6 +579,7 @@ export default function App() {
           <HostsPanel
             fleet={fleet}
             controller={controller}
+            deployment={deployment}
             providers={providers}
             controllerVersion={controllerVersion}
             resolveHostName={resolveHostName}

@@ -199,8 +199,42 @@
     </p>
 
     <p style="margin-top:18px;color:var(--text);font-weight:600">
-      <span data-lang="he">מדביקים את ארבע השורות, אחת אחרי השנייה:</span>
-      <span data-lang="en">Paste all four lines, in order:</span>
+      <span data-lang="he">שורה אחת. זו הדרך המומלצת:</span>
+      <span data-lang="en">One line. This is the recommended way:</span>
+    </p>
+    <div class="code" data-lang="both">
+      <button class="copy" onclick="copyCode(this)">Copy</button>
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-controller.sh \
+  | sudo sh</pre>
+    </div>
+
+    <div class="callout">
+      <span class="ico">⬆️</span>
+      <span>
+        <span data-lang="he">רק ההתקנה הזו יודעת <strong>לעדכן את עצמה</strong>. המרכז יורד כקובץ אחד, אז גרסה חדשה היא החלפה אטומית של הקובץ — ואם היא לא עולה, הקודם חוזר למקומו לבד. בדשבורד זה כפתור אחד: <strong>Update system</strong>.</span>
+        <span data-lang="en">Only this install can <strong>update itself</strong>. The Controller arrives as a single file, so a new release is an atomic replace — and if it does not come up, the previous one is put back on its own. In the dashboard it is one button: <strong>Update system</strong>.</span>
+      </span>
+    </div>
+
+    <div class="callout">
+      <span class="ico">⚠️</span>
+      <span>
+        <span data-lang="he">צריך <code>systemd</code> ו‑<code>python3.12</code> על המכונה. הסקריפט בודק את שניהם לפני שהוא מוריד משהו, ואומר בדיוק מה חסר.</span>
+        <span data-lang="en">Needs <code>systemd</code> and a <code>python3.12</code> on the machine. The script checks for both before it downloads anything, and says exactly what is missing.</span>
+      </span>
+    </div>
+
+    <div class="callout">
+      <span class="ico">🔑</span>
+      <span>
+        <span data-lang="he">לפני שמכניסים משהו ל‑<code>sudo sh</code> — מותר להסתכל: <code class="inline">… | less</code> מציג את הסקריפט, ו‑<code class="inline">… | sh -s -- --keys</code> מדפיס את מפתחות החתימה שהוא מוכן לקבל מהם גרסה, ותו לא.</span>
+        <span data-lang="en">Before piping anything into <code>sudo sh</code>, it is fair to look: <code class="inline">… | less</code> shows you the script, and <code class="inline">… | sh -s -- --keys</code> prints the signing keys it will accept a release from, and nothing else.</span>
+      </span>
+    </div>
+
+    <p style="margin-top:26px;color:var(--text);font-weight:600">
+      <span data-lang="he">או, אם המכונה כבר מריצה Docker ואתם מעדיפים קונטיינר:</span>
+      <span data-lang="en">Or, if the machine already runs Docker and you would rather have a container:</span>
     </p>
     <div class="code" data-lang="both">
       <button class="copy" onclick="copyCode(this)">Copy</button>
@@ -213,16 +247,16 @@ docker compose up -d --build</pre>
     <div class="callout">
       <span class="ico">⚠️</span>
       <span>
-        <span data-lang="he">להריץ מתוך התיקייה ש‑<code>git clone</code> יצר — בגלל זה השורה השנייה היא <code>cd bystack</code>. הבנייה הראשונה לוקחת כמה דקות; אחריה זה שניות.</span>
-        <span data-lang="en">Run these from inside the directory <code>git clone</code> just made — that is what the second line is for. The first build takes a few minutes; after that it is seconds.</span>
+        <span data-lang="he">להריץ מתוך התיקייה ש‑<code>git clone</code> יצר — בגלל זה השורה השנייה היא <code>cd bystack</code>. הבנייה הראשונה לוקחת כמה דקות; אחריה זה שניות. קונטיינר מעדכנים במשיכת image חדש, אז בהתקנה הזו אין כפתור עדכון.</span>
+        <span data-lang="en">Run these from inside the directory <code>git clone</code> just made — that is what the second line is for. The first build takes a few minutes; after that it is seconds. An image is upgraded by pulling a new one, so this install has no update button.</span>
       </span>
     </div>
 
     <div class="callout">
       <span class="ico">✅</span>
       <span>
-        <span data-lang="he">זהו — הדשבורד כבר רץ. לבדיקה: <code>docker compose ps</code>.</span>
-        <span data-lang="en">Done — the dashboard is now running. Check it with <code>docker compose ps</code>.</span>
+        <span data-lang="he">זהו — הדשבורד כבר רץ.</span>
+        <span data-lang="en">Done — the dashboard is now running.</span>
       </span>
     </div>
   </section>
@@ -306,25 +340,39 @@ docker compose up -d --build</pre>
     </div>
 
     <p style="margin-top:18px;color:var(--text);font-weight:600">
-      <span data-lang="he">ואז, לכל שרת — פקודה אחת:</span>
-      <span data-lang="en">Then, for each server — one command:</span>
+      <span data-lang="he">ואז לוחצים <b>Add host</b> בדשבורד. יש שתי דרכים, זו לצד זו:</span>
+      <span data-lang="en">Then click <b>Add host</b> in the dashboard. There are two ways, side by side:</span>
     </p>
 
     <div class="know" style="margin-top:14px">
       <div class="item"><div class="ico" style="background:rgba(46,200,255,.12);color:var(--accent)">1</div>
-        <div><span data-lang="he">בדשבורד, לוחצים על <b>Add host</b>.</span><span data-lang="en">In the dashboard, click <b>Add host</b>.</span></div></div>
+        <div><span data-lang="he"><b>Install it from here</b> — מדביקים כתובות, נותנים משתמש root וסיסמה (או מפתח), ולוחצים. המרכז נכנס ב‑SSH, מתקין את הסוכן, מחכה שהמכונה תתחבר בחזרה, וממשיך לבאה. שרת אחד בכל פעם, ועוצר אם אחד נכשל.</span><span data-lang="en"><b>Install it from here</b> — paste the addresses, give a root login (password or key), press the button. The Controller logs in over SSH, installs the agent, waits for the machine to dial back, and moves on. One at a time, and it stops if one fails.</span></div></div>
       <div class="item"><div class="ico" style="background:rgba(46,200,255,.12);color:var(--accent)">2</div>
-        <div><span data-lang="he">מעתיקים את הפקודה שמופיעה (הטוקן שלכם כבר בתוכה).</span><span data-lang="en">Copy the command it shows (your token is already in it).</span></div></div>
-      <div class="item"><div class="ico" style="background:rgba(46,200,255,.12);color:var(--accent)">3</div>
-        <div><span data-lang="he">מדביקים ומריצים את הפקודה <b>על השרת שמוסיפים</b>.</span><span data-lang="en">Paste and run it <b>on the server you're adding</b>.</span></div></div>
+        <div><span data-lang="he"><b>Copy a command</b> — לשרת שהמרכז <i>לא</i> יכול להגיע אליו: מאחורי NAT, לפטופ, רשת בלי SSH נכנס. מעתיקים שורה ומריצים אותה על אותו שרת.</span><span data-lang="en"><b>Copy a command</b> — for a server the Controller <i>cannot</i> reach: behind NAT, a laptop, a network with no inbound SSH. Copy one line and run it there.</span></div></div>
+    </div>
+
+    <div class="callout">
+      <span class="ico">🔒</span>
+      <span>
+        <span data-lang="he">מה שתקלידו משמש לפתיחת חיבור אחד ו<b>לא נשמר בשום מקום</b> — אין רשימת שרתים, אין מפתח שמור, ואין למרכז דרך לחזור למכונה הזאת אחר כך. זו לא הבטחה שמישהו צריך לזכור: פשוט אין קוד שכותב את זה. וגם: השרת עצמו <b>לא צריך אינטרנט</b> — הסוכן עובר באותו חיבור.</span>
+        <span data-lang="en">Whatever you type opens one connection and is <b>never kept</b> — no host list, no stored key, and no way for the Controller to reach that machine again afterwards. Not a promise somebody has to remember: there is no code that writes it down. And the server itself <b>needs no internet</b> — the agent travels over the same connection.</span>
+      </span>
+    </div>
+
+    <div class="callout">
+      <span class="ico">⚠️</span>
+      <span>
+        <span data-lang="he">אם פרסמתם את הדשבורד לרשת (<code class="inline">0.0.0.0</code>) — אין לו מסך התחברות משלו, אז הטופס הזה שולח סיסמת root ברשת בלי הצפנה מעליה. עדיף להגיע דרך <code class="inline">ssh -L</code>. הדיאלוג אומר לכם את זה כשזה המצב.</span>
+        <span data-lang="en">If you published the dashboard to your network (<code class="inline">0.0.0.0</code>) it has no login of its own, so this form sends a root password across it in the clear. Reach it over <code class="inline">ssh -L</code> instead. The dialog tells you when that is the case.</span>
+      </span>
     </div>
 
     <p style="margin-top:18px">
-      <span data-lang="he">הפקודה נראית ככה — <b>אל תעתיקו את זו</b>, היא דוגמה. זו שבדשבורד נושאת את הכתובת שלכם, את הטוקן שלכם ואת הגרסה שהמרכז שלכם באמת מריץ:</span>
-      <span data-lang="en">It looks like this — <b>don't copy this one</b>, it's an example. The one in the dashboard carries your address, your token, and the version your Controller is actually running:</span>
+      <span data-lang="he">הפקודה של הדרך השנייה נראית ככה — <b>אל תעתיקו את זו</b>, היא דוגמה. זו שבדשבורד נושאת את הכתובת שלכם, את הטוקן שלכם ואת הגרסה שהמרכז שלכם באמת מריץ:</span>
+      <span data-lang="en">The second way's command looks like this — <b>don't copy this one</b>, it's an example. The one in the dashboard carries your address, your token, and the version your Controller is actually running:</span>
     </p>
     <div class="code" data-lang="both">
-      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443 --token bys_&lt;your-token&gt;</pre>
     </div>
     <p>
@@ -353,9 +401,17 @@ docker compose up -d --build</pre>
       <span data-lang="en">Two steps, <b>in this order</b>: the Controller, then each server. An agent asks the Controller what it can do, not the other way round — so a new Controller with old agents is a working fleet with fewer features on the hosts you haven't got to yet. The reverse, new agents against an old Controller, is not tested and is not the path.</span>
     </p>
 
+    <div class="callout">
+      <span class="ico">⬆️</span>
+      <span>
+        <span data-lang="he"><b>אם התקנתם בשורה אחת, שני השלבים הם כפתור אחד.</b> בדשבורד, בפאנל <b>Hosts</b>: <b>Update system</b>. המכונה מושכת את הגרסה החתומה הבאה, בודקת אותה מול מפתח שלא נמצא עליה, מריצה אותה פעם אחת <i>לפני</i> שהיא עוצרת משהו, מחליפה — ואם המרכז החדש לא עונה תוך שלוש דקות, הקודם חוזר לבד. אחר כך הצי מתגלגל קדימה, שרת אחד בכל פעם. מטרמינל: <code class="inline">sudo /opt/bystack/bin/bystack-manager request</code>.</span>
+        <span data-lang="en"><b>If you used the one-line install, both steps are one button.</b> In the dashboard, on the <b>Hosts</b> panel: <b>Update system</b>. The machine pulls the next signed release, checks it against a key that is not on it, runs it once <i>before stopping anything</i>, swaps it — and if the new Controller does not answer within three minutes, the previous one is put back on its own. Then the fleet rolls forward, one host at a time. From a terminal: <code class="inline">sudo /opt/bystack/bin/bystack-manager request</code>.</span>
+      </span>
+    </div>
+
     <p style="margin-top:18px;color:var(--text);font-weight:600">
-      <span data-lang="he">1. המרכז — מתוך אותה תיקייה שבה התקנתם:</span>
-      <span data-lang="en">1. The Controller — from the directory you installed it in:</span>
+      <span data-lang="he">1. המרכז, בהתקנת Docker — מתוך אותה תיקייה שבה התקנתם:</span>
+      <span data-lang="en">1. The Controller, on a Docker install — from the directory you installed it in:</span>
     </p>
     <div class="code" data-lang="both">
       <button class="copy" onclick="copyCode(this)">Copy</button>
@@ -402,7 +458,7 @@ docker compose up -d --build</pre>
       <span data-lang="en">Once the Controller is upgraded, the <b>Hosts</b> panel names the servers that are behind and shows the exact line to run (so does <code class="inline">bystack-ctl hosts</code>). It is the command that installed the agent, with the new tag in the URL and <b>no <code>--token</code></b>:</span>
     </p>
     <div class="code" data-lang="both">
-      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://10.0.0.5:8443</pre>
     </div>
 
@@ -458,7 +514,7 @@ docker compose up -d --build</pre>
     <p><span data-lang="he">מריצים על אותו שרת — אותו סקריפט שהתקין, עם דגל אחד ובלי כתובת ובלי טוקן:</span><span data-lang="en">Run this on that server — the same script that installed it, with one flag and neither an address nor a token:</span></p>
     <div class="code" data-lang="both">
       <button class="copy" onclick="copyCode(this)">Copy</button>
-      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
+      <pre>curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-agent.sh \
   | sudo sh -s -- --uninstall</pre>
     </div>
     <p>

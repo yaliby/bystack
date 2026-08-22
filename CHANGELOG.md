@@ -10,7 +10,61 @@ to point at a release where the agent binary exists.
 
 ---
 
-## Unreleased
+## v0.5.0
+
+### Add hosts from the dashboard ([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md))
+
+**Add host → paste the addresses, give a root login, press Install.** The
+Controller logs in over SSH, uploads the agent and the installer, runs it,
+waits for the machine to dial back, and moves to the next one — one at a time,
+stopping if one fails.
+
+This was the last step in the product that was manual by construction. The
+Controller installs itself, upgrades itself, and upgrades every agent in the
+fleet without anybody logging in — and then the *first* install on each host
+was an ssh session and a paste.
+
+**The credential is used to open one connection and is never kept.** No host
+list, no stored key, nothing to reconnect with, and no code that could write
+one down. That is the whole of why this is allowed to exist: v0.1's agentless
+design was deleted for holding root on every host, and a Controller
+compromised tomorrow gains nothing here because there is nothing on it to find.
+Afterwards the steady state is unchanged — the agent dials out, the host
+listens on nothing, and the Controller cannot reach it.
+
+**That machine needs no internet.** The agent and the installer travel over the
+same connection; only a host whose architecture this Controller holds no agent
+for fetches one from GitHub, and the dialog says so when it happens. A signed
+release from the Controller's `releases` directory is preferred over its own
+bundled copy, so the installer can verify what it was handed.
+
+**The pasted command has not gone away and is not deprecated.** It is a tab
+beside the new form, because it is the answer for a host behind NAT, an
+air-gapped one, and anybody who would rather not type a root password into a
+browser. Two ways in, and neither is the fallback.
+
+Other things it does rather than guess: a machine that already runs an agent is
+reported as *already managed* and left alone; one that has the agent installed
+but stopped is reinstalled **without a token**, because a token beside a stored
+certificate makes a known host come back as a stranger awaiting approval; a
+first connection records the host key and shows its fingerprint, and a later
+one that sees a different key refuses with both printed rather than asking a
+question you would answer yes to.
+
+**Upgrading an agent needs none of this and never did.** That is the signed
+push from v0.4.0, down the connection each host already holds. SSH is for the
+first install and nothing else.
+
+`bystack-ctl deploy 10.0.0.5 10.0.0.6 --user root` is the same thing without a
+browser. **There is no `--password` flag and there will not be one** — it reads
+the credential from a prompt, from stdin, or from `BYSTACK_SSH_PASSWORD`,
+because an argv password is in the shell history of whoever typed it and in
+`ps` for every account on that machine.
+
+#### What you have to do about it
+
+Nothing. It is a tab in a dialog you already use, and the Controller must be
+able to reach the machine on SSH for it — which is exactly when it is offered.
 
 ### The Controller updates itself ([ADR-0018](docs/adr/0018-controller-self-update.md))
 
@@ -46,23 +100,44 @@ signed manifest claims. A host that cannot run it refuses the update in two
 seconds instead of taking a minute of downtime to discover the same thing by
 rolling back.
 
-#### What you have to do about it
-
-Nothing, unless you want the button. It needs the new single-file install:
+### One command to install the Controller
 
 ```bash
-sudo install -D -m 0755 bystack-controller-$(uname -m) /opt/bystack/bin/bystack-controller
-sudo install -D -m 0755 bystack-manager-$(uname -m)    /opt/bystack/bin/bystack-manager
-sudo install -d -m 1770 -o root -g bystack /opt/bystack/ipc
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-controller.sh \
+  | sudo sh
 ```
 
-plus the three units in `packaging/systemd/`. See
-[INSTALL.md](INSTALL.md#upgrading).
+The button above only exists on an install shaped for it — one file, one
+directory, an account, four units and a configuration naming two paths that
+have to agree with the updater — and until now that was a paragraph of
+`install` commands in a document. This is that paragraph, checked.
+
+It verifies both binaries against a key that is not on the machine serving
+them, refuses a host with no `python3.12` **before** downloading anything
+rather than after failing to start, and never overwrites a
+`/etc/bystack/bystack.yaml` you have edited. `--keys` prints what it will
+accept a release from and exits, which is a reasonable thing to want before
+piping anything into `sudo sh`. `--uninstall` stops everything and deletes
+`/opt/bystack` whole, keeping `/var/lib/bystack` — the CA key in there is what
+every enrolled agent chains to, so removing it would not uninstall a Controller,
+it would re-enrol a fleet.
+
+**`bystack-manager` is signed now too.** Nothing at runtime verifies one —
+nothing upgrades it, because it is the binary that holds the key set everything
+else is checked against. The one moment it *can* be verified is the moment it
+is installed, and that is what this makes possible: the whole of what lands on
+the machine is proved against the offline key, rather than the trust root
+arriving on a checksum fetched over the same connection as the bytes.
+
+#### What you have to do about it
+
+Nothing, unless you want the button, and then it is the command above.
 
 **Containers, wheels and checkouts are unaffected and keep working.** None of
 them has a single file to replace, so none of them gets the button — and the
 dashboard says which install you are on rather than offering one that cannot
-work. `pip install --upgrade` is still how a venv install moves.
+work. `pip install --upgrade` is still how a venv install moves, and
+`docker compose up -d --build` is still how the image does.
 
 #### Also
 
@@ -73,6 +148,31 @@ work. `pip install --upgrade` is still how a venv install moves.
   `scripts/release-agent.sh` signs both new artifacts alongside the agents.
 - A release is now four artifacts per architecture. The workflow refuses to
   publish a partial one, and the signing script refuses to attach one.
+- `scripts/check-release-keys.sh` now covers all three places the release key
+  is written by hand. A rotation that reached two of them would install fine
+  and then refuse everything after it.
+- The cascade waits for the fleet to dial back in. A rollout is planned from
+  the hosts connected at that instant, and the Controller doing the planning
+  was started by the updater a second earlier — so the first look found an
+  empty fleet, recorded the cascade as done, and the fleet silently never
+  moved.
+- `install-controller.sh` writes your `--server-name` **first**. The Controller
+  hands out `server_names[0]` as the address agents dial, so a loopback name in
+  front of it meant every agent on every other machine was told to dial itself.
+- `install-controller.sh` takes `BYSTACK_RELEASE_BASE`, the same air-gapped
+  mirror `bystack-manager` already honoured, and passes it to the manager it
+  installs — so a machine set up from a mirror keeps updating from one. Asking
+  such a machine for "the newest release" now says to name a version instead of
+  reaching for github.com.
+- `install-agent.sh` reads the socket's group with `stat -Lc`. Without `-L` it
+  read the *symlink's* group on every host where `/var/run/docker.sock` is one,
+  wrote `SupplementaryGroups=root`, and the agent started and could not open
+  the socket.
+- `asyncssh` is a new dependency of the Controller, for the deployment above.
+  Pure Python on top of `cryptography`, which was already there, so nothing
+  about how the Controller is packaged changes.
+- The wheel now carries `install-agent.sh`, which is what lets a deployed host
+  need no outbound internet.
 
 ---
 

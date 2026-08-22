@@ -32,12 +32,14 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import getpass
 import json
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
@@ -364,6 +366,95 @@ def cmd_upgrade(args: argparse.Namespace, url: str) -> int:
     return _report(rollout, args)
 
 
+def cmd_deploy(args: argparse.Namespace, url: str) -> int:
+    """Install the agent on machines this Controller can reach (ADR-0019).
+
+    **The credential is read from stdin or an environment variable, never from
+    a flag.** An argv password is in the shell history of whoever typed it and
+    in the output of `ps` for everybody on that machine, for as long as the
+    command runs -- which for this one is minutes. There is no `--password`
+    and there should not be one.
+
+        bystack-ctl deploy 10.0.0.5 10.0.0.6 --user root
+        BYSTACK_SSH_PASSWORD=... bystack-ctl deploy 10.0.0.5
+        bystack-ctl deploy 10.0.0.5 --key ~/.ssh/id_ed25519
+
+    Watched by default rather than on a flag, unlike `upgrade`. A rollout
+    happens to hosts that are already working; this one is the thing that makes
+    them work, and starting it and walking away is not what anybody means.
+    """
+    if args.status:
+        run = call(url, "/agents/deploy")
+        if run is None:
+            print("no deployment has been run on this Controller.")
+            return 0
+        return _deployed(run, args)
+
+    key = ""
+    if args.key:
+        path = Path(args.key).expanduser()
+        try:
+            key = path.read_text()
+        except OSError as exc:
+            print(f"cannot read {path}: {exc}", file=sys.stderr)
+            return 2
+
+    password = "" if key else os.environ.get("BYSTACK_SSH_PASSWORD", "")
+    if not key and not password:
+        # A terminal gets a prompt that does not echo; a pipe gets read
+        # whole. The second is what makes this usable from a script without
+        # ever putting the secret on a command line.
+        if sys.stdin.isatty():
+            password = getpass.getpass(f"Password for {args.user}: ")
+        else:
+            password = sys.stdin.read().strip()
+    if not key and not password:
+        print(
+            "no credential. Give --key, set BYSTACK_SSH_PASSWORD, or pipe the password "
+            "in. There is no --password flag on purpose: it would be in your shell "
+            "history and in `ps` for everybody on this machine.",
+            file=sys.stderr,
+        )
+        return 2
+
+    run = call(
+        url,
+        "/agents/deploy",
+        method="POST",
+        body={
+            "hosts": "\n".join(args.hosts),
+            "user": args.user,
+            "password": password,
+            "private_key": key,
+            "passphrase": os.environ.get("BYSTACK_SSH_PASSPHRASE", ""),
+        },
+    )
+    print(f"installing the agent on {len(run['hosts'])} host(s), one at a time.")
+    print("The credential is used to open one connection and is not stored.")
+
+    while run["running"]:
+        time.sleep(2)
+        run = call(url, "/agents/deploy")
+    return _deployed(run, args)
+
+
+def _deployed(run: dict[str, Any], args: argparse.Namespace) -> int:
+    if args.json:
+        print(json.dumps(run, indent=2))
+        return 1 if run["error"] else 0
+
+    for host in run["hosts"]:
+        where = host["host"] if host["port"] == 22 else f"{host['host']}:{host['port']}"
+        detail = f"  {host['detail']}" if host["detail"] else ""
+        print(f"  {where:<26} {host['phase']:<11}{detail}")
+    if run["error"]:
+        print()
+        print("The run stopped there. Hosts still marked `waiting` were not attempted.")
+    # Non-zero when it stopped, so a script that ran this does not go on to
+    # report a fleet that is not there.
+    return 1 if run["error"] else 0
+
+
 def _report(rollout: dict[str, Any], args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(rollout, indent=2))
@@ -438,6 +529,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("releases", help="Signed agent releases this Controller can distribute")
 
+    deploy = sub.add_parser(
+        "deploy", help="Install the agent on machines this Controller can reach"
+    )
+    deploy.add_argument("hosts", nargs="*", help="Addresses. `host:port` if not 22.")
+    deploy.add_argument("--user", default="root", help="The account to log in as")
+    deploy.add_argument("--key", help="A private key file to log in with")
+    deploy.add_argument("--status", action="store_true", help="What the last run did")
+    # No --password. See `cmd_deploy`: it would be in the shell history and in
+    # `ps` for every account on this machine.
+
     upgrade = sub.add_parser("upgrade", help="Roll a release out to the fleet, one host at a time")
     upgrade.add_argument("--version", help="Which release (default: the newest held)")
     upgrade.add_argument("--watch", action="store_true", help="Follow the run to the end")
@@ -458,6 +559,7 @@ COMMANDS = {
     "status": cmd_status,
     "releases": cmd_releases,
     "upgrade": cmd_upgrade,
+    "deploy": cmd_deploy,
     "hosts": cmd_hosts,
     "token": cmd_token,
     "approve": cmd_approve,

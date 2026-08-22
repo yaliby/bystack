@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 #
-# The two places a release signing key is written must name the same keys.
+# The three places a release signing key is written must name the same keys.
 #
 #     scripts/check-release-keys.sh
 #
-# `agent/keys/*.pub` is compiled into the agent and decides which pushed
-# binaries a host will run. `RELEASE_KEYS_PEM` in `scripts/install-agent.sh` is
-# the same key in the encoding openssl wants, and decides which downloaded
-# binaries a host will install. They are edited by hand, in two files, in two
-# encodings, and nothing in the build reads one to produce the other.
+# `agent/keys/*.pub` is compiled into the agent -- and, since ADR-0018, into
+# `bystack-manager` too -- and decides which pushed binaries a host will run
+# and which pulled release a Controller will install on itself.
+# `RELEASE_KEYS_PEM` in `scripts/install-agent.sh` and in
+# `scripts/install-controller.sh` is the same key in the encoding openssl
+# wants, and decides which downloaded binaries a *first install* will accept.
+# They are edited by hand, in three files, in two encodings, and nothing in the
+# build reads one to produce the other.
 #
 # ## Why a mismatch is worth a CI job
 #
@@ -38,14 +41,35 @@ committed="$(
 		sed 's/#.*//' | tr -d '[:blank:]' | grep -v '^$' | sort || true
 )"
 
-# What the installer trusts, asked of the installer rather than parsed out of
+# What each installer trusts, asked of the installer rather than parsed out of
 # it. `--keys` decodes the PEM through the same openssl the verification path
 # uses, so this compares the value that would actually be *used* and not a
 # string that happens to sit near it in the file.
-installed="$(
-	sh "${REPO}/scripts/install-agent.sh" --keys 2>/dev/null |
+keys_of() {
+	sh "${REPO}/scripts/$1" --keys 2>/dev/null |
 		grep -Eo '^  [0-9a-f]{64}$' | tr -d '[:blank:]' | sort || true
-)"
+}
+
+installed="$(keys_of install-agent.sh)"
+controller="$(keys_of install-controller.sh)"
+
+# The Controller's installer separately, and before the comparison below, so
+# that the two installers disagreeing reports as what it is rather than as a
+# disagreement with `agent/keys/`. A key rotation edits both by hand and there
+# is no shape of that edit that fails on its own.
+if [ "$installed" != "$controller" ]; then
+	echo "the two installers trust different release signing keys." >&2
+	echo >&2
+	echo "  install-agent.sh -- what a managed host will accept:" >&2
+	# shellcheck disable=SC2001
+	echo "${installed:-    (none)}" | sed 's/^/    /' >&2
+	echo >&2
+	echo "  install-controller.sh -- what a Controller will accept, and what its" >&2
+	echo "  bystack-manager then holds for every update after it:" >&2
+	# shellcheck disable=SC2001
+	echo "${controller:-    (none)}" | sed 's/^/    /' >&2
+	exit 1
+fi
 
 if [ -z "$committed" ] && [ -z "$installed" ]; then
 	echo "no release signing keys anywhere: agents cannot be upgraded over the wire,"
@@ -67,12 +91,12 @@ echo "  agent/keys/*.pub -- what a built agent will accept a pushed release from
 # shellcheck disable=SC2001
 echo "${committed:-    (none)}" | sed 's/^/    /' >&2
 echo >&2
-echo "  install-agent.sh RELEASE_KEYS_PEM -- what a first install will accept:" >&2
+echo "  RELEASE_KEYS_PEM in both installers -- what a first install will accept:" >&2
 # shellcheck disable=SC2001
 echo "${installed:-    (none)}" | sed 's/^/    /' >&2
 echo >&2
 # shellcheck disable=SC2016  # the backticks are prose, not a substitution
 echo '  Both are edited by hand at every rotation. `scripts/sign-agent.py keygen`' >&2
-echo '  prints each key in both encodings; a key belongs in both files for at' >&2
-echo '  least the release that introduces it.' >&2
+echo '  prints each key in both encodings; a key belongs in all three files for' >&2
+echo '  at least the release that introduces it.' >&2
 exit 1

@@ -129,11 +129,17 @@ fn update(layout: &Layout, intent: &Intent) -> Result<Status, String> {
     };
     let version = tag.trim_start_matches('v').to_string();
 
+    let work = prepare_work(layout)?;
+
     // The cheap refusal, before the download. The same check runs again below
     // against the *signed* version, which is the one that counts; this one is
     // here so an operator who clicks the button twice gets a sentence in a
     // second rather than after a download.
-    let floor = installed_version(&layout.controller());
+    //
+    // After `prepare_work` rather than before it, because asking the installed
+    // Controller what it is needs somewhere to unpack -- see
+    // [`installed_version`].
+    let floor = installed_version(&layout.controller(), &work);
     if !newer(&version, &floor) {
         return Err(format!(
             "this machine runs {floor} and {tag} is {version}; that is not an upgrade. \
@@ -141,7 +147,6 @@ fn update(layout: &Layout, intent: &Intent) -> Result<Status, String> {
         ));
     }
 
-    let work = prepare_work(layout)?;
     let base = shell::release_base(&tag);
     let artifact = format!("bystack-controller-{}", std::env::consts::ARCH);
 
@@ -199,7 +204,7 @@ fn update(layout: &Layout, intent: &Intent) -> Result<Status, String> {
     // this whole feature is arranged around: the Controller comes up unable to
     // serve, nothing undoes it, and the only way back is ssh on the one machine
     // that was supposed to make ssh unnecessary.
-    arm(layout, &version, health)?;
+    arm(layout, &version, &floor, health)?;
 
     // Stopped rather than swapped underneath. A zipapp is opened and read as it
     // runs; replacing the inode is atomic for anyone who opens it *after*, and
@@ -359,7 +364,12 @@ fn read_probation(layout: &Layout) -> Option<Probation> {
 }
 
 /// Write the record that says what to undo, and by when.
-fn arm(layout: &Layout, version: &str, health: &str) -> Result<(), String> {
+///
+/// `previous` is passed rather than read here. It is the same number the
+/// anti-downgrade check above compared against, and deriving it twice would be
+/// two chances to disagree about what this machine was running -- on the record
+/// whose only job is to say what to put back.
+fn arm(layout: &Layout, version: &str, previous: &str, health: &str) -> Result<(), String> {
     let state = layout.state();
     fs::create_dir_all(&state).map_err(|e| format!("cannot create {}: {e}", state.display()))?;
     // Root's, and only root's. The Controller is the process this record
@@ -378,7 +388,7 @@ fn arm(layout: &Layout, version: &str, health: &str) -> Result<(), String> {
          health={health}\n\
          binary={}\n\
          previous={}\n",
-        installed_version(&layout.controller()),
+        previous,
         now + PROBATION_SECONDS as i64,
         layout.controller().display(),
         layout.previous().display(),
@@ -652,15 +662,29 @@ fn prepare_work(layout: &Layout) -> Result<PathBuf, String> {
 /// something can lower, and the file that actually runs is the only source of
 /// truth that cannot disagree with itself.
 ///
-/// A binary that will not run at all answers `0.0.0`, which lets any release
-/// install over it. That is deliberate and it is not a downgrade path: getting
-/// there requires already being able to break a root-owned file in
-/// `/opt/bystack/bin`, and the alternative -- refusing to install over a
-/// Controller that is already broken -- is a machine that can only be fixed by
-/// hand.
-fn installed_version(target: &Path) -> String {
+/// **`SHIV_ROOT` is not optional here, and leaving it out silently disabled the
+/// anti-downgrade rule.** The Controller is a zipapp: running it unpacks its
+/// site-packages, and with nothing set it unpacks into `$HOME/.shiv`. This runs
+/// under `ProtectHome=yes` (`bystack-manager.service`), so that path does not
+/// exist to be written -- the binary is fine, the sandbox is doing its job, and
+/// `--version` fails anyway. Every installed Controller then answered `0.0.0`,
+/// which is the value that lets *any* signed release install over it, including
+/// an older one. The failure was invisible: the check ran, passed, and compared
+/// against a number that was never true.
+///
+/// So the scratch directory is passed rather than defaulted, and it is the
+/// run's own work directory -- root-owned, `0700`, emptied per run. Not the
+/// Controller's cache: that belongs to the service account, and root unpacking
+/// into it leaves files the Controller then cannot write.
+///
+/// A binary that genuinely will not run still answers `0.0.0`, which lets any
+/// release install over it. That much *is* deliberate: the alternative --
+/// refusing to install over a Controller that is already broken -- is a machine
+/// that can only be fixed by hand.
+fn installed_version(target: &Path, work: &Path) -> String {
     Command::new(target)
         .arg("--version")
+        .env("SHIV_ROOT", work.join("shiv-installed"))
         .output()
         .ok()
         .filter(|out| out.status.success())
@@ -697,4 +721,58 @@ fn report(layout: &Layout, status: Status, error: String) -> Result<(), String> 
         let _ = writeln!(stderr, "bystack-manager: cannot write the status file: {e}");
     }
     Err(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a stand-in Controller that behaves the way the real one does
+    /// under this unit's sandbox: a zipapp unpacks before it can answer, and
+    /// with nowhere to unpack it fails rather than printing a version.
+    fn fake_controller(at: &Path) {
+        fs::write(
+            at,
+            "#!/bin/sh\n\
+             [ -n \"$SHIV_ROOT\" ] || { echo 'nowhere to unpack' >&2; exit 1; }\n\
+             mkdir -p \"$SHIV_ROOT\" || exit 1\n\
+             echo 'bystack 0.5.0'\n",
+        )
+        .unwrap();
+        fs::set_permissions(at, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The regression that made "no downgrade" a promise nothing kept.
+    ///
+    /// `installed_version` used to run the Controller with no `SHIV_ROOT`. On
+    /// a real install that is `ProtectHome=yes` plus a zipapp whose default
+    /// unpack directory is under `$HOME` -- so it failed, every machine
+    /// reported a floor of `0.0.0`, and every signed release looked like an
+    /// upgrade. Nothing was visibly broken, which is what made it expensive:
+    /// the check ran and passed against a number that was never true.
+    #[test]
+    fn the_version_floor_is_read_from_a_controller_that_has_somewhere_to_unpack() {
+        let work = std::env::temp_dir().join(format!("bystack-floor-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        let controller = work.join("bystack-controller");
+        fake_controller(&controller);
+
+        assert_eq!(installed_version(&controller, &work), "0.5.0");
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    /// The other half: a binary that will not run at all is still `0.0.0`.
+    ///
+    /// Deliberate, and the sentence in `installed_version` says why -- refusing
+    /// to install over a Controller that is already broken leaves a machine
+    /// that can only be fixed by hand.
+    #[test]
+    fn a_controller_that_cannot_run_at_all_is_still_a_floor_of_zero() {
+        let work = std::env::temp_dir().join(format!("bystack-floor-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        assert_eq!(installed_version(&work.join("nothing-here"), &work), "0.0.0");
+        let _ = fs::remove_dir_all(&work);
+    }
 }

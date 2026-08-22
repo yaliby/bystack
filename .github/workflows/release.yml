@@ -1,6 +1,6 @@
 # Cut a release: the binaries the installer fetches, the wheels, the image.
 #
-#     git tag v0.4.0 && git push origin v0.4.0
+#     git tag v0.5.0 && git push origin v0.5.0
 #
 # Everything an operator can reach is produced here, and the pieces are not
 # independent. `scripts/install-agent.sh` fetches `bystack-agent-<arch>` and
@@ -22,12 +22,14 @@
 # So the second half of the pipeline is run by hand, on the machine that holds
 # the key, once this has finished:
 #
-#     scripts/release-agent.sh v0.4.0 --attach
+#     scripts/release-agent.sh v0.5.0 --attach
 #
-# Since ADR-0018 that signs `bystack-controller-<arch>` as well as the agent,
-# under the same key and the same manifest format. Until it runs, a Controller
-# with a local updater declines to update itself for the same reason it
-# declines to push an unsigned release to a fleet.
+# Since ADR-0018 that signs `bystack-controller-<arch>` and
+# `bystack-manager-<arch>` as well as the agent, under the same key and the
+# same manifest format. Until it runs, a Controller with a local updater
+# declines to update itself for the same reason it declines to push an unsigned
+# release to a fleet, and `install-controller.sh` falls back to SHA256SUMS and
+# says so.
 #
 # It downloads exactly what was published here, signs it, verifies it under two
 # implementations, and uploads the `.manifest` and `.manifest.sig`. Until it

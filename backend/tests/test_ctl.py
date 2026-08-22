@@ -34,6 +34,9 @@ def args(**overrides: Any) -> argparse.Namespace:
         "watch": False,
         "status": False,
         "cancel": False,
+        "hosts": [],
+        "user": "root",
+        "key": None,
     }
     return argparse.Namespace(**{**base, **overrides})
 
@@ -468,3 +471,118 @@ def test_releases_names_the_directory_even_when_it_is_empty(
     out = capsys.readouterr().out
     assert "/var/lib/bystack/releases" in out
     assert "sign-agent.py" in out
+
+
+# --------------------------------------------------------------------------
+# Deploying agents (ADR-0019)
+# --------------------------------------------------------------------------
+
+
+def test_there_is_no_password_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An argv password is in the shell history and in `ps` for the whole box.
+
+    Asserted against the parser rather than trusted to a comment: adding
+    `--password` would be one convenient-looking line, and this is the only
+    thing that would notice.
+    """
+    parser = ctl.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["deploy", "10.0.0.5", "--password", "hunter2"])
+
+    parsed = parser.parse_args(["deploy", "10.0.0.5", "--user", "root"])
+    assert not any("password" in name for name in vars(parsed))
+
+
+def test_a_deployment_with_no_credential_says_where_to_put_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """And exits 2, so a script does not carry on as though hosts were added."""
+    monkeypatch.delenv("BYSTACK_SSH_PASSWORD", raising=False)
+    monkeypatch.setattr(ctl.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(ctl.sys.stdin, "read", lambda: "")
+
+    assert ctl.cmd_deploy(args(hosts=["10.0.0.5"]), "http://x") == 2
+    assert "no --password flag" in capsys.readouterr().err.replace("There is ", "no ")
+
+
+def test_the_password_is_taken_from_the_environment_and_sent_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The body is the only place it goes, and the output never repeats it."""
+    sent: list[Any] = []
+    finished = {
+        "running": False,
+        "started_at": 0,
+        "finished_at": 1,
+        "error": "",
+        "hosts": [
+            {
+                "host": "10.0.0.5",
+                "port": 22,
+                "phase": "done",
+                "detail": "Connected.",
+                "engine_id": "e1",
+                "fingerprint": "SHA256:x",
+            }
+        ],
+    }
+
+    def call(url: str, path: str, *, method: str = "GET", body: Any = None) -> Any:
+        if body is not None:
+            sent.append(body)
+        return finished
+
+    monkeypatch.setenv("BYSTACK_SSH_PASSWORD", "hunter2")
+    monkeypatch.setattr(ctl, "call", call)
+
+    assert ctl.cmd_deploy(args(hosts=["10.0.0.5"]), "http://x") == 0
+    assert sent and sent[0]["password"] == "hunter2"
+    out = capsys.readouterr().out
+    assert "hunter2" not in out
+    assert "10.0.0.5" in out and "done" in out
+
+
+def test_a_deployment_that_stopped_exits_non_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same rule as the rollout: a script must not report a fleet that is not
+    there. And the untried hosts are named as untried, not as failures."""
+    stopped = {
+        "running": False,
+        "started_at": 0,
+        "finished_at": 1,
+        "error": "10.0.0.6: no route to host",
+        "hosts": [
+            {
+                "host": "10.0.0.6",
+                "port": 22,
+                "phase": "failed",
+                "detail": "no route to host",
+                "engine_id": "",
+                "fingerprint": "",
+            },
+            {
+                "host": "10.0.0.7",
+                "port": 22,
+                "phase": "waiting",
+                "detail": "",
+                "engine_id": "",
+                "fingerprint": "",
+            },
+        ],
+    }
+    monkeypatch.setattr(ctl, "call", responder({"/agents/deploy": stopped}))
+
+    assert ctl.cmd_deploy(args(status=True), "http://x") == 1
+    out = capsys.readouterr().out
+    assert "were not attempted" in out
+    assert "waiting" in out
+
+
+def test_asking_about_a_deployment_that_never_ran_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(ctl, "call", responder({"/agents/deploy": None}))
+
+    assert ctl.cmd_deploy(args(status=True), "http://x") == 0
+    assert "no deployment" in capsys.readouterr().out

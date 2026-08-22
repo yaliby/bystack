@@ -120,29 +120,45 @@ Three ways in, and they differ only in what you already run. Step by step, with
 the failure modes named, is [`INSTALL.md`](INSTALL.md).
 
 ```bash
-# 1. The container. The Controller manages the engine it is mounted against.
+# 1. One command. The Controller as a single file, plus the root component that
+#    replaces it -- both verified against a key that is not on the machine
+#    serving them. Needs systemd and a python3.12, and is the only install that
+#    can update itself from the dashboard (ADR-0018).
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-controller.sh \
+  | sudo sh
+#    -> http://127.0.0.1:8000
+
+# 2. The container. The Controller manages the engine it is mounted against.
 git clone https://github.com/yaliby/bystack.git && cd bystack
 echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
 docker compose up -d --build
-#    -> http://127.0.0.1:8000
-
-# 2. One file. Carries the Controller, its dependencies, the dashboard and the
-#    agent. Needs a python3.12, and is the only install that can update itself
-#    from the dashboard (ADR-0018).
-sudo install -D -m 0755 bystack-controller-$(uname -m) /opt/bystack/bin/bystack-controller
-sudo install -D -m 0755 bystack-manager-$(uname -m)    /opt/bystack/bin/bystack-manager
-/opt/bystack/bin/bystack-controller             # manages this machine
 
 # 3. From a checkout. `scripts/build-agent.sh` produces the static binaries.
 ./scripts/build-agent.sh && (cd frontend && npm ci && npm run build)
 pip install -e backend && bystack
 ```
 
-Adding a host is one command on that host, and the dashboard composes it with
-the token already in it:
+Adding hosts is a form: paste the addresses, give a root login, press
+**Install the agent**. The Controller logs in over SSH one machine at a time,
+uploads the agent and the installer, waits for each to dial back, and stops if
+one fails.
+
+**The credential is used to open one connection and is never kept** — no host
+list, no stored key, nothing to reconnect with
+([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md)). That matters more
+than the convenience does: a Controller that held root for every host would be
+the arrangement [ADR-0008](docs/adr/0008-controller-agent-topology.md) deleted,
+and a compromised one would be a fleet. This one is compromised and gains
+nothing, because there is nothing on it to find.
+
+Nothing has to be opened on the target and nothing on it needs internet: the
+binary goes over the same connection.
+
+For a host the Controller cannot reach — behind NAT, on a laptop — the same
+dialog hands you the command instead, with the token already in it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.4.0/scripts/install-agent.sh \
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://controller:8443 --token bst1.…
 ```
 
@@ -152,12 +168,27 @@ unit and the four that upgrade it later, and starts it. `--binary` skips the
 download for a network with no egress; `--uninstall` removes everything except
 the certificate, because that is this host's identity and not ours to discard.
 
-Upgrading an existing install is `git pull && docker compose up -d --build`,
-and then the fleet from the **Hosts** panel or `bystack-ctl upgrade` once the
-Controller holds a signed release. Every host needs the line above run on it
-once more first, without the token — the missing token is what makes it an
-upgrade rather than a second host, and an agent from before ADR-0017 has no
-updater unit for the Controller to trigger.
+**Upgrading an agent needs none of this.** It is a separate mechanism that was
+already there: the Controller pushes a signed release down the connection each
+host already holds, the host verifies it against a key compiled into itself,
+and puts the old binary back if the new one cannot reach home
+([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)). SSH is for the first
+install and nothing else.
+
+Upgrading the one-command install is the **Update system** button, and the
+fleet follows it without being asked: the machine pulls the next signed
+release, runs it once to see that it starts *before stopping anything*, swaps
+the file, puts the old one back if the new Controller does not answer within
+three minutes, and then rolls the fleet forward one host at a time
+([ADR-0018](docs/adr/0018-controller-self-update.md)). `sudo bystack-manager
+request` is the same thing without a browser.
+
+Upgrading the container is `git pull && docker compose up -d --build`, and then
+the fleet from the **Hosts** panel or `bystack-ctl upgrade` once the Controller
+holds a signed release. Every host needs the line above run on it once more
+first, without the token — the missing token is what makes it an upgrade rather
+than a second host, and an agent from before ADR-0017 has no updater unit for
+the Controller to trigger.
 [`INSTALL.md`](INSTALL.md#upgrading) has the order and the two things that
 collide; [`CHANGELOG.md`](CHANGELOG.md) has what each release changed.
 
@@ -168,6 +199,7 @@ bystack-ctl status              # health, what is observed, whether hosts can jo
 bystack-ctl token               # mint a token, print the command to paste
 bystack-ctl hosts               # the fleet, and which rows need a decision
 bystack-ctl approve <engine-id>
+bystack-ctl deploy 10.0.0.5     # install the agent there, over SSH
 bystack-ctl upgrade --watch     # roll a signed release out, one host at a time
 ```
 

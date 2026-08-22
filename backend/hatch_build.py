@@ -7,6 +7,10 @@ build for itself:
 * ``bystack/_bundled/bystack-agent`` — the agent it spawns for its own engine
   (`runtime/localagent.py`). Without it a first run has no Docker socket to
   read and says so, which is honest and is still an empty canvas.
+* ``bystack/_bundled/install-agent.sh`` — the installer the Controller uploads
+  when it deploys an agent over SSH (`runtime/deploy.py`, ADR-0019). Carried
+  rather than fetched by the target so that a managed host needs no outbound
+  internet at all, which is a claim this product makes on its front page.
 * ``bystack/_web`` — the dashboard (`api/web.py`). Without it the API runs and
   the browser gets a page explaining how to build one.
 
@@ -37,6 +41,14 @@ REPO = BACKEND.parent
 #: Where `scripts/build-agent.sh` leaves its output, and `npm run build` its own.
 AGENT_DIST = REPO / "dist"
 WEB_DIST = REPO / "frontend" / "dist"
+
+#: The installer, taken from the checkout it is committed in.
+#:
+#: Not optional in the way the other two are. It is text, it is always in the
+#: tree, and a Controller without it cannot deploy an agent -- so a missing one
+#: is a broken build rather than a legitimately smaller wheel, and the hook
+#: below says so instead of quietly shipping a Controller with a dead button.
+INSTALLER = REPO / "scripts" / "install-agent.sh"
 
 #: Python spells some architectures differently from `uname -m`, which is what
 #: the agent binaries are named after. Only the disagreements are listed.
@@ -99,6 +111,18 @@ class BundleArtifacts(BuildHookInterface):  # type: ignore[type-arg]
             build_data["pure_python"] = False
             build_data["tag"] = (
                 f"py3-none-manylinux_2_17_{arch}.musllinux_1_1_{arch}"
+            )
+
+        if INSTALLER.is_file():
+            build_data["force_include"][str(INSTALLER)] = "bystack/_bundled/install-agent.sh"
+            included.append("installer")
+        else:
+            raise FileNotFoundError(
+                f"{INSTALLER} is missing. It is committed in this repository and the "
+                f"Controller uploads it to deploy an agent (ADR-0019); a wheel without "
+                f"it has a button that cannot work.\n"
+                f"If you are building in a container, the build context has to carry "
+                f"scripts/install-agent.sh -- see packaging/Dockerfile."
             )
 
         if (WEB_DIST / "index.html").is_file():

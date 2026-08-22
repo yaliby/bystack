@@ -26,6 +26,13 @@ The condition is narrow on purpose:
   directory, because the status file is root's and this process cannot write to
   it. A restart is otherwise a second rollout.
 
+**"Not yet" is not "no".** A rollout is planned from the hosts connected at that
+instant, and this process was started by the updater a moment ago -- so the
+first look after a self-update finds an empty fleet that is still dialling back
+in. That one case is retried for the length of the window rather than recorded
+as done, which is the difference between a fleet that rolls forward by itself
+and one that silently does not.
+
 **Dropping artifacts into the release directory does not, by itself, cascade.**
 An operator who copies files in by hand gets what they always got: a release
 the dashboard offers and a button to roll it out. Only an update this machine
@@ -43,6 +50,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from bystack.infra.manager import ManagerError, ManagerLink, UpdateStatus
+from bystack.runtime.upgrade import UpgradeUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -156,13 +164,6 @@ class SelfUpdateService:
         while time.monotonic() < deadline:
             status = self._link.status()
             if status is not None and self._should_cascade(status):
-                # Recorded *before* the rollout is started, not after. A run
-                # that fails is not a run to repeat on the next restart: the
-                # fleet's version skew is on the Hosts panel and starting it
-                # again is a button. A marker written afterwards would make a
-                # Controller that crashed mid-rollout restart one on every
-                # boot.
-                self._record(status.cascade)
                 log.info(
                     "the local updater installed %s and left signed agents for it; "
                     "rolling the fleet forward",
@@ -170,8 +171,33 @@ class SelfUpdateService:
                 )
                 try:
                     await rollout(status.cascade)
+                except UpgradeUnavailable as exc:
+                    # **Not a failure, and not yet.** This process was started
+                    # by the updater seconds ago; the fleet is still dialling
+                    # back in, and a rollout plan is built from hosts that are
+                    # *connected right now*. So the first look after a
+                    # self-update reliably finds nobody, which is the one case
+                    # that has to be retried rather than recorded.
+                    #
+                    # Nothing is written here, so the next tick tries again --
+                    # for as long as the window lasts, and no longer. A fleet
+                    # that never comes back is a fleet with a bigger problem
+                    # than a missed rollout, and it is visible on the Hosts
+                    # panel as version skew with a button beside it.
+                    log.debug("cascade not startable yet: %s", exc)
+                    await asyncio.sleep(POLL_SECONDS)
+                    continue
                 except Exception:  # noqa: BLE001 - a rollout that will not start is a log line
+                    # Anything else is a real refusal and will refuse again.
+                    # Recorded so it is not retried on every restart.
+                    self._record(status.cascade)
                     log.exception("could not start the cascading rollout")
+                    return
+                # Recorded once the run has actually *begun*. `start` creates
+                # the task and returns, so this is still before the rollout
+                # finishes -- which is what stops a Controller that crashed
+                # mid-rollout from starting a second one on every boot.
+                self._record(status.cascade)
                 return
             await asyncio.sleep(POLL_SECONDS)
 

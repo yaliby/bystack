@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bystack"
-version = "0.4.0"
+version = "0.5.0"
 description = "Infrastructure control plane for Docker-based infrastructure"
 requires-python = ">=3.12"
 dependencies = [
@@ -21,6 +21,16 @@ dependencies = [
     # consume certificates but cannot make them, and hand-rolling X.509 is the
     # last thing anyone should do on a root-equivalent trust path.
     "cryptography>=43",
+    # Installing an agent on a machine that does not have one yet (ADR-0019).
+    # Pure Python on top of `cryptography`, which is already here, so it adds
+    # no build step and does not change how the Controller is packaged.
+    #
+    # Not a subprocess to `ssh`, and the reason is the unit rather than taste:
+    # the Controller runs with `ProtectHome=yes`, so there is no `~/.ssh` for
+    # an OpenSSH client to read -- no config, no known_hosts, no agent socket.
+    # Every advantage of shelling out is unavailable exactly where it would
+    # run, and password authentication would additionally want `sshpass`.
+    "asyncssh>=2.14",
 ]
 
 [project.optional-dependencies]

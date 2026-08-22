@@ -45,6 +45,7 @@ import {
 } from '../model/upgrade';
 import type { Controller } from '../model/useController';
 import type { Fleet } from '../model/useFleet';
+import type { Deployment } from '../model/useDeploy';
 import { AddHostDialog } from './AddHostDialog';
 
 interface Props {
@@ -59,6 +60,14 @@ interface Props {
    * how half a fleet ends up on a version nobody chose.
    */
   readonly controller: Controller;
+  /**
+   * Installing an agent on a machine that does not have one (ADR-0019).
+   *
+   * Here rather than inside `AddHostDialog` so a run survives the dialog being
+   * closed: the credential does not, and must not, but the *progress* is the
+   * only view an operator has of an install that is still going.
+   */
+  readonly deployment: Deployment;
   /** Provider health the app already polls — how `stale` is told from `never`. */
   readonly providers: readonly ProviderHealth[];
   /** What the Controller is running, so an agent's version means something. */
@@ -73,9 +82,24 @@ interface Props {
 /** Relative times go stale silently; this is what keeps them honest. */
 const TICK_MS = 30_000;
 
+/**
+ * Whether this page was served from the machine it is managing.
+ *
+ * Read from the browser rather than from the Controller on purpose: what the
+ * warning in the add-host dialog is about is the network *this request* just
+ * crossed, and the Controller cannot see that. A dashboard reached over
+ * `ssh -L` is `127.0.0.1` here and is genuinely as safe as the operator's own
+ * SSH session, which is exactly the case a server-side answer would get wrong.
+ */
+function isLoopback(): boolean {
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+}
+
 export function HostsPanel({
   fleet,
   controller,
+  deployment,
   providers,
   controllerVersion,
   resolveHostName,
@@ -235,7 +259,17 @@ export function HostsPanel({
         <AddHostDialog
           token={token}
           autoApprove={fleet.terms?.auto_approve ?? false}
-          // Closing is what discards it. Nothing else holds a copy.
+          deployment={deployment}
+          // `read_only` is the Controller's answer, and it is the same field
+          // that refuses the route -- so the form says why rather than
+          // submitting into a 409.
+          canDeploy={!(controller.self?.read_only ?? false)}
+          // Whether the credential typed below would leave this machine. The
+          // Controller reports where it is bound; a dashboard published on a
+          // network has no login in front of it (ADR-0014), and this is the
+          // one form where that matters enough to say out loud.
+          loopback={isLoopback()}
+          // Closing is what discards the token. Nothing else holds a copy.
           onClose={() => setToken(null)}
         />
       ) : null}
