@@ -272,16 +272,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The installer is the one piece of this project that runs as root on a
-      # stranger's machine. It gets linted.
       # Every shell script that ends up on a managed host or cuts a release.
-      # `agent-rollback.sh` is the one that runs as root with write access to
-      # /usr/local/bin, which makes it the last one that should be unlinted.
+      # The installers are the pieces of this project that run as root on a
+      # stranger's machine, and `agent-rollback.sh` runs as root with write
+      # access to /usr/local/bin -- which makes it the last one to leave
+      # unlinted.
+      #
+      # **Pinned, and run in the same container a contributor runs.** The
+      # runner's own `shellcheck` is whatever `ubuntu-latest` happens to ship
+      # that week: it moved once and turned a correct script into a red build
+      # on a check no published release of shellcheck performs, so it could not
+      # be reproduced locally at all. A lint that changes underneath you fails
+      # unrelated pull requests and teaches people to ignore it.
+      #
+      # Bumping this tag is a deliberate commit, and the findings it brings
+      # with it are that commit's job to fix.
       - run: |
-          shellcheck scripts/install-agent.sh scripts/install-controller.sh \
-                     scripts/build-agent.sh \
-                     scripts/build-controller.sh scripts/release-agent.sh \
-                     scripts/check-release-keys.sh packaging/agent-rollback.sh
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 \
+            scripts/install-agent.sh scripts/install-controller.sh \
+            scripts/build-agent.sh \
+            scripts/build-controller.sh scripts/release-agent.sh \
+            scripts/check-release-keys.sh packaging/agent-rollback.sh
 
       # The key a fleet trusts is written in three files, in two encodings, by
       # hand. A mismatch installs fine and then refuses every upgrade for the

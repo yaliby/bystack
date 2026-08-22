@@ -627,9 +627,21 @@ install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "${HOME_DIR}/cache"
 # and the change takes effect at the restart below rather than mid-import.
 install -m 0755 "$controller_staged" "${HOME_DIR}/bin/bystack-controller"
 install -m 0755 "$manager_staged" "${HOME_DIR}/bin/bystack-manager"
-command -v restorecon >/dev/null 2>&1 &&
-	restorecon -F "${HOME_DIR}/bin/bystack-controller" "${HOME_DIR}/bin/bystack-manager" \
-		>/dev/null 2>&1 || true
+# An `if` rather than `A && B || true`. The chain behaves correctly here, and
+# the linter is right to dislike it anyway: in that shape the `|| true` belongs
+# to the *whole* chain, so it silently covers a failure of the test as well as
+# of the command -- and the next person to add a line inside it inherits that.
+#
+# (A comment must not begin with the linter's own name, either. It reads one of
+# those as a directive and fails on the words that follow.)
+#
+# SELinux is best-effort by design: a host without `restorecon` is the same
+# non-event as one where SELinux is permissive, and turning either into a
+# failed install would undo work that has already succeeded.
+if command -v restorecon >/dev/null 2>&1; then
+	restorecon -F "${HOME_DIR}/bin/bystack-controller" \
+		"${HOME_DIR}/bin/bystack-manager" >/dev/null 2>&1 || true
+fi
 
 # --------------------------------------------------------------------------
 # The configuration
