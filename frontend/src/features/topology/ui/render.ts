@@ -1,7 +1,7 @@
 /**
  * Canvas drawing — dock-style cards on a quiet canvas.
  *
- * The visual target: near-black surface, thin group frames with an inline
+ * The visual target: black surface, thin group frames with an inline
  * label, compact cards (title / subtitle / port chips) lifted by a soft
  * shadow, and hairline orthogonal links with flow dots on live dependencies.
  */

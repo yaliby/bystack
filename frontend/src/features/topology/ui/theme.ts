@@ -205,7 +205,7 @@ export const EDGE_REST_WEIGHT: Partial<Record<EdgeKind, number>> = {
 };
 
 export const DARK: Palette = {
-  surface: '#090d15',
+  surface: '#000000',
   surfaceRaised: '#121a29',
   grid: '#16203a',
   ink: '#e6ecf5',

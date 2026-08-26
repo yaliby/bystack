@@ -43,21 +43,35 @@ const INSPECTOR_WIDTH = 320;
 /** The hosts panel, on the other side. Keep in step with `.hosts` in CSS. */
 const HOSTS_WIDTH = 340;
 /**
- * The legend plus the status bar under it, measured from the canvas bottom.
- * Keep in step with `.legend` in CSS — it is 107px tall and sits 42px up, and
- * the old 120 here let `fit` finish 11px underneath its first line.
+ * Four insets that keep `fit` out from under the floating chrome. Each one is
+ * the *extent* of what it stands for, measured in the browser rather than read
+ * off the CSS: a rule can move a panel without changing the number in it, and
+ * a wrong number here is a card drawn behind the topbar. `fit` then adds its
+ * own 18px padding (`TopologyCanvas`), which is where the breathing room comes
+ * from — so an inset that merely reaches the chrome's edge is correct.
+ *
+ * Re-measure after touching the topbar or the legend in CSS. The narrow pair
+ * held 164/186 through this redesign and were 26px and 19px short of the chrome
+ * they name, which is `fit` finishing underneath both of them on a phone.
+ *
+ * The legend sits 84px up (`.legend`, clear of the 52px status bar at 12px) and
+ * is 109px tall: three columns while they fit side by side, and the same three
+ * wrapped at 96px up below 720px.
  */
-const LEGEND_HEIGHT = 150;
-/** Measured, not guessed: the narrow legend is three wrapped columns, 148px. */
-const LEGEND_HEIGHT_NARROW = 148;
-/** The topbar floats over a full-bleed canvas, so `fit` has to allow for it. */
-const TOPBAR_HEIGHT = 58;
+const LEGEND_HEIGHT = 193;
+const LEGEND_HEIGHT_NARROW = 205;
 /**
- * The plate wraps on a phone — identity, actions, search, trace — and the
- * tallest it gets is three rows ending at 169px, measured. The rest is the
- * same clearance the wide value carries over its own 43px plate.
+ * The topbar floats over a full-bleed canvas, so `fit` has to allow for it.
+ * The bezel sits 12px down and is 48px tall; the 12 on top of that is the one
+ * deliberate margin here, because the top edge is the crowded one and the
+ * plate carries a shadow that reads as part of it.
+ *
+ * The plate wraps on a phone — identity and panels, the field, then depth and
+ * view — and the tallest it gets is three rows ending at 182px, measured, flat
+ * across every width the narrow query covers.
  */
-const TOPBAR_HEIGHT_NARROW = 184;
+const TOPBAR_HEIGHT = 72;
+const TOPBAR_HEIGHT_NARROW = 194;
 /** The trace rail's seats. Four values, so four seats — never a slider. */
 const TRACE_DEPTHS = [1, 2, 3, 4] as const;
 /** So does the banner, when there is one. Keep in step with `.banner` in CSS. */
@@ -376,39 +390,47 @@ export default function App() {
             trace is how a header turns into a row of badges. */}
         <div className="topbar__plate">
           <div className="topbar__identity" title={status.detail ?? undefined}>
-            <span className="brand">
-              <BrandMark />
-              <span className="brand__word">ByStack</span>
+            <span className="zone__cap" aria-hidden="true">
+              Control plane
             </span>
-            <span className="status-readout">
-              <span className={`live-dot live-dot--${status.tone}`} />
-              <span className="status-readout__text">
-                {mockCanvas || narrow || !providerLabel ? (
-                  status.label
-                ) : (
-                  <>
-                    {providerLabel}
-                    <span className="brand__sep">·</span>
-                    {status.label}
-                  </>
-                )}
-                {!narrow && readOnly ? (
-                  <>
-                    <span className="brand__sep">·</span>
-                    read-only
-                  </>
-                ) : null}
-                {!mockCanvas && resyncs > 0 ? (
-                  <>
-                    <span className="brand__sep">·</span>
-                    {resyncs} resync
-                  </>
-                ) : null}
+            <div className="zone__row">
+              <span className="brand">
+                <BrandMark />
+                <span className="brand__word">ByStack</span>
               </span>
-            </span>
+              <span className="status-readout">
+                <span className={`live-dot live-dot--${status.tone}`} />
+                <span className="status-readout__text">
+                  {mockCanvas || narrow || !providerLabel ? (
+                    status.label
+                  ) : (
+                    <>
+                      {providerLabel}
+                      <span className="brand__sep">·</span>
+                      {status.label}
+                    </>
+                  )}
+                  {!narrow && readOnly ? (
+                    <>
+                      <span className="brand__sep">·</span>
+                      read-only
+                    </>
+                  ) : null}
+                  {!mockCanvas && resyncs > 0 ? (
+                    <>
+                      <span className="brand__sep">·</span>
+                      {resyncs} resync
+                    </>
+                  ) : null}
+                </span>
+              </span>
+            </div>
           </div>
 
           <div className="topbar__search">
+            <span className="zone__cap" aria-hidden="true">
+              Find
+            </span>
             <input
               ref={searchRef}
               className="search"
@@ -453,80 +475,94 @@ export default function App() {
               the inactive ones stay quiet text. */}
           <div className="trace" role="group" aria-label="Trace depth">
             <span className="trace__label" aria-hidden="true">
-              Trace
+              Trace · hops
             </span>
-            {TRACE_DEPTHS.map((depth) => (
-              <button
-                key={depth}
-                type="button"
-                className="trace__step"
-                aria-pressed={traceDepth === depth}
-                aria-label={`Trace ${depth} ${depth === 1 ? 'hop' : 'hops'}`}
-                onClick={() => setTraceDepth(depth)}
-              >
-                {depth}
-              </button>
-            ))}
+            <div className="trace__seats">
+              {TRACE_DEPTHS.map((depth) => (
+                <button
+                  key={depth}
+                  type="button"
+                  className="trace__step"
+                  aria-pressed={traceDepth === depth}
+                  aria-label={`Trace ${depth} ${depth === 1 ? 'hop' : 'hops'}`}
+                  onClick={() => setTraceDepth(depth)}
+                >
+                  {depth}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="topbar__actions">
-            {/* The count rides on the closed button on purpose: a host that has
-                just enrolled is waiting on a person, and it should not need the
-                panel to be open to say so. */}
-            <button
-              type="button"
-              className={`topbar__btn${pending > 0 ? ' topbar__btn--attention' : ''}`}
-              aria-pressed={hostsOpen}
-              onClick={openHosts}
-            >
-              Hosts
-              {pending > 0 ? <span className="topbar__count">{pending}</span> : null}
-            </button>
-            <button
-              type="button"
-              className="topbar__btn"
-              aria-pressed={activityOpen}
-              onClick={openActivity}
-            >
-              Activity
-            </button>
-            <span className="topbar__rule" aria-hidden="true" />
-            {narrow ? (
-              <>
-                <button
-                  type="button"
-                  className="topbar__btn topbar__btn--icon"
-                  aria-label="Zoom out"
-                  onClick={() => bumpZoom(1 / ZOOM_BUTTON_FACTOR)}
-                >
-                  −
-                </button>
-                <button
-                  type="button"
-                  className="topbar__btn topbar__btn--icon"
-                  aria-label="Zoom in"
-                  onClick={() => bumpZoom(ZOOM_BUTTON_FACTOR)}
-                >
-                  +
-                </button>
-              </>
-            ) : null}
-            <button
-              type="button"
-              className="topbar__btn"
-              onClick={() => setFitToken((n) => n + 1)}
-            >
-              Fit
-            </button>
-            <button
-              type="button"
-              className="topbar__btn topbar__btn--icon"
-              aria-label={dark ? 'Switch to the light theme' : 'Switch to the dark theme'}
-              title={dark ? 'Light theme' : 'Dark theme'}
-              onClick={() => setDark((value) => !value)}
-            >
-              {dark ? <SunIcon /> : <MoonIcon />}
-            </button>
+            <span className="zone__cap" aria-hidden="true">
+              Panels
+            </span>
+            <div className="zone__row">
+              {/* The count rides on the closed button on purpose: a host that has
+                  just enrolled is waiting on a person, and it should not need the
+                  panel to be open to say so. */}
+              <button
+                type="button"
+                className={`topbar__btn${pending > 0 ? ' topbar__btn--attention' : ''}`}
+                aria-pressed={hostsOpen}
+                onClick={openHosts}
+              >
+                Hosts
+                {pending > 0 ? <span className="topbar__count">{pending}</span> : null}
+              </button>
+              <button
+                type="button"
+                className="topbar__btn"
+                aria-pressed={activityOpen}
+                onClick={openActivity}
+              >
+                Activity
+              </button>
+            </div>
+          </div>
+
+          <div className="topbar__view">
+            <span className="zone__cap" aria-hidden="true">
+              View
+            </span>
+            <div className="zone__row">
+              {narrow ? (
+                <>
+                  <button
+                    type="button"
+                    className="topbar__btn topbar__btn--icon"
+                    aria-label="Zoom out"
+                    onClick={() => bumpZoom(1 / ZOOM_BUTTON_FACTOR)}
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    className="topbar__btn topbar__btn--icon"
+                    aria-label="Zoom in"
+                    onClick={() => bumpZoom(ZOOM_BUTTON_FACTOR)}
+                  >
+                    +
+                  </button>
+                </>
+              ) : null}
+              <button
+                type="button"
+                className="topbar__btn"
+                onClick={() => setFitToken((n) => n + 1)}
+              >
+                Fit
+              </button>
+              <button
+                type="button"
+                className="topbar__btn topbar__btn--icon"
+                aria-label={dark ? 'Switch to the light theme' : 'Switch to the dark theme'}
+                title={dark ? 'Light theme' : 'Dark theme'}
+                onClick={() => setDark((value) => !value)}
+              >
+                {dark ? <SunIcon /> : <MoonIcon />}
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -626,7 +662,9 @@ export default function App() {
           />
         ) : null}
         {emptyExplanation ? <EmptyState explanation={emptyExplanation} /> : null}
-        {emptyExplanation || sheetOpen ? null : <Legend palette={palette} />}
+        {emptyExplanation || sheetOpen ? null : (
+          <Legend palette={palette} shifted={!narrow && (hostsOpen || activityOpen)} />
+        )}
         {inspectorOpen ? (
           <NodeInspector
             node={selectedNode}
@@ -685,7 +723,8 @@ export default function App() {
             <span className="stat__label">volumes</span>
           </span>
           <span className="statusbar__hint">
-            {counts.containers} containers · {counts.networks} networks discovered
+            <span className="statusbar__cap">discovered</span>
+            {counts.containers} containers · {counts.networks} networks
           </span>
         </footer>
       </main>

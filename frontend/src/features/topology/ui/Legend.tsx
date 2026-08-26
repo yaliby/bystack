@@ -17,9 +17,16 @@ const EDGE_CAPTION: Partial<Record<EdgeKind, string>> = {
 
 const STATUSES: readonly StatusRole[] = ['good', 'warning', 'serious', 'critical', 'neutral'];
 
-export function Legend({ palette }: { readonly palette: Palette }) {
+export function Legend({
+  palette,
+  shifted = false,
+}: {
+  readonly palette: Palette;
+  /** A panel is open on the left edge, so the key steps aside rather than hiding. */
+  readonly shifted?: boolean;
+}) {
   return (
-    <div className="legend">
+    <div className={shifted ? 'legend legend--shifted' : 'legend'}>
       <div className="legend__group">
         <h4>Links</h4>
         {EDGES.map((kind) => (

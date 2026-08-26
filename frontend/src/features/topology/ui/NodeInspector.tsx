@@ -95,62 +95,67 @@ export function NodeInspector({
         ) : null}
       </header>
 
-      {/* Above identity and attributes: during an incident the operator is
-          here to act, not to read a URN. */}
-      {actions}
+      {/* The panel no longer scrolls itself: its corner marks are drawn on the
+          panel, and an element that scrolls its own children would carry them
+          off the bottom of the content. */}
+      <div className="inspector__body">
+        {/* Above identity and attributes: during an incident the operator is
+            here to act, not to read a URN. */}
+        {actions}
 
-      {/* Directly under the actions and above identity: an operator who has
-          just been offered `restart` is here because something is wrong, and
-          the log is how they decide whether to press it. */}
-      {logs}
+        {/* Directly under the actions and above identity: an operator who has
+            just been offered `restart` is here because something is wrong, and
+            the log is how they decide whether to press it. */}
+        {logs}
 
-      <Section title="Identity">
-        <Row label="URN" value={node.urn} mono />
-        <Row label="Discovered by" value={node.source} />
-      </Section>
+        <Section title="Identity">
+          <Row label="URN" value={node.urn} mono />
+          <Row label="Discovered by" value={node.source} />
+        </Section>
 
-      {Object.keys(node.attrs).length > 0 && (
-        <Section title="Attributes">
-          {Object.entries(node.attrs)
-            .filter(([, value]) => value !== null && value !== undefined && value !== '')
-            .map(([key, value]) => (
-              <Row key={key} label={key} value={format(value)} />
+        {Object.keys(node.attrs).length > 0 && (
+          <Section title="Attributes">
+            {Object.entries(node.attrs)
+              .filter(([, value]) => value !== null && value !== undefined && value !== '')
+              .map(([key, value]) => (
+                <Row key={key} label={key} value={format(value)} />
+              ))}
+          </Section>
+        )}
+
+        {Object.keys(node.labels).length > 0 && (
+          <Section title="Labels">
+            {Object.entries(node.labels).map(([key, value]) => (
+              <Row key={key} label={key} value={value} mono />
             ))}
-        </Section>
-      )}
+          </Section>
+        )}
 
-      {Object.keys(node.labels).length > 0 && (
-        <Section title="Labels">
-          {Object.entries(node.labels).map(([key, value]) => (
-            <Row key={key} label={key} value={value} mono />
-          ))}
-        </Section>
-      )}
-
-      <Section title={`Relationships (${edges.length})`}>
-        {edges.map((rel) => {
-          const outward = rel.src === node.urn;
-          const other = outward ? rel.dst : rel.src;
-          return (
-            <button
-              key={rel.key}
-              type="button"
-              className="relationship"
-              onClick={() => onNavigate(other)}
-            >
-              <span className="relationship__body">
-                <span className="relationship__verb">
-                  {edgeVerb(rel.kind, outward ? 'out' : 'in')}
+        <Section title={`Relationships (${edges.length})`}>
+          {edges.map((rel) => {
+            const outward = rel.src === node.urn;
+            const other = outward ? rel.dst : rel.src;
+            return (
+              <button
+                key={rel.key}
+                type="button"
+                className="relationship"
+                onClick={() => onNavigate(other)}
+              >
+                <span className="relationship__body">
+                  <span className="relationship__verb">
+                    {edgeVerb(rel.kind, outward ? 'out' : 'in')}
+                  </span>
+                  <span className="relationship__target">{resolveName(other)}</span>
                 </span>
-                <span className="relationship__target">{resolveName(other)}</span>
-              </span>
-              <span className="relationship__go" aria-hidden="true">
-                →
-              </span>
-            </button>
-          );
-        })}
-      </Section>
+                <span className="relationship__go" aria-hidden="true">
+                  →
+                </span>
+              </button>
+            );
+          })}
+        </Section>
+      </div>
     </aside>
   );
 }
@@ -191,43 +196,45 @@ function EdgeInspector({
         ) : null}
       </header>
 
-      <Section title="Identity">
-        <Row label="Kind" value={EDGE_LABEL[edge.kind]} />
-        <Row label="Key" value={edge.key} mono />
-        <Row label="From" value={resolveName(edge.src)} />
-        <Row label="To" value={resolveName(edge.dst)} />
-      </Section>
-
-      {Object.keys(edge.attrs).length > 0 && (
-        <Section title="Attributes">
-          {Object.entries(edge.attrs)
-            .filter(([, value]) => value !== null && value !== undefined && value !== '')
-            .map(([key, value]) => (
-              <Row key={key} label={key} value={format(value)} />
-            ))}
+      <div className="inspector__body">
+        <Section title="Identity">
+          <Row label="Kind" value={EDGE_LABEL[edge.kind]} />
+          <Row label="Key" value={edge.key} mono />
+          <Row label="From" value={resolveName(edge.src)} />
+          <Row label="To" value={resolveName(edge.dst)} />
         </Section>
-      )}
 
-      <Section title="Navigate">
-        <button type="button" className="relationship" onClick={() => onNavigate(edge.src)}>
-          <span className="relationship__body">
-            <span className="relationship__verb">source</span>
-            <span className="relationship__target">{resolveName(edge.src)}</span>
-          </span>
-          <span className="relationship__go" aria-hidden="true">
-            →
-          </span>
-        </button>
-        <button type="button" className="relationship" onClick={() => onNavigate(edge.dst)}>
-          <span className="relationship__body">
-            <span className="relationship__verb">target</span>
-            <span className="relationship__target">{resolveName(edge.dst)}</span>
-          </span>
-          <span className="relationship__go" aria-hidden="true">
-            →
-          </span>
-        </button>
-      </Section>
+        {Object.keys(edge.attrs).length > 0 && (
+          <Section title="Attributes">
+            {Object.entries(edge.attrs)
+              .filter(([, value]) => value !== null && value !== undefined && value !== '')
+              .map(([key, value]) => (
+                <Row key={key} label={key} value={format(value)} />
+              ))}
+          </Section>
+        )}
+
+        <Section title="Navigate">
+          <button type="button" className="relationship" onClick={() => onNavigate(edge.src)}>
+            <span className="relationship__body">
+              <span className="relationship__verb">source</span>
+              <span className="relationship__target">{resolveName(edge.src)}</span>
+            </span>
+            <span className="relationship__go" aria-hidden="true">
+              →
+            </span>
+          </button>
+          <button type="button" className="relationship" onClick={() => onNavigate(edge.dst)}>
+            <span className="relationship__body">
+              <span className="relationship__verb">target</span>
+              <span className="relationship__target">{resolveName(edge.dst)}</span>
+            </span>
+            <span className="relationship__go" aria-hidden="true">
+              →
+            </span>
+          </button>
+        </Section>
+      </div>
     </aside>
   );
 }
