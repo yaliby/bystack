@@ -284,6 +284,11 @@ cd backend  && .venv/bin/python -m pytest && .venv/bin/ruff check src tests
 cd frontend && npm run typecheck && npm test
 cd agent    && cargo test
 
+# Layout, in a real browser. `fit` is kept off the floating topbar and legend by
+# four numbers in App.tsx that stand for their measured extent, and jsdom has no
+# layout to catch one going stale. Needs chrome-headless-shell; not in CI.
+cd frontend && npm run measure
+
 # End to end: the real agent, a scripted engine, the real Controller.
 cd backend && .venv/bin/python -m bystack.conformance \
                  ../agent/target/release/bystack-agent
