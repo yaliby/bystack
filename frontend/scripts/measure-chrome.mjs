@@ -1,20 +1,21 @@
 /**
- * Re-measure the four `fit` insets against the chrome they name.
+ * Re-measure the six `fit` insets against the chrome they name.
  *
  *     npm run measure
  *
- * `App.tsx` holds four numbers that keep `fit` from finishing underneath the
- * topbar or the legend. They are the *extent* of a floating element, so a rule
- * in `index.css` can move one without touching the number that stands for it —
- * which is how the narrow pair came to be 26px and 19px short of the chrome
- * they name and stayed that way through a redesign. Nothing in the test suite
- * sees it: jsdom has no layout, so the only honest check is a browser.
+ * `App.tsx` holds six numbers that keep `fit` from finishing underneath the
+ * topbar, the legend or an open panel. They are the *extent* of a floating
+ * element, so a rule in `index.css` can move one without touching the number
+ * that stands for it — which is how four of the six came to be 20 to 28px short
+ * of the chrome they name and stayed that way through a redesign. Nothing in
+ * the test suite sees it: jsdom has no layout, so the only honest check is a
+ * browser.
  *
  * This starts vite on the mock canvas, measures `.topbar__plate` and `.legend`
- * at four widths, and prints the clearance `fit` actually leaves. A negative
- * clearance is a card drawn behind the chrome and exits non-zero; the rest is
- * for a person to look at, because "enough room" is a judgement and 30/18 is
- * the one this design made.
+ * at four widths and then the two panels with one open, and prints the
+ * clearance `fit` actually leaves. A negative clearance is a card drawn behind
+ * the chrome and exits non-zero; the rest is for a person to look at, because
+ * "enough room" is a judgement and 30/18 is the one this design made.
  *
  * Deliberately not in CI. There is no browser on the runner, and puppeteer-core
  * is not a dependency of this package — it is here if the machine happens to
@@ -48,10 +49,12 @@ function constants() {
     return Number(found[1]);
   };
   return {
-    top: number(app, 'TOPBAR_HEIGHT', /const TOPBAR_HEIGHT = (\d+)/),
-    topNarrow: number(app, 'TOPBAR_HEIGHT_NARROW', /const TOPBAR_HEIGHT_NARROW = (\d+)/),
-    bottom: number(app, 'LEGEND_HEIGHT', /const LEGEND_HEIGHT = (\d+)/),
-    bottomNarrow: number(app, 'LEGEND_HEIGHT_NARROW', /const LEGEND_HEIGHT_NARROW = (\d+)/),
+    top: number(app, 'TOPBAR_INSET', /const TOPBAR_INSET = (\d+)/),
+    topNarrow: number(app, 'TOPBAR_INSET_NARROW', /const TOPBAR_INSET_NARROW = (\d+)/),
+    bottom: number(app, 'LEGEND_INSET', /const LEGEND_INSET = (\d+)/),
+    bottomNarrow: number(app, 'LEGEND_INSET_NARROW', /const LEGEND_INSET_NARROW = (\d+)/),
+    left: number(app, 'HOSTS_INSET', /const HOSTS_INSET = (\d+)/),
+    right: number(app, 'INSPECTOR_INSET', /const INSPECTOR_INSET = (\d+)/),
     pad: number(canvas, "fit's padding", /const padding = (\d+)/),
     narrowQuery: app.match(/const NARROW_QUERY = '([^']+)'/)?.[1] ?? '(max-width: 720px)',
   };
@@ -82,6 +85,51 @@ function startVite(port) {
     child.on('exit', (code) => reject(new Error(`vite exited with ${code}`)));
   });
   return { child, ready };
+}
+
+/** A real mouse press at the centre of the first match, by selector and — when
+ *  the selector is not enough on its own — the text the element starts with. */
+async function click(page, selector, startsWith = '') {
+  const box = await page.evaluate(
+    (sel, text) => {
+      const match = [...document.querySelectorAll(sel)].find((node) =>
+        node.textContent.trim().startsWith(text),
+      );
+      if (!match) return null;
+      const rect = match.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    },
+    selector,
+    startsWith,
+  );
+  if (!box) throw new Error(`nothing matched ${selector}${startsWith ? ` starting "${startsWith}"` : ''}`);
+  await page.mouse.click(box.x, box.y);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+}
+
+/** Open a panel, measure the edge `fit` has to stay clear of, and close it. */
+async function panel(page, { label, side, selector, inset, open }) {
+  await open();
+  const edge = await page.evaluate(
+    (sel, which) => {
+      const rect = document.querySelector(sel)?.getBoundingClientRect();
+      if (!rect) return null;
+      return which === 'left' ? rect.right : window.innerWidth - rect.left;
+    },
+    selector,
+    side,
+  );
+  if (edge === null) {
+    console.error(`  ${label}: never opened — has the panel or the way in changed?`);
+    return -1;
+  }
+  const clearance = inset - edge;
+  console.log(
+    `  ${label} (${side})  panel reaches ${edge.toFixed(0)}, fit stops at ${inset} → ${clearance.toFixed(0)}px`,
+  );
+  await page.keyboard.press('Escape');
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  return clearance;
 }
 
 async function main() {
@@ -146,6 +194,33 @@ async function main() {
           `legend: starts ${seen.legendStarts.toFixed(0)} up, fit ends ${contentBottom} up → ${below.toFixed(0)}px`,
       );
     }
+    // The panels, which only exist while one is open. The inspector needs a
+    // selection, and the canvas has no DOM to click — the search box is the
+    // way in, and it wants real input events rather than a synthetic click.
+    await page.setViewport({ width: 1440, height: 900 });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    console.log('');
+
+    worst = Math.min(worst, await panel(page, {
+      label: 'hosts    ',
+      side: 'left',
+      selector: '.hosts',
+      inset: c.left + c.pad,
+      open: () => click(page, '.topbar__btn', 'Hosts'),
+    }));
+
+    worst = Math.min(worst, await panel(page, {
+      label: 'inspector',
+      side: 'right',
+      selector: '.inspector',
+      inset: c.right + c.pad,
+      open: async () => {
+        await page.click('.search');
+        await page.type('.search', 'grafana');
+        await page.waitForSelector('.search__results button', { timeout: 5_000 });
+        await click(page, '.search__results button');
+      },
+    }));
   } finally {
     await browser?.close();
     vite.child.kill();

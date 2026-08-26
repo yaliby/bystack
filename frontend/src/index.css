@@ -205,7 +205,8 @@ body {
    The captions are the whole idea: an instrument tells you what each cluster
    of controls is for without your having to press one to find out, and they
    are what turns five unrelated widgets in a row into one plate.
-   Keep the height in step with `TOPBAR_HEIGHT` in App.tsx.
+   Keep the height in step with `TOPBAR_INSET` in App.tsx — `npm run measure`
+   is what checks that it is.
    --------------------------------------------------------------------------- */
 
 .topbar {
@@ -238,8 +239,9 @@ body {
 
 /* -- zones --------------------------------------------------------------
    A caption over a row of controls. The divider goes on the left of each
-   zone rather than being an element between them, so a zone that is not
-   rendered — `view` is not, on a wide screen — takes its divider with it. */
+   zone rather than being an element between them, so a zone takes its own
+   divider with it — which is what the narrow layout below relies on when it
+   drops all five to a stack of rows. */
 .topbar__identity,
 .topbar__search,
 .trace,
@@ -394,11 +396,8 @@ body {
 /* The zone takes the slack in the plate; the field itself stays a field. A
    search box the width of the window is not a better search box. */
 .search {
-  max-width: 320px;
-}
-
-.search {
   width: 100%;
+  max-width: 320px;
   height: 26px;
   padding: 0 10px 0 28px;
   border: 0;
@@ -1209,7 +1208,10 @@ body {
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: var(--r-pill);
   background: var(--accent-plate);
-  color: var(--accent);
+  /* Pulled a sixth of the way to ink, which darkens it on the light theme and
+     lightens it on the dark one — the accent alone over its own 11% tint is
+     3.98:1 in light, and this chip was plain muted text before it was a chip. */
+  color: color-mix(in srgb, var(--accent) 85%, var(--ink));
   font-family: 'IBM Plex Mono', ui-monospace, monospace;
   font-size: 9.5px;
   font-weight: 600;
@@ -1455,16 +1457,20 @@ body {
    hairlines and mono caps — and in that company a tint reads as another state
    chip rather than as the button. There is at most one of these on screen,
    which is what keeps it from being loud. */
+/* The label is the raised surface, not the canvas one. `--surface` is #e8ecf3
+   on the light theme, which over this fill measures 3.95:1 — under AA for text
+   this size, and it is 10.5px caps. `--surface-raised` is 4.68 there and 7.69
+   on the dark theme, where the canvas is now pure black. */
 .action--primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: var(--surface);
+  color: var(--surface-raised);
 }
 
 .action--primary:hover:not(:disabled) {
   border-color: transparent;
   background: color-mix(in srgb, var(--accent) 84%, var(--ink));
-  color: var(--surface);
+  color: var(--surface-raised);
 }
 
 .action--safe:hover:not(:disabled) {

@@ -39,42 +39,45 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? window.location.origin;
 const NARROW_QUERY = '(max-width: 720px)';
 const COARSE_POINTER_QUERY = '(pointer: coarse)';
 
-const INSPECTOR_WIDTH = 320;
-/** The hosts panel, on the other side. Keep in step with `.hosts` in CSS. */
-const HOSTS_WIDTH = 340;
 /**
- * Four insets that keep `fit` out from under the floating chrome. Each one is
- * the *extent* of what it stands for, measured in the browser rather than read
- * off the CSS: a rule can move a panel without changing the number in it, and
- * a wrong number here is a card drawn behind the topbar. `fit` then adds its
- * own 18px padding (`TopologyCanvas`), which is where the breathing room comes
- * from — so an inset that merely reaches the chrome's edge is correct.
+ * Six insets that keep `fit` out from under the floating chrome. Each one is
+ * the *extent* of what it stands for — the distance from that edge of the
+ * window to the far side of the thing — measured in a browser rather than read
+ * off the CSS: a rule can move a panel without changing the number that stands
+ * for it, and a stale number here is a card drawn behind the chrome. `fit`
+ * then adds its own 18px padding (`TopologyCanvas`), which is where the
+ * breathing room comes from, so an inset that merely reaches the chrome's edge
+ * is correct.
  *
- * Re-measure after touching the topbar or the legend in CSS. The narrow pair
- * held 164/186 through this redesign and were 26px and 19px short of the chrome
- * they name, which is `fit` finishing underneath both of them on a phone.
+ * `npm run measure` checks all six against a rendered page. Run it after
+ * touching `.topbar`, `.legend`, `.hosts` or `.inspector` in CSS — nothing in
+ * the test suite can see this, because jsdom has no layout.
  *
- * The legend sits 84px up (`.legend`, clear of the 52px status bar at 12px) and
- * is 109px tall: three columns while they fit side by side, and the same three
- * wrapped at 96px up below 720px.
+ * The names are `INSET`, not `WIDTH` or `HEIGHT`, because that is what they
+ * are: `HOSTS_INSET` is 12px of margin plus a 348px panel, and the version of
+ * this constant that held the panel's own width was quietly 20px short.
+ *
+ * Two of the numbers carry a decision rather than only a measurement. The
+ * topbar pair is the plate's extent plus 12, because the top edge is the
+ * crowded one and the plate's shadow reads as part of it; everything else
+ * stops exactly at the chrome and lets the padding do the rest.
  */
-const LEGEND_HEIGHT = 193;
-const LEGEND_HEIGHT_NARROW = 205;
-/**
- * The topbar floats over a full-bleed canvas, so `fit` has to allow for it.
- * The bezel sits 12px down and is 48px tall; the 12 on top of that is the one
- * deliberate margin here, because the top edge is the crowded one and the
- * plate carries a shadow that reads as part of it.
- *
- * The plate wraps on a phone — identity and panels, the field, then depth and
- * view — and the tallest it gets is three rows ending at 182px, measured, flat
- * across every width the narrow query covers.
- */
-const TOPBAR_HEIGHT = 72;
-const TOPBAR_HEIGHT_NARROW = 194;
+const TOPBAR_INSET = 72;
+const TOPBAR_INSET_NARROW = 194;
+const LEGEND_INSET = 193;
+const LEGEND_INSET_NARROW = 205;
+const HOSTS_INSET = 360;
+const INSPECTOR_INSET = 348;
 /** The trace rail's seats. Four values, so four seats — never a slider. */
 const TRACE_DEPTHS = [1, 2, 3, 4] as const;
-/** So does the banner, when there is one. Keep in step with `.banner` in CSS. */
+/**
+ * So does the banner, when there is one. Not one of the measured six: it only
+ * exists while the Controller is unreachable, which `npm run measure` has no
+ * way to arrange. Checked on paper instead — `.banner` sits at 64px and is
+ * 33px plus a hairline, so it ends at 98, and `fit` starts at 72 + 33 + 18.
+ * Keep it in step with `.banner` in CSS, and mind that the 64 is above the
+ * topbar's own inset rather than below it.
+ */
 const BANNER_HEIGHT = 33;
 /** Docker's own networks. Present on every host, so counting them says nothing. */
 const DEFAULT_NETWORKS = new Set(['bridge', 'host', 'none']);
@@ -377,8 +380,8 @@ export default function App() {
     });
   }, [narrow, clearSelection]);
 
-  const topbarPad = narrow ? TOPBAR_HEIGHT_NARROW : TOPBAR_HEIGHT;
-  const legendPad = narrow ? LEGEND_HEIGHT_NARROW : LEGEND_HEIGHT;
+  const topbarPad = narrow ? TOPBAR_INSET_NARROW : TOPBAR_INSET;
+  const legendPad = narrow ? LEGEND_INSET_NARROW : LEGEND_INSET;
 
   return (
     <div
@@ -594,9 +597,9 @@ export default function App() {
           inset={{
             top: topbarPad + (bannerVisible ? BANNER_HEIGHT : 0),
             // Sheets overlay the canvas on a phone — do not shrink fit into a strip.
-            right: !narrow && inspectorOpen ? INSPECTOR_WIDTH : 0,
+            right: !narrow && inspectorOpen ? INSPECTOR_INSET : 0,
             bottom: legendPad,
-            left: !narrow && (hostsOpen || activityOpen) ? HOSTS_WIDTH : 0,
+            left: !narrow && (hostsOpen || activityOpen) ? HOSTS_INSET : 0,
           }}
           fitToken={fitToken}
           zoomToken={zoomToken}
