@@ -17,7 +17,7 @@ logs and alerting stay with the systems that already do them well.
 
 ---
 
-## Status: v0.3 — the agent path works end to end
+## Status: v0.5 — nobody logs into a host
 
 ByStack is a **central Controller plus a lightweight Agent on each managed
 host**. The Agent dials out, so managed hosts open no port and publish no
@@ -49,7 +49,7 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 | Agent wire protocol + Controller ingest | | | |
 | Signed push upgrade, staged one host at a time ([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)) | | | |
 | mTLS, join-token enrollment, auto-renewal | | | |
-| The agent — Rust, 1.97 MiB static musl, 3.9 MiB RSS | | | |
+| The agent — Rust, 1.96 MiB static musl, 4.96 MiB RSS | | | |
 | Zero-config startup — a bundled local agent | | | |
 | Hosts and the operations timeline, on the map | | | |
 | Watched systemd units and processes, selected per host — or on many hosts in one act of selection | | | |
@@ -57,6 +57,8 @@ true and the reason the pivot cost a fortnight rather than a rewrite.
 | Crash-loop depth (`RestartCount`) | | | |
 | A durable operations log | | | |
 | Static binaries, an image, systemd units, a one-command install | | | |
+| Controller self-update, from the same signed releases ([ADR-0018](docs/adr/0018-controller-self-update.md)) | | | |
+| Adding hosts from the dashboard over SSH, credential never stored ([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md)) | | | |
 | `bystack-ctl`, and the dashboard served by the Controller | | | |
 
 The fourth column is not a backlog. ByStack is a **single-operator LAN control
@@ -111,6 +113,21 @@ new version before the next one is touched. It signs nothing and holds no key
 a Controller in the wrong hands can withhold an upgrade and cannot cause one.
 A host that comes up unable to reach the Controller restores its previous
 binary by itself ([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)).
+
+**And the two ends of that loop closed after it.** The Controller updates
+*itself* from the same signed releases and then rolls the fleet forward behind
+it, restoring the previous version if the new one does not come up
+([ADR-0018](docs/adr/0018-controller-self-update.md)) — before that, a fleet
+stayed behind because moving it meant upgrading the Controller by hand first.
+And the *first* install on a machine is a form: paste the addresses, give a
+root login, and the Controller installs the agent over SSH and waits for each
+host to dial back ([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md)). The
+credential opens one connection and is never stored — there is no host list, no
+saved key, and nothing to reconnect with.
+
+So the whole path — first install, every upgrade after it, and the Controller
+itself — is the dashboard. `install-agent.sh` and an ssh session remain the
+repair path rather than the routine one.
 
 ---
 
