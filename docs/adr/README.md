@@ -23,12 +23,13 @@ From the Controller/Agent pivot onward, each decision is its own file.
 | [0011](0011-agent-trust-and-enrollment.md)| mTLS, single-use join tokens, Engine ID identity | Accepted |
 | [0012](0012-operations-and-audit.md)      | Operations: lifecycle only, logical targets, no optimistic updates | Accepted |
 | [0013](0013-agent-in-rust.md)             | The Agent is written in Rust; supersedes 0010 | Accepted |
-| [0014](0014-no-user-identity.md)          | No user identity; the network is the boundary, and destructive verbs stay out | Accepted |
+| [0014](0014-no-user-identity.md)          | No user identity; the network is the boundary, and destructive verbs stay out | Accepted; **the identity half superseded by 0020** |
 | [0015](0015-agent-upgrade.md)             | Agent upgrade: the Controller reports skew, the host applies it | **Superseded by 0017** |
 | [0016](0016-watched-units-and-processes.md)| Units and processes are selected rather than discovered; a watch rule is the identity | Accepted |
 | [0017](0017-agent-upgrade-signed-push.md) | Signed push upgrade: the Controller distributes, the host verifies; supersedes 0015 | Accepted |
 | [0018](0018-controller-self-update.md)    | The Controller updates itself: 0017's signatures, pulled instead of pushed; then cascades to the fleet | Accepted |
 | [0019](0019-agent-deployment-over-ssh.md) | Agents are installed from the dashboard over SSH, with a credential that exists for one command and is never stored | Accepted |
+| [0020](0020-authentication.md)            | Accounts and sign-in, with BYheaven single sign-on; the destructive-verb decision stands | Accepted |
 
 A record is written when a decision is *hard to reverse* or when the reasoning
 will not be obvious to someone reading the code a year from now. Everything

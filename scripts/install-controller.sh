@@ -152,8 +152,8 @@ usage: install-controller.sh [options]
   --server-name NAME An address your other servers will use to reach this one,
                      exactly as they will type it. Repeatable.
   --bind ADDR        What the dashboard listens on (default 127.0.0.1). Use
-                     0.0.0.0 only on a private network, or behind your own
-                     login page -- nothing here asks a browser for a password.
+                     0.0.0.0 only on a private network, or behind a TLS proxy
+                     -- the sign-in works over plain HTTP but is not private.
   --port N           Dashboard port (default 8000)
   --socket PATH      Container engine socket (default /var/run/docker.sock)
   --binary PATH      Install this bystack-controller instead of downloading one
@@ -792,6 +792,10 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=${HOME_DIR}/bin/bystack-controller --config ${CONF}
+# Secrets (ADR-0020): BYSTACK_SETUP_TOKEN, BYSTACK_SSO_SECRET. Optional, and
+# read by systemd as root before this account is taken, so mode 0600 root:root
+# is right -- and unlike \`Environment=\`, \`systemctl show\` does not print it.
+EnvironmentFile=-/etc/bystack/controller.env
 Restart=always
 RestartSec=5
 # serve() installs its own SIGTERM handler so a stop is a stop rather than a
@@ -1015,9 +1019,11 @@ if [ "$answered" = true ]; then
 		echo "    then open http://127.0.0.1:8080"
 	else
 		echo "  Dashboard:  http://${bind_host}:${bind_port} (bound to ${bind_host})"
-		echo "  Nothing here asks a browser for a password. Keep it on a network you"
-		echo "  own, or put your own login page in front of it."
+		echo "  Sign-in works over plain HTTP but is not private. Keep it on a network"
+		echo "  you own, or put a TLS proxy in front of it."
 	fi
+	echo "  The first visit asks you to create your account. More accounts:"
+	echo "    sudo ${HOME_DIR}/bin/bystack-controller ctl --config ${CONF} user add NAME"
 	echo
 	if [ "$agents_enabled" = true ]; then
 		echo "  The fleet listener is on. Add servers from the dashboard: Add host"

@@ -47,18 +47,18 @@ class CommandKind(StrEnum):
 
     **This is settled, not pending.** ADR-0012 made destructive verbs
     conditional on the platform being able to answer "who deleted the database
-    volume"; **ADR-0014 decided that question will not be answered** -- this is
-    a single-operator LAN control plane with no user identity by design, so the
-    condition is never met and the conclusion is permanent. The trade is
-    deliberate and in this direction: giving up deletion in exchange for not
-    needing to know who is deleting.
+    volume"; ADR-0014 decided that question would not be answered and ruled
+    them out. ADR-0020 added accounts, so audit entries now name who asked --
+    and deliberately did *not* reopen this enum: there are still no roles, so
+    every signed-in account may do whatever the verbs allow, and "who" without
+    "who may" is half of what ADR-0012 asked for.
 
-    It is also what keeps that safe. With no authentication and no destructive
-    verb, the worst case is "someone who could reach the port restarted a
-    container" -- recoverable, audited, and visible in the topology. Add
-    ``prune`` and the worst case is unrecoverable data loss with no
-    attribution. Adding one here is not a small change to this enum; it
-    requires superseding ADR-0014 first.
+    That is also what keeps the worst case small. With no destructive verb it
+    is "an account restarted a container" -- recoverable, audited and named,
+    visible in the topology. Add ``prune`` and it is unrecoverable data loss
+    by anyone holding a login. Adding one here is not a small change to this
+    enum; it requires an ADR that supersedes the relevant part of ADR-0014 and
+    says what authorizes it.
     """
 
     START = "start"
@@ -165,9 +165,9 @@ class CommandRequest:
     actor: str = "anonymous"
     """Who asked.
 
-    ``anonymous``, and **permanently** so: ADR-0014 decides this platform does
-    not identify its operator, because at one operator on their own network
-    there is nobody to distinguish them from. Recorded rather than omitted,
+    The signed-in account's name (ADR-0020), filled in by the API from the
+    session; ``anonymous`` for a Controller with sign-in turned off and for
+    entries written before accounts existed. Recorded rather than omitted,
     because a field that plainly says "not known" is a truer audit record than
     a field that is silently absent -- or worse, one the client got to fill in.
 

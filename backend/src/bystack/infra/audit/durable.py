@@ -5,15 +5,14 @@ restart erases, and a log that forgets cannot answer "who deleted the database
 volume" -- which is the question ADR-0012 puts in front of every destructive
 verb, and the reason none of them exist.
 
-**"Who" is not coming, and that is a decision rather than a gap.** ADR-0014:
-this is a single-operator LAN control plane with no user identity, so `actor`
-is the literal string "anonymous" permanently and `CommandKind` contains no
-destructive operation permanently. The two go together -- the log does not
-need to name an operator for a set of verbs that cannot destroy anything.
+**"Who" is the signed-in account** (ADR-0020); `actor` reads "anonymous" for
+entries written before accounts existed and for a Controller with sign-in off.
+`CommandKind` still contains no destructive operation (ADR-0014): knowing who
+asked did not change which verbs are safe to offer.
 
-Which leaves this file answering the half that is actually asked during an
-incident: *what was attempted, against what, when, and whether it worked*,
-across restarts. That value never depended on the `actor` field.
+The half that is actually asked during an incident is *what was attempted,
+against what, when, and whether it worked*, across restarts, and that value
+never depended on the `actor` field.
 
 ## Why a file, and why this shape
 

@@ -12,11 +12,13 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, Request
+from starlette.requests import HTTPConnection
 
 from bystack.config import Settings
 from bystack.core.graph.store import GraphStore
 from bystack.core.ports.eventbus import EventBus
 from bystack.core.ports.watch import WatchStore
+from bystack.runtime.auth import AuthService
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
 from bystack.runtime.deploy import DeployService
@@ -41,6 +43,13 @@ class AppContext:
     Shared by both listeners, and it has to be: the operator mints a token on
     the browser port and the agent redeems it on the other one. One CA, one
     registry, one answer to "is this host allowed".
+    """
+
+    auth: AuthService
+    """Who may sign in, and what a request is allowed to act as (ADR-0020).
+
+    Reached from the gate and from the sign-in routes, and from nowhere else:
+    no other service asks who is calling, they are handed an `actor` string.
     """
 
     watchlist: WatchStore
@@ -135,7 +144,13 @@ def get_deploy(context: Annotated[AppContext, Depends(get_context)]) -> DeploySe
     return context.deploy
 
 
+def get_actor(connection: HTTPConnection) -> str:
+    """Who the gate decided this request acts as; `anonymous` when auth is off."""
+    return str(connection.scope.get("bystack.user", "anonymous"))
+
+
 Context = Annotated[AppContext, Depends(get_context)]
+Actor = Annotated[str, Depends(get_actor)]
 Store = Annotated[GraphStore, Depends(get_store)]
 Bus = Annotated[EventBus, Depends(get_bus)]
 Collectors = Annotated[Collector, Depends(get_collector)]

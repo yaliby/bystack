@@ -3438,3 +3438,47 @@ body {
     display: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Sign-in (ADR-0020)
+   ---------------------------------------------------------------------------
+   One card on the same metal as the panels, shown before the dashboard exists.
+   It carries its own data-theme because nothing above it has set one yet.
+   --------------------------------------------------------------------------- */
+
+.auth {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.auth__card {
+  width: min(380px, 100%);
+  padding: 24px 26px 22px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-panel);
+  background: var(--shell-solid);
+  box-shadow: var(--shadow-modal), inset 0 1px 0 var(--rim);
+}
+
+.auth__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.auth__lede {
+  margin: 6px 0 16px;
+  color: var(--ink-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.auth__submit {
+  width: 100%;
+  margin-top: 18px;
+}

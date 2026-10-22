@@ -24,7 +24,7 @@ from fastapi import FastAPI
 
 from bystack.api.app import build_context, create_app
 from bystack.api.deps import AppContext
-from bystack.config import AgentsConfig, Settings
+from bystack.config import AgentsConfig, AuthConfig, Settings
 from bystack.main import agent_listener
 
 #: Long enough that a slow machine still enrolls, short enough to stay honest
@@ -73,6 +73,9 @@ async def start(workdir: Path, port: int, *, resync_interval: int = 60) -> Contr
     state_dir = workdir / "controller"
     settings = Settings(
         read_only=False,
+        # Nothing in these runs speaks to the browser port; the harness drives
+        # the context and the agent listener directly.
+        auth=AuthConfig(required=False),
         agents=AgentsConfig(
             enabled=True,
             # The agent's *approval* is not what these runs are about, and

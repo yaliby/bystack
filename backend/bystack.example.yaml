@@ -21,11 +21,26 @@
 # one choke point (`CommandService`) and again by each agent on its own
 # authority, so it is a real guarantee rather than a UI preference.
 #
-# There is no per-operation switch and no allow-list, and there will not be
-# one: nothing authenticates a browser to this API by design (ADR-0014), so
-# there is nobody to attach a permission to. Finer-grained settings would
-# suggest a control that is not there.
+# There is no per-operation switch and no allow-list, and no roles: accounts
+# (ADR-0020) say who asked, not who may, so every account can do whatever the
+# verbs allow. Finer-grained settings would suggest a control that is not there.
 read_only: false
+
+# Who may use the dashboard and its API (ADR-0020). Every request except the
+# health probe and the sign-in routes needs a signed-in account; the first visit
+# creates the administrator, and `bystack-ctl user` manages the rest.
+auth:
+  # `false` is the old no-login behaviour, for a Controller on loopback that only
+  # its operator can reach. With it off, `api.host` is the whole authorization.
+  required: true
+  # setup_token: ""     # >= 8 chars, or BYSTACK_SETUP_TOKEN: needed to create
+  #                     # the first account, for when others can reach the port.
+  # sso_secret: ""      # >= 32 chars, or BYSTACK_SSO_SECRET: the value of
+  #                     # BYHEAVEN_SSO_BYSTACK in BYheaven's .env. Empty = SSO off.
+  # sso_audience: bystack   # the service id in BYheaven, if it is not "bystack"
+  # session_hours: 168
+  # lockout_threshold: 10   # failed sign-ins before an account locks; 0 = never
+  # rate_limit_per_minute: 10
 
 # Where agents dial in. This is the entire discovery configuration, because
 # agents arrive rather than being reached -- there is nothing here about

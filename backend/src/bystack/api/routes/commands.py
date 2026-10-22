@@ -17,7 +17,7 @@ from typing import Final
 
 from fastapi import APIRouter, HTTPException, Query
 
-from bystack.api.deps import Commands, Context
+from bystack.api.deps import Actor, Commands, Context
 from bystack.api.schemas import (
     ActionsOut,
     AuditEntryOut,
@@ -56,7 +56,7 @@ _STATUS: Final[dict[RejectionReason, int]] = {
 
 
 @router.post("", response_model=CommandResultOut, summary="Run an operation")
-async def run_command(body: CommandIn, service: Commands) -> CommandResultOut:
+async def run_command(body: CommandIn, service: Commands, actor: Actor) -> CommandResultOut:
     """Execute an operation against a container, service or stack.
 
     Synchronous by design. These operations take seconds, the operator is
@@ -76,6 +76,7 @@ async def run_command(body: CommandIn, service: Commands) -> CommandResultOut:
         timeout=body.timeout,
         signal=body.signal,
         reason=body.reason,
+        actor=actor,
     )
 
     try:
@@ -91,7 +92,7 @@ async def run_command(body: CommandIn, service: Commands) -> CommandResultOut:
 
 @router.post("/group", response_model=GroupCommandOut, summary="Run an operation across hosts")
 async def run_group_command(
-    body: GroupCommandIn, service: Commands, context: Context
+    body: GroupCommandIn, service: Commands, context: Context, actor: Actor
 ) -> GroupCommandOut:
     """Run one lifecycle command on one watch group, across the hosts named.
 
@@ -157,6 +158,7 @@ async def run_group_command(
                     timeout=body.timeout,
                     signal=body.signal,
                     reason=body.reason,
+                    actor=actor,
                 )
             )
         except CommandRejected as exc:
@@ -283,10 +285,11 @@ async def get_audit(
     Durable by default since the audit log moved to disk
     (`infra/audit/durable.py`), so this answers about previous runs of the
     Controller and not only this one. What it deliberately does not answer is
-    *who*: ADR-0014 decides this platform has no user identity, so every entry
-    reads `anonymous` -- and that is also why no destructive operation exists
-    or will. The verbs it records are all reversible, which is what makes an
-    unattributed log a complete record rather than half of one.
+    *who* only in part: each entry names the signed-in account that ran it
+    (ADR-0020), and reads `anonymous` for one written before accounts existed
+    or with sign-in off. No destructive operation exists (ADR-0014); the verbs
+    it records are all reversible, which is what makes the log a complete
+    record of them.
     """
     return [AuditEntryOut.of(entry) for entry in service.audit.recent(limit)]
 

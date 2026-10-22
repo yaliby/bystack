@@ -18,9 +18,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from bystack import __version__
 from bystack.api.deps import AppContext
+from bystack.api.gate import AuthGate
 from bystack.api.routes import agents as agent_routes
-from bystack.api.routes import commands as commands_routes
 from bystack.api.routes import (
+    auth,
     controller,
     deploy,
     enrollment,
@@ -30,6 +31,7 @@ from bystack.api.routes import (
     upgrades,
     watch,
 )
+from bystack.api.routes import commands as commands_routes
 from bystack.api.web import mount_web
 from bystack.config import Settings
 from bystack.core.graph.store import InMemoryGraphStore
@@ -41,8 +43,10 @@ from bystack.infra.eventbus.memory import InMemoryEventBus
 from bystack.infra.manager import ManagerLink
 from bystack.infra.releases import ReleaseStore
 from bystack.infra.ssh import KnownHosts
+from bystack.infra.users import UserStore
 from bystack.infra.watch.durable import DurableWatchStore
 from bystack.infra.watch.memory import InMemoryWatchStore
+from bystack.runtime.auth import AuthService
 from bystack.runtime.collector import Collector
 from bystack.runtime.commands import CommandService
 from bystack.runtime.deploy import DeployService, Sources
@@ -55,6 +59,12 @@ from bystack.runtime.upgrade import UpgradeService
 log = logging.getLogger(__name__)
 
 API_PREFIX = "/api/v1"
+
+#: The only browser-side routes that answer without a session (ADR-0020). The
+#: health probe has to: the self-updater and the container healthcheck call it
+#: from the same machine with no way to sign in. The rest are how one signs in.
+_PUBLIC = ("/healthz", "/auth/status", "/auth/login", "/auth/setup", "/auth/sso", "/auth/logout")
+PUBLIC_PATHS = tuple(f"{API_PREFIX}{path}" for path in _PUBLIC)
 
 #: `platform.machine()` spells two architectures differently from `uname -m`,
 #: which is what the agent artifacts are named after and what a target machine
@@ -101,6 +111,9 @@ def build_context(settings: Settings) -> AppContext:
         # Constructed whether or not it can run, so that a Controller which
         # could not spawn one can say why rather than showing an empty fleet.
         local_agent=LocalAgent(settings),
+        auth=AuthService(
+            UserStore.open(settings.agents.state_dir), settings.auth, settings.agents.state_dir
+        ),
         watchlist=_watchlist(settings),
         # The same lookup closure the command service takes, for the same
         # reason: a rollout enumerates providers and does nothing else with
@@ -244,6 +257,16 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
     )
     app.state.context = context
 
+    if settings.auth.required:
+        # Added before CORS so CORS is the outer layer: a preflight is answered
+        # before it is authenticated, and the gate's refusals carry CORS headers.
+        app.add_middleware(
+            AuthGate,
+            auth=context.auth,
+            public=PUBLIC_PATHS,
+            trusted_origins=settings.api.cors_origins,
+        )
+
     if settings.api.cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -254,6 +277,7 @@ def create_app(settings: Settings | None = None, context: AppContext | None = No
         )
 
     app.include_router(health.router, prefix=API_PREFIX)
+    app.include_router(auth.router, prefix=API_PREFIX)
     app.include_router(graph.router, prefix=API_PREFIX)
     app.include_router(stream.router, prefix=API_PREFIX)
     app.include_router(commands_routes.router, prefix=API_PREFIX)

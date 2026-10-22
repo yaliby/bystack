@@ -7,6 +7,7 @@
     bystack-ctl revoke <engine-id>
     bystack-ctl releases               # signed agent releases this Controller holds
     bystack-ctl upgrade                # roll the newest one out, one host at a time
+    bystack-ctl user add|passwd|enable|disable|list   # dashboard accounts (ADR-0020)
 
 ADR-0011 put the operator surface on four REST routes and MIGRATION §6.4 said
 a CLI over them was packaging work. This is it, and it is deliberately nothing
@@ -45,7 +46,8 @@ from urllib.parse import urljoin
 
 from bystack import __version__
 from bystack.api.app import API_PREFIX
-from bystack.config import Settings
+from bystack.config import DEFAULT_STATE_DIR, Settings
+from bystack.infra.users import UserError, UserStore
 
 #: Where the Controller is, when nobody says. The API's own default bind.
 DEFAULT_URL = "http://127.0.0.1:8000"
@@ -54,6 +56,11 @@ DEFAULT_URL = "http://127.0.0.1:8000"
 #: is an error rather than a hang. Nothing here is a long-running request:
 #: minting a token is a signature and listing agents is a dictionary.
 TIMEOUT = 10.0
+
+#: The control key this process presents (ADR-0020), set once by `main`.
+#: A module value rather than a parameter because every command below makes
+#: its requests through `call`, and none of them has an opinion about who it is.
+CONTROL_KEY: str | None = None
 
 
 class Failed(Exception):
@@ -88,6 +95,31 @@ def base_url(args: argparse.Namespace) -> str:
     return os.environ.get("BYSTACK_URL", DEFAULT_URL)
 
 
+def state_dir(args: argparse.Namespace) -> Path:
+    """The Controller's state directory, from the config file, the environment,
+    or the default -- the same directory `ctl.key` and `users.json` live in."""
+    config: str | None = args.config
+    if config:
+        return Path(Settings.load(config).agents.state_dir).expanduser()
+    return Path(os.environ.get("BYSTACK_STATE_DIR", DEFAULT_STATE_DIR)).expanduser()
+
+
+def control_key(args: argparse.Namespace) -> str | None:
+    """What proves this is the operator's own tool, not a stranger on the LAN.
+
+    `BYSTACK_CTL_KEY` for a Controller somewhere else (copy the file's contents),
+    otherwise `<state_dir>/ctl.key`, which only an account that can already read
+    the CA key can open. Missing or unreadable is not an error here: auth may be
+    off, and if it is on the 401 below says what to do.
+    """
+    explicit = os.environ.get("BYSTACK_CTL_KEY")
+    if explicit:
+        return explicit.strip()
+    with contextlib.suppress(OSError):
+        return (state_dir(args) / "ctl.key").read_text().strip() or None
+    return None
+
+
 def call(url: str, path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
     """One request, and an error a person can act on.
 
@@ -101,7 +133,10 @@ def call(url: str, path: str, *, method: str = "GET", body: dict[str, Any] | Non
         urljoin(url, f"{API_PREFIX}{path}"),
         method=method,
         data=json.dumps(body).encode() if body is not None else None,
-        headers={"content-type": "application/json"} if body is not None else {},
+        headers={
+            **({"content-type": "application/json"} if body is not None else {}),
+            **({"authorization": f"Bearer {CONTROL_KEY}"} if CONTROL_KEY else {}),
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:  # noqa: S310
@@ -114,6 +149,13 @@ def call(url: str, path: str, *, method: str = "GET", body: dict[str, Any] | Non
         # with a traceback.
         with contextlib.suppress(ValueError, OSError):
             detail = json.loads(exc.read()).get("detail", "")
+        if exc.code == 401:
+            raise Failed(
+                "this Controller requires a sign-in and no control key was accepted.\n"
+                "  On the Controller's own machine, run this as the account that owns its\n"
+                "  state directory (or root), or pass --config. For another machine, put\n"
+                "  the contents of <state_dir>/ctl.key in BYSTACK_CTL_KEY."
+            ) from exc
         raise Failed(detail or f"{exc.code} {exc.reason} from {path}") from exc
     except urllib.error.URLError as exc:
         raise Failed(
@@ -505,6 +547,52 @@ def _expiry(unix: int) -> str:
 # --------------------------------------------------------------------------
 
 
+def cmd_user(args: argparse.Namespace, url: str) -> int:
+    """Accounts, edited in the state directory rather than over HTTP.
+
+    That is deliberate: it is how the first recovery works when nobody can sign
+    in, and how a BYheaven user gets an account here (single sign-on creates
+    none). A running Controller notices the change on its next request.
+    """
+    directory = state_dir(args)
+    if not directory.is_dir():
+        raise Failed(
+            f"no state directory at {directory} -- has the Controller started yet?\n"
+            "  Pass --config, or set BYSTACK_STATE_DIR."
+        )
+    store = UserStore.open(directory)
+    try:
+        if args.action == "list":
+            for user in store.all():
+                print(f"{user.username}{'  (disabled)' if user.disabled else ''}")
+            return 0
+        if args.action in ("enable", "disable"):
+            store.set_disabled(args.username, args.action == "disable")
+            print(f"{args.username}: {args.action}d. Its sign-ins ended.")
+            return 0
+        password = _new_password()
+        if args.action == "add":
+            store.add(args.username, password)
+            print(f"created {args.username}")
+        else:
+            store.set_password(args.username, password)
+            print(f"{args.username}: password changed. Its sign-ins ended.")
+    except UserError as exc:
+        raise Failed(str(exc)) from exc
+    return 0
+
+
+def _new_password() -> str:
+    """From stdin when piped, otherwise asked twice. Never a flag: it would be
+    in the shell history and in `ps` for every account on this machine."""
+    if not sys.stdin.isatty():
+        return sys.stdin.readline().rstrip("\n")
+    first = getpass.getpass("New password: ")
+    if first != getpass.getpass("Again: "):
+        raise Failed("the two passwords differ")
+    return first
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bystack-ctl",
@@ -545,6 +633,10 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--status", action="store_true", help="Report the current or last run")
     upgrade.add_argument("--cancel", action="store_true", help="Stop after the current host")
 
+    user = sub.add_parser("user", help="Dashboard accounts (edits the state directory)")
+    user.add_argument("action", choices=("add", "passwd", "enable", "disable", "list"))
+    user.add_argument("username", nargs="?", help="Not needed for list")
+
     for name, help_text in (
         ("approve", "Let an enrolled agent contribute to the graph"),
         ("revoke", "Stop trusting this host's certificate"),
@@ -564,12 +656,19 @@ COMMANDS = {
     "token": cmd_token,
     "approve": cmd_approve,
     "revoke": cmd_revoke,
+    "user": cmd_user,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
+    global CONTROL_KEY
     args = build_parser().parse_args(argv)
+    if args.command == "user" and args.action != "list" and not args.username:
+        build_parser().error(f"user {args.action} needs a username")
     try:
+        # `user` edits files and never makes a request, so it asks for no key.
+        if args.command != "user":
+            CONTROL_KEY = control_key(args)
         return COMMANDS[args.command](args, base_url(args))
     except Failed as exc:
         print(f"bystack-ctl: {exc}", file=sys.stderr)

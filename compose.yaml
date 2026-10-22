@@ -28,9 +28,10 @@ services:
     restart: unless-stopped
 
     ports:
-      # Loopback, explicitly. Nothing authenticates a browser to this API by
-      # design (ADR-0014): the bind *is* the authorization, and the verb set
-      # is what bounds the damage.
+      # Loopback, explicitly. Every request needs a signed-in account
+      # (ADR-0020), but a session is a password and this port is plain HTTP, so
+      # leaving loopback is still a decision about your network; the verb set
+      # (ADR-0014) is what bounds the damage.
       #
       # `BYSTACK_BIND=0.0.0.0` in `.env` widens it, which is what you want when
       # the Controller is a server you reach over the network rather than the
@@ -79,6 +80,13 @@ services:
     # map, which is the failure this default exists to make rare.
     group_add:
       - "${DOCKER_GID:-999}"
+
+    # Both empty unless set in `.env` (ADR-0020): a setup token is asked for when
+    # the first account is created, and the SSO secret is the value of
+    # BYHEAVEN_SSO_BYSTACK in BYheaven's own `.env`. Empty means off.
+    environment:
+      BYSTACK_SETUP_TOKEN: "${BYSTACK_SETUP_TOKEN:-}"
+      BYSTACK_SSO_SECRET: "${BYSTACK_SSO_SECRET:-}"
 
     healthcheck:
       # `/healthz` answers with the graph's size and every provider's state,

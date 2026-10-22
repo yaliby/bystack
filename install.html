@@ -301,6 +301,14 @@ docker compose up -d --build</pre>
       </span>
     </div>
 
+    <div class="callout">
+      <span class="ico">🔑</span>
+      <span>
+        <span data-lang="he">בביקור הראשון המרכז מבקש ליצור חשבון מנהל (שם משתמש וסיסמה). חשבונות נוספים: <code>bystack-ctl user add alice</code> על מכונת המרכז. אם BYheaven מחובר — מגדירים <code>BYSTACK_SSO_SECRET</code> (אותו ערך כמו <code>BYHEAVEN_SSO_BYSTACK</code>) והלחיצה שם מכניסה את החשבון בעל אותו שם; היא לא יוצרת חשבון, אז קודם <code>user add</code>.</span>
+        <span data-lang="en">The first visit asks you to create the administrator (a name and password). More accounts: <code>bystack-ctl user add alice</code> on the Controller's machine. For BYheaven, set <code>BYSTACK_SSO_SECRET</code> (the same value as <code>BYHEAVEN_SSO_BYSTACK</code>) and a click there signs in the account of the same name; it creates none, so run <code>user add</code> first.</span>
+      </span>
+    </div>
+
     <p>
       <span data-lang="he">לחלופין, אם אתם סומכים על כל מי שמגיע לשרת הזה — <code class="inline">echo "BYSTACK_BIND=0.0.0.0" &gt;&gt; .env</code> ואז <code class="inline">docker compose up -d</code>, ואז <code class="inline">http://&lt;server-ip&gt;:8000</code>. רק ברשת פרטית.</span>
       <span data-lang="en">Or, if you trust every machine that can reach that server — <code class="inline">echo "BYSTACK_BIND=0.0.0.0" &gt;&gt; .env</code> then <code class="inline">docker compose up -d</code>, and open <code class="inline">http://&lt;server-ip&gt;:8000</code>. Private networks only.</span>

@@ -17,6 +17,7 @@ import { ActivityPanel } from './features/activity/ui/ActivityPanel';
 import { WatchPanel } from './features/watch/ui/WatchPanel';
 import { useWatch } from './features/watch/model/useWatch';
 import { useGroups } from './features/watch/model/useGroups';
+import { useWho } from './features/auth/ui/AuthGate';
 import { useLogs } from './features/logs/model/useLogs';
 import { LogsPanel } from './features/logs/ui/LogsPanel';
 import { useOperations } from './features/operations/model/useOperations';
@@ -91,6 +92,7 @@ const DEFAULT_NETWORKS = new Set(['bridge', 'host', 'none']);
 const WORKLOAD_KINDS = new Set(['service', 'container', 'unit', 'process']);
 
 export default function App() {
+  const who = useWho();
   const [dark, setDark] = useState(true);
   const [selected, setSelected] = useState<Urn | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
@@ -565,6 +567,19 @@ export default function App() {
               >
                 {dark ? <SunIcon /> : <MoonIcon />}
               </button>
+              {/* Only when a sign-in is involved: with auth off, or in the demo,
+                  there is nothing to sign out of. */}
+              {who.username ? (
+                <button
+                  type="button"
+                  className="topbar__btn topbar__btn--icon"
+                  aria-label={`Sign out ${who.username}`}
+                  title={`Signed in as ${who.username} — sign out`}
+                  onClick={() => void who.signOut()}
+                >
+                  <SignOutIcon />
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -782,6 +797,20 @@ function BrandMark() {
       <path d="M6.5 6.5 9.5 9.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
       <circle cx="5.3" cy="5.3" r="1.75" fill="currentColor" />
       <circle cx="10.7" cy="10.7" r="1.75" fill="currentColor" />
+    </svg>
+  );
+}
+
+function SignOutIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M6.2 2.6H3.6a1 1 0 0 0-1 1v8.8a1 1 0 0 0 1 1h2.6M10 5l3 3-3 3M13 8H6.4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

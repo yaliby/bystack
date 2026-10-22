@@ -210,9 +210,8 @@ class CommandIn(BaseModel):
     # an attacker-chosen name in the audit log next to a real operation,
     # which is worse than no attribution at all: it looks like evidence.
     #
-    # It stays absent. ADR-0014 decides there is no session for it to be
-    # populated from -- one operator, one LAN, no user model -- so every entry
-    # reads `anonymous` and says plainly that this platform does not know.
+    # The route fills it from the session the gate authenticated (ADR-0020),
+    # which is the only place a trustworthy name exists.
 
 
 class TargetOutcomeOut(BaseModel):

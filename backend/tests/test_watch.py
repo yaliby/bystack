@@ -1035,6 +1035,7 @@ async def test_a_group_command_reaches_every_host_and_one_failing_spares_the_res
         GroupCommandIn(kind=CommandKind.RESTART, group_id="shared", engine_ids=[ENGINE, other]),
         context.commands,
         context,
+        "alice",
     )
     await task
 
@@ -1043,6 +1044,8 @@ async def test_a_group_command_reaches_every_host_and_one_failing_spares_the_res
     # Both were dispatched to. Each carries its own complete per-target answer,
     # because this is N commands rather than one command with N targets.
     assert all(row.ran and row.result is not None for row in rows.values())
+    # Whoever was signed in is the actor on every host's audit entry (ADR-0020).
+    assert all(row.result.actor == "alice" for row in rows.values() if row.result)
     assert rows[ENGINE].status == str(CommandStatus.SUCCEEDED)
     assert rows[other].status == str(CommandStatus.FAILED)
     # Worst-wins across hosts, the same rule that applies across the targets

@@ -155,6 +155,18 @@ def _state_dir_is_disposable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(config, "DEFAULT_STATE_DIR", str(tmp_path / "state"))
 
 
+@pytest.fixture(autouse=True)
+def _auth_is_off_unless_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most of the suite exercises a route, not the sign-in in front of it.
+
+    A bare `Settings()` requires a session in production (ADR-0020) and in the
+    tests that are about that (`test_auth.py`), which say `required=True`
+    aloud. Everywhere else it would turn every request into a 401 that has
+    nothing to do with what the test is checking.
+    """
+    monkeypatch.setattr(config, "DEFAULT_AUTH_REQUIRED", False)
+
+
 @pytest.fixture
 def controller(tmp_path: Path) -> Controller:
     return make_controller(tmp_path)

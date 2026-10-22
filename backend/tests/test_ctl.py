@@ -586,3 +586,95 @@ def test_asking_about_a_deployment_that_never_ran_is_not_an_error(
 
     assert ctl.cmd_deploy(args(status=True), "http://x") == 0
     assert "no deployment" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# Signing in (ADR-0020)
+# --------------------------------------------------------------------------
+
+
+def test_the_control_key_comes_from_the_environment_then_the_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "ctl.key").write_text("from-the-file\n")
+    monkeypatch.setenv("BYSTACK_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("BYSTACK_CTL_KEY", raising=False)
+    assert ctl.control_key(args()) == "from-the-file"
+
+    monkeypatch.setenv("BYSTACK_CTL_KEY", "from-the-environment")
+    assert ctl.control_key(args()) == "from-the-environment"
+
+
+def test_no_key_anywhere_is_not_an_error_until_the_controller_asks_for_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BYSTACK_STATE_DIR", str(tmp_path / "nowhere"))
+    monkeypatch.delenv("BYSTACK_CTL_KEY", raising=False)
+    assert ctl.control_key(args()) is None
+
+
+def test_every_request_carries_the_key_and_a_401_says_where_it_comes_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Any] = []
+
+    def refuse(request: Any, timeout: float) -> Any:
+        seen.append(request.get_header("Authorization"))
+        raise ctl.urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ctl, "CONTROL_KEY", "k" * 64)
+    monkeypatch.setattr(ctl.urllib.request, "urlopen", refuse)
+    with pytest.raises(ctl.Failed, match="ctl.key"):
+        ctl.call("http://x", "/agents")
+    assert seen == ["Bearer " + "k" * 64]
+
+
+def test_user_commands_edit_the_state_directory_and_a_running_controller_sees_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from bystack.infra import users
+
+    monkeypatch.setattr(users, "_N", 2**10)
+    monkeypatch.setenv("BYSTACK_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(ctl.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(ctl.sys.stdin, "readline", lambda: "a long enough password\n")
+
+    assert ctl.main(["user", "add", "alice"]) == 0
+    assert ctl.main(["user", "add", "alice"]) == 1  # taken
+    assert "already an account" in capsys.readouterr().err
+
+    store = users.UserStore.open(tmp_path)
+    before = store.get("alice")
+    assert before is not None and not before.disabled
+
+    assert ctl.main(["user", "disable", "alice"]) == 0
+    after = users.UserStore.open(tmp_path).get("alice")
+    assert after is not None and after.disabled
+    assert after.token_version > before.token_version  # its sign-ins ended
+
+    capsys.readouterr()
+    assert ctl.main(["user", "list"]) == 0
+    assert capsys.readouterr().out.strip() == "alice  (disabled)"
+
+
+def test_user_commands_refuse_a_state_directory_that_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Creating it here, as whoever is running this, could leave the Controller's
+    # own account unable to enter it.
+    monkeypatch.setenv("BYSTACK_STATE_DIR", str(tmp_path / "missing"))
+    assert ctl.main(["user", "list"]) == 1
+    assert "state directory" in capsys.readouterr().err
+    assert not (tmp_path / "missing").exists()
+
+
+def test_the_packaged_controller_carries_ctl_as_a_subcommand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one-file Controller has no `bystack-ctl` on PATH, and a BYheaven user
+    can only be given an account through it (ADR-0020)."""
+    from bystack import main as controller
+
+    monkeypatch.setenv("BYSTACK_STATE_DIR", str(tmp_path))
+    assert controller.main(["ctl", "user", "list"]) == 0
+    assert capsys.readouterr().out == ""

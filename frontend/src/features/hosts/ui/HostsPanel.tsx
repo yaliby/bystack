@@ -266,8 +266,8 @@ export function HostsPanel({
           canDeploy={!(controller.self?.read_only ?? false)}
           // Whether the credential typed below would leave this machine. The
           // Controller reports where it is bound; a dashboard published on a
-          // network has no login in front of it (ADR-0014), and this is the
-          // one form where that matters enough to say out loud.
+          // network is plain HTTP unless something in front terminates TLS, and
+          // this is the one form where that matters enough to say out loud.
           loopback={isLoopback()}
           // Closing is what discards the token. Nothing else holds a copy.
           onClose={() => setToken(null)}

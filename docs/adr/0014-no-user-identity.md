@@ -1,6 +1,9 @@
 # ADR-0014 — No user identity; the network is the boundary
 
-**Status:** Accepted
+**Status:** Accepted — **the identity half is superseded by [ADR-0020](0020-authentication.md)**
+(accounts and sign-in now exist). The other half, that no destructive verb
+exists, stands. Read what follows as the reasoning for *that* half and for
+`auth.required: false`, which is still this deployment.
 **Depends on:** [ADR-0011](0011-agent-trust-and-enrollment.md), [ADR-0012](0012-operations-and-audit.md)
 **Closes:** the item `docs/OPEN-WORK.md` §4 held open
 

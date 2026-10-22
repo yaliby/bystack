@@ -34,6 +34,10 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=/opt/bystack/bin/bystack-controller --config /etc/bystack/bystack.yaml
+# Secrets (ADR-0020): BYSTACK_SETUP_TOKEN, BYSTACK_SSO_SECRET. Optional, and
+# read by systemd as root before this account is taken, so mode 0600 root:root
+# is right -- and unlike `Environment=`, `systemctl show` does not print it.
+EnvironmentFile=-/etc/bystack/controller.env
 Restart=always
 RestartSec=5
 

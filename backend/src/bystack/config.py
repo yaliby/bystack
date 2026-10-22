@@ -8,6 +8,7 @@ control plane.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,13 @@ DEFAULT_STATE_DIR = "~/.local/state/bystack"
 #: `bystack-manager` talk through (ADR-0018). A module constant for the same
 #: reason as the one above: one place for a test suite to move.
 DEFAULT_MANAGER_IPC_DIR = "/opt/bystack/ipc"
+
+#: Whether a bare `Settings()` requires a signed-in session (ADR-0020). Always
+#: true in a running Controller. A module constant for the reason the state
+#: directory is one: most of the suite builds an app from `Settings()` to test
+#: something else, and `conftest.py` moves this one place instead of editing
+#: every call. The tests that are *about* the gate say `required=True` aloud.
+DEFAULT_AUTH_REQUIRED = True
 
 
 class AgentsConfig(BaseModel):
@@ -331,10 +339,11 @@ class AuditConfig(BaseModel):
     holding root-equivalent access to a fleet should not have to be configured
     into remembering what it was asked to do.
 
-    It answers "what was attempted, and when", and deliberately not "by whom":
-    `actor` is the string "anonymous" permanently, because ADR-0014 decides
-    this platform does not identify its operator. The verbs it records cannot
-    destroy anything, which is the other half of that decision.
+    Each entry names the signed-in account that asked (ADR-0020). `anonymous`
+    is what an entry from before accounts existed, or from a Controller with
+    `auth.required: false`, still reads. The verbs it records cannot destroy
+    anything; that is a separate decision (ADR-0014) and accounts did not
+    change it.
     """
 
     durable: bool = Field(
@@ -369,23 +378,83 @@ class AuditConfig(BaseModel):
     """
 
 
+class AuthConfig(BaseModel):
+    """Who may use the dashboard and its API (ADR-0020).
+
+    On by default. The first visit asks for an administrator's name and
+    password; after that every request to `/api/v1` except the health probe
+    and the sign-in routes needs a session. Accounts live in
+    `<agents.state_dir>/users.json` and are managed with `bystack-ctl user`.
+    """
+
+    required: bool = Field(
+        default_factory=lambda: DEFAULT_AUTH_REQUIRED,
+        description="Require a signed-in session. Off restores the ADR-0014 behaviour.",
+    )
+    """Off is for a Controller on loopback that only its operator can reach.
+    It is a real setting rather than a test hook: turning it off means anyone
+    who can reach the port is the operator, which is exactly the trade
+    ADR-0014 made and ADR-0020 stopped making by default."""
+
+    session_hours: int = Field(default=168, ge=1, description="How long a sign-in lasts.")
+
+    setup_token: str = Field(
+        default_factory=lambda: os.environ.get("BYSTACK_SETUP_TOKEN", ""),
+        description="If set, creating the first account needs this value.",
+    )
+    """The first visit creates the administrator, so whoever reaches the port
+    first owns the Controller. On a loopback install that is you; on a LAN it
+    may not be. Set this (8+ characters) and the setup form asks for it."""
+
+    sso_secret: str = Field(
+        default_factory=lambda: os.environ.get("BYSTACK_SSO_SECRET", ""),
+        description="Shared with BYheaven as BYHEAVEN_SSO_BYSTACK. Empty means SSO is off.",
+    )
+    sso_audience: str = Field(
+        default="bystack", description="The service id BYheaven puts in its tickets."
+    )
+
+    lockout_threshold: int = Field(
+        default=10, ge=0, description="Failed sign-ins before an account locks. 0 disables."
+    )
+    lockout_minutes: int = Field(default=15, ge=1, description="How long the failures are counted.")
+    rate_limit_per_minute: int = Field(
+        default=10, ge=1, description="Sign-in, setup and SSO attempts per client address."
+    )
+
+    @model_validator(mode="after")
+    def _secrets_are_not_decorative(self) -> AuthConfig:
+        if self.sso_secret and len(self.sso_secret) < 32:
+            raise ValueError(
+                "auth.sso_secret must be at least 32 characters (openssl rand -hex 32)"
+            )
+        if self.setup_token and len(self.setup_token) < 8:
+            raise ValueError("auth.setup_token must be at least 8 characters")
+        return self
+
+
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     """Loopback by default. This service holds root-equivalent access to every
     managed engine; binding it to the world on first run is not a default any
     platform should ship.
 
-    **This bind is the whole of the browser-side authorization** (ADR-0014).
-    Nothing authenticates a browser to this API by design, so anyone who can
-    reach this port can start, stop, restart and kill containers on every
-    managed host -- and since ADR-0014 they can do it out of the box, because
-    `read_only` now defaults to `False`. What bounds the damage is the verb set
-    rather than the flag: `CommandKind` holds nothing that destroys anything,
-    so the worst case is a container restarting. That is the reason changing
-    this to `0.0.0.0` is a decision about how much you trust the network, not a
-    convenience. Put a reverse proxy with authentication in front of it if the
-    answer is "not much"; the browser port was deliberately kept able to sit
-    behind an ordinary one."""
+    Everything under `/api` needs a signed-in session unless `auth.required`
+    is off (ADR-0020), so reaching this port is no longer the same as being the
+    operator -- but a session is a password, and the connection carrying it is
+    plain HTTP unless something in front terminates TLS. Binding this to
+    `0.0.0.0` is therefore still a decision about the network between you and
+    the Controller, and a reverse proxy with TLS is the answer when that
+    network is not yours; the browser port was deliberately kept able to sit
+    behind an ordinary one (the session cookie is marked `Secure` when the
+    proxy says `X-Forwarded-Proto: https`).
+
+    With `auth.required: false` this bind is again the whole of the
+    authorization, and what a caller can do is bounded by the verb set --
+    `CommandKind` holds nothing that destroys anything -- *unless* a host has
+    the optional unit/process grants installed (ADR-0016), in which case it is
+    any unit or process that caller adds to that host's watch list, root-level
+    services included."""
 
     port: int = 8000
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
@@ -395,6 +464,7 @@ class Settings(BaseModel):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     local_agent: LocalAgentConfig = Field(default_factory=LocalAgentConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     read_only: bool = Field(
         default=False,

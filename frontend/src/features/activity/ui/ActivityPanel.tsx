@@ -76,16 +76,14 @@ export function ActivityPanel({ activity, nodes, onSelect, onClose }: Props) {
         ) : null}
       </div>
 
-      {/* Said once, at the bottom. The log survives a restart (ADR-0012 §4a);
-          what it deliberately does not say is *who*, and a timeline read as an
-          audit log would be trusted for exactly that. No longer "until
-          authentication exists" — ADR-0014 decided it never will, which is
-          also why nothing here can delete anything. Stating it as a permanent
-          property rather than a pending one is the honest version: an operator
-          who reads "until" plans around a date that is not coming. */}
+      {/* Said once, at the bottom. The log survives a restart (ADR-0012 §4a)
+          and each entry names the signed-in account that ran it (ADR-0020).
+          `anonymous` is what older entries, and a Controller with sign-in
+          turned off, still say — so that is stated rather than left for
+          someone to wonder about. */}
       <p className="activity__caveat">
-        Operations are not attributed — ByStack has no accounts, and no
-        operation here can delete anything.
+        Each entry names who ran it. <em>anonymous</em> means it was run before accounts existed
+        or with sign-in off. No operation here can delete anything.
       </p>
     </aside>
   );

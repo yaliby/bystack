@@ -9,9 +9,9 @@ and the self-update follow.
 follow from that and are worth stating where they can be read beside the code:
 
 * It is served on the **browser-facing** port, which defaults to loopback and
-  has no login (ADR-0014). That is why INSTALL.md tells operators to reach the
-  dashboard over `ssh -L` — over that, this request crosses the network inside
-  their own SSH session.
+  needs a signed-in session (ADR-0020). That is not the same as encrypted:
+  INSTALL.md tells operators to reach the dashboard over `ssh -L` or behind a
+  TLS proxy, so that this request crosses the network inside one.
 * **Nothing echoes it.** `DeployIn` is the only model that carries a
   credential, no response model has a field for one, and `Credential.__repr__`
   prints the *kind* of authentication rather than the secret — so a traceback

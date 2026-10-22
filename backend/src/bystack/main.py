@@ -296,6 +296,15 @@ async def serve(settings: Settings, host: str | None, port: int | None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments[:1] == ["ctl"]:
+        # The packaged Controller is one file with one entry point, and an
+        # operator on that machine has no `bystack-ctl` on PATH. This makes
+        # `bystack ctl user add alice` the same program, which is how a
+        # BYheaven user gets an account on a packaged install (ADR-0020).
+        from bystack.ctl import main as ctl
+
+        return ctl(arguments[1:])
     args = parse_args(argv)
 
     try:
