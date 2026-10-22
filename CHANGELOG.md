@@ -10,6 +10,55 @@ to point at a release where the agent binary exists.
 
 ---
 
+## Unreleased
+
+### Sign-in, and BYheaven single sign-on ([ADR-0020](docs/adr/0020-authentication.md))
+
+**The dashboard and its API now require a signed-in account, on by default.**
+The first visit to a new Controller asks for an administrator's name and
+password; `bystack-ctl user add|passwd|enable|disable|list` manages the rest.
+Sessions are an `HttpOnly`, `SameSite=Strict` cookie whose account is re-read on
+every request, so disabling an account or changing its password ends its
+sessions on the next one. Sign-ins are rate-limited per address and locked out
+per account.
+
+**BYheaven can sign you in.** Set `BYSTACK_SSO_SECRET` (the value of
+`BYHEAVEN_SSO_BYSTACK`) and a click in BYheaven signs in the account of the same
+name — the ticket format OmniBridge already accepts. It creates no account.
+
+**Operations are attributed.** The audit log's `actor` is the account that
+asked; `anonymous` remains for older entries.
+
+**What you have to do about it:**
+
+- **Upgrading a running Controller:** the next visit asks you to create the first
+  account. If anyone else can reach the port first, set `BYSTACK_SETUP_TOKEN`
+  before upgrading.
+- **Scripts and `curl`:** send `Authorization: Bearer <state_dir>/ctl.key`.
+  `bystack-ctl` does this itself on the Controller's machine, and reads
+  `BYSTACK_CTL_KEY` for another one.
+- **The health probe is still open**, so the self-updater and the container
+  healthcheck are unaffected.
+- **Want the old behaviour?** `auth: {required: false}`. It is the ADR-0014
+  deployment: the bind address is the whole of the authorization again.
+
+**Not changed:** the verb set. Accounts say *who*, not *who may* — there are no
+roles — so no destructive operation exists and none was added.
+
+**A correction to the README:** the claim that the worst a stranger could do was
+"restart a container" was only true of a default install. With the optional
+unit/process grants (ADR-0016) an account can stop any unit it adds to a host's
+watch list, and that is now stated where the grants are described.
+
+### Documentation
+
+The README is rewritten as the repository's front page: a diagram of how the
+parts connect, a quick start for each install path, the security model as a
+table, the API, and the status. The list of traps that cost real debugging time
+moved, unchanged, to [docs/PITFALLS.md](docs/PITFALLS.md).
+
+---
+
 ## v0.5.0
 
 ### Add hosts from the dashboard ([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md))

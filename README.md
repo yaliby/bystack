@@ -1,803 +1,286 @@
+<div align="center">
+
 # ByStack
 
-An **Infrastructure Control Plane** for Docker-based infrastructure.
+**A live map of every Docker host you own, and the controls to run them.**
 
-Not a monitoring system. It discovers your infrastructure, correlates it into
-one live graph, and gives you a single place to see and operate it. Metrics,
-logs and alerting stay with the systems that already do them well.
+ByStack discovers every container, service and stack on your machines, correlates them into one graph, and lets you act on them from a single dashboard. Each host runs a small agent that dials **out** to the Controller, so nothing on your hosts listens on the network.
 
-> Read [`ARCHITECTURE.md`](ARCHITECTURE.md) before changing anything, and
-> [`docs/adr/`](docs/adr/) for the decisions behind it. They are load-bearing,
-> and several look arbitrary until you know what goes wrong without them.
->
-> Picking up unfinished work? [`docs/OPEN-WORK.md`](docs/OPEN-WORK.md) is the
-> handoff: how to establish a green baseline in ninety seconds, what is left,
-> in which order, and which decisions are already made and should not be
-> reopened.
+[![CI](https://github.com/yaliby/bystack/actions/workflows/ci.yml/badge.svg)](https://github.com/yaliby/bystack/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
+![Rust](https://img.shields.io/badge/agent-Rust-DEA584?logo=rust&logoColor=black)
+![React](https://img.shields.io/badge/dashboard-React%20%2B%20TypeScript-61DAFB?logo=react&logoColor=black)
 
----
+[Quick start](#-quick-start) · [Features](#-features) · [Security](#-security) · [Architecture](#-architecture) · [Documentation](#-documentation)
 
-## Status: v0.5 — nobody logs into a host
+</div>
 
-ByStack is a **central Controller plus a lightweight Agent on each managed
-host**. The Agent dials out, so managed hosts open no port and publish no
-Docker socket.
+<p align="center">
+  <img src="docs/img/dashboard-demo.png" alt="The ByStack dashboard: containers grouped by stack, with the host they run on" width="900">
+  <br><sub>The dashboard, on demo data.</sub>
+</p>
 
-```
-Docker Engine ──► Agent (Rust) ─► mTLS stream ──► Controller ──► Canonical Graph ──► Topology UI
-     local socket        observe · hash · push       map · correlate · decide
-```
-
-The first slice was built agentless — the Controller opened an SSH tunnel per
-host and drove the remote socket itself. That model has been **replaced and
-deleted**; see [ADR-0008](docs/adr/0008-controller-agent-topology.md) for what
-it cost and [`docs/MIGRATION.md`](docs/MIGRATION.md) for what moved. **The
-domain kernel did not move**: identity, graph, store, delta and the Docker
-mapper are untouched, which is the claim the migration was designed to make
-true and the reason the pivot cost a fortnight rather than a rewrite.
-
-| Working now | Being built | Not built yet | Decided against |
-|---|---|---|---|
-| Docker discovery (List / Watch / Resync) | | Durable graph history | User authentication and RBAC ([ADR-0014](docs/adr/0014-no-user-identity.md)) |
-| Canonical graph, two-layer identity | | Plugin system | Destructive operations — `remove`, `prune`, volume deletion |
-| Compose stacks, services, `depends_on` | | | |
-| Incremental deltas over WebSocket | | | |
-| Interactive topology canvas | | | |
-| Container / service / stack operations | | | |
-| Operating a multi-host selection from one button, one audit entry per host | | | |
-| Unit and process operations, through the same six verbs | | | |
-| Agent wire protocol + Controller ingest | | | |
-| Signed push upgrade, staged one host at a time ([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)) | | | |
-| mTLS, join-token enrollment, auto-renewal | | | |
-| The agent — Rust, 1.96 MiB static musl, 4.96 MiB RSS | | | |
-| Zero-config startup — a bundled local agent | | | |
-| Hosts and the operations timeline, on the map | | | |
-| Watched systemd units and processes, selected per host — or on many hosts in one act of selection | | | |
-| Container logs — one-shot **and live** | | | |
-| Crash-loop depth (`RestartCount`) | | | |
-| A durable operations log | | | |
-| Static binaries, an image, systemd units, a one-command install | | | |
-| Controller self-update, from the same signed releases ([ADR-0018](docs/adr/0018-controller-self-update.md)) | | | |
-| Adding hosts from the dashboard over SSH, credential never stored ([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md)) | | | |
-| `bystack-ctl`, and the dashboard served by the Controller | | | |
-
-The fourth column is not a backlog. ByStack is a **single-operator LAN control
-plane**: one Controller, on a network you own, managing your own machines.
-There is no second user to tell apart from the first, so a login would answer
-"the one person with the password did it" — which is what having no login
-already says. Because nothing authenticates, nothing destroys either: the
-worst a stranger on your LAN can do is restart a container, which is
-recoverable, audited, and visible on the canvas a second later. Those two
-decisions hold each other up, and reversing one means reversing both.
-
-Metrics providers are not on that list and never will be: collecting anything
-Prometheus already collects is a **non-goal**, not a missing feature
-([ARCHITECTURE §12](ARCHITECTURE.md#12-non-goals)). Prometheus and Grafana are
-already running next to this on the same hosts. ByStack correlates with what
-they know; it does not re-collect it.
-
-**One discovery path.** The Controller reaches no Docker socket, local or
-remote: agents dial in and nothing else fills the graph. The SSH transport,
-the Engine HTTP client and the informer are gone
-([`docs/MIGRATION.md`](docs/MIGRATION.md) §6), and they were deleted only
-after the two implementations were shown to produce the same graph on the same
-real daemon — 41 entities and 75 edges, identical by content hash.
-
-**Including this machine.** `python -m bystack` with no configuration manages
-the engine it is running on, by spawning the same agent binary a managed host
-runs and connecting it over a unix socket instead of TLS — no CA, no token, no
-approval, and no port bound anywhere
-([`docs/MIGRATION.md`](docs/MIGRATION.md) §4). Same frames, same ingest, same
-graph; the local case is a transport, not a second implementation.
-
-**The tree now matches the topology diagrammed in
-[ARCHITECTURE §1](ARCHITECTURE.md#1-topology)**, including the diagram's
-`mTLS, one long-lived stream per agent`
-([ADR-0011](docs/adr/0011-agent-trust-and-enrollment.md)). Every agent
-connection is mutually authenticated against an internal CA, agents enrol with
-a single-use join token, and certificates renew themselves over the stream
-that is already open.
-
-**And it now installs.** Static musl binaries per architecture, a container
-image, systemd units, a wheel that carries both the agent and the dashboard,
-and `bystack-ctl` ([`docs/MIGRATION.md`](docs/MIGRATION.md) §7). The dashboard
-is served by the Controller on its own port, so there is no Node on a
-control-plane host and no second origin. "Add a host" hands out a command that
-works on a machine with nothing on it, which is what it did not do before.
-
-The last clause of that step is closed too: **upgrading the fleet is a
-button**. The Controller pushes a signed release down the connection each agent
-already holds, one host at a time, confirmed by that host coming back on the
-new version before the next one is touched. It signs nothing and holds no key
-— each host verifies the release against a key compiled into its own agent, so
-a Controller in the wrong hands can withhold an upgrade and cannot cause one.
-A host that comes up unable to reach the Controller restores its previous
-binary by itself ([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)).
-
-**And the two ends of that loop closed after it.** The Controller updates
-*itself* from the same signed releases and then rolls the fleet forward behind
-it, restoring the previous version if the new one does not come up
-([ADR-0018](docs/adr/0018-controller-self-update.md)) — before that, a fleet
-stayed behind because moving it meant upgrading the Controller by hand first.
-And the *first* install on a machine is a form: paste the addresses, give a
-root login, and the Controller installs the agent over SSH and waits for each
-host to dial back ([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md)). The
-credential opens one connection and is never stored — there is no host list, no
-saved key, and nothing to reconnect with.
-
-So the whole path — first install, every upgrade after it, and the Controller
-itself — is the dashboard. `install-agent.sh` and an ssh session remain the
-repair path rather than the routine one.
+> [!NOTE]
+> ByStack is **not a monitoring system**. Metrics, logs and alerting stay with the tools that already do them well, such as Prometheus and Grafana. ByStack answers a different question: *what runs where, what depends on what, and can I act on it right now?*
 
 ---
 
-## Installing it
+## 🧭 How it fits together
 
-Three ways in, and they differ only in what you already run. Step by step, with
-the failure modes named, is [`INSTALL.md`](INSTALL.md).
+```mermaid
+flowchart LR
+    subgraph host ["Each managed host"]
+        engine[("Docker engine")] -->|"local socket"| agent["bystack-agent<br/>Rust · one static binary"]
+    end
+    agent -->|"mTLS · one outbound stream"| controller["Controller<br/>graph · correlation · API"]
+    controller -->|"WebSocket deltas"| dashboard["Dashboard"]
+```
+
+Agents **dial out**. A managed host opens no port, publishes no Docker socket and needs no inbound firewall rule, which is what makes it work behind NAT. The Controller decides; the agent observes and obeys.
+
+---
+
+## 🚀 Quick start
+
+Three ways in. They differ only in what you already run. The step-by-step, with the failure modes named, is in [INSTALL.md](INSTALL.md).
+
+**On a Linux server with systemd.** One command. This is the only install that can update itself from the dashboard.
 
 ```bash
-# 1. One command. The Controller as a single file, plus the root component that
-#    replaces it -- both verified against a key that is not on the machine
-#    serving them. Needs systemd and a python3.12, and is the only install that
-#    can update itself from the dashboard (ADR-0018).
-curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-controller.sh \
-  | sudo sh
-#    -> http://127.0.0.1:8000
+curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-controller.sh | sudo sh
+```
 
-# 2. The container. The Controller manages the engine it is mounted against.
+Then open `http://127.0.0.1:8000`. The first visit asks you to create your administrator account.
+
+> [!TIP]
+> On a server you reach over SSH, forward the port from your own machine and leave the server on loopback:
+>
+> ```bash
+> ssh -N -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8000 you@your-server
+> ```
+>
+> Then open `http://127.0.0.1:8080`.
+
+**In a container.** The Controller manages the engine it is mounted against.
+
+```bash
 git clone https://github.com/yaliby/bystack.git && cd bystack
 echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" > .env
 docker compose up -d --build
+```
 
-# 3. From a checkout. `scripts/build-agent.sh` produces the static binaries.
+**From a checkout.** For development.
+
+```bash
 ./scripts/build-agent.sh && (cd frontend && npm ci && npm run build)
 pip install -e backend && bystack
 ```
 
-Adding hosts is a form: paste the addresses, give a root login, press
-**Install the agent**. The Controller logs in over SSH one machine at a time,
-uploads the agent and the installer, waits for each to dial back, and stops if
-one fails.
+### Adding a host
 
-**The credential is used to open one connection and is never kept** — no host
-list, no stored key, nothing to reconnect with
-([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md)). That matters more
-than the convenience does: a Controller that held root for every host would be
-the arrangement [ADR-0008](docs/adr/0008-controller-agent-topology.md) deleted,
-and a compromised one would be a fleet. This one is compromised and gains
-nothing, because there is nothing on it to find.
+Open **Hosts → Add host** in the dashboard, and give the machine's address and a root login. The Controller installs the agent over one SSH connection, waits for the machine to dial back, and moves on to the next one, stopping if one fails. A new host contributes nothing until you approve it.
 
-Nothing has to be opened on the target and nothing on it needs internet: the
-binary goes over the same connection.
+The credential is used for that one connection and is **never stored**: there is no host list, no saved key and nothing to reconnect with ([ADR-0019](docs/adr/0019-agent-deployment-over-ssh.md)).
 
-For a host the Controller cannot reach — behind NAT, on a laptop — the same
-dialog hands you the command instead, with the token already in it:
+A machine the Controller cannot reach, such as one behind NAT, gets a command to run on it instead, with the token already in it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yaliby/bystack/v0.5.0/scripts/install-agent.sh \
   | sudo sh -s -- --controller wss://controller:8443 --token bst1.…
 ```
 
-It fetches one static binary, checks it against the release's signed manifest
-where there is one and its `SHA256SUMS` otherwise, installs a hardened systemd
-unit and the four that upgrade it later, and starts it. `--binary` skips the
-download for a network with no egress; `--uninstall` removes everything except
-the certificate, because that is this host's identity and not ours to discard.
+---
 
-**Upgrading an agent needs none of this.** It is a separate mechanism that was
-already there: the Controller pushes a signed release down the connection each
-host already holds, the host verifies it against a key compiled into itself,
-and puts the old binary back if the new one cannot reach home
-([ADR-0017](docs/adr/0017-agent-upgrade-signed-push.md)). SSH is for the first
-install and nothing else.
+## ✨ Features
 
-Upgrading the one-command install is the **Update system** button, and the
-fleet follows it without being asked: the machine pulls the next signed
-release, runs it once to see that it starts *before stopping anything*, swaps
-the file, puts the old one back if the new Controller does not answer within
-three minutes, and then rolls the fleet forward one host at a time
-([ADR-0018](docs/adr/0018-controller-self-update.md)). `sudo bystack-manager
-request` is the same thing without a browser.
+| | |
+|---|---|
+| 🗺️ **Live topology** | Containers, services, stacks, volumes and the networks they publish on, correlated into one graph. Changes arrive as deltas over a WebSocket. |
+| 🔌 **Outbound-only agents** | One static Rust binary per host, about 2 MiB, dialling the Controller over mutual TLS. Managed hosts open no port and expose no Docker socket. |
+| ⚙️ **Lifecycle operations** | Start, stop, restart, pause, unpause and kill a container, a service or a whole stack. A service fans out to its containers, and one failure does not hide the other five. |
+| 🧩 **Units and processes** | Watch the systemd units and processes you select, and operate them through the same verbs. |
+| 📜 **Logs** | One-shot or live tail of a container's output, with backpressure handled end to end. |
+| 🧾 **Audit trail** | Every attempt is recorded, refusals included, with the account that asked. It survives restarts. |
+| 🔐 **Sign-in** | Accounts with scrypt hashes, rate limits and lockout, and optional BYheaven single sign-on. |
+| 🚚 **Upgrades from the dashboard** | The Controller and the fleet are upgraded from signed releases, one host at a time. A host that cannot reach the Controller again goes back to its previous binary by itself. |
+| 🧰 **`bystack-ctl`** | The same operations from a terminal, including account management. |
 
-Upgrading the container is `git pull && docker compose up -d --build`, and then
-the fleet from the **Hosts** panel or `bystack-ctl upgrade` once the Controller
-holds a signed release. Every host needs the line above run on it once more
-first, without the token — the missing token is what makes it an upgrade rather
-than a second host, and an agent from before ADR-0017 has no updater unit for
-the Controller to trigger.
-[`INSTALL.md`](INSTALL.md#upgrading) has the order and the two things that
-collide; [`CHANGELOG.md`](CHANGELOG.md) has what each release changed.
+---
 
-Everything an operator can do in the dashboard is also in `bystack-ctl`:
+## 🚧 Status
 
-```bash
-bystack-ctl status              # health, what is observed, whether hosts can join
-bystack-ctl token               # mint a token, print the command to paste
-bystack-ctl hosts               # the fleet, and which rows need a decision
-bystack-ctl approve <engine-id>
-bystack-ctl deploy 10.0.0.5     # install the agent there, over SSH
-bystack-ctl upgrade --watch     # roll a signed release out, one host at a time
+v0.5. The whole path works from the dashboard: install, sign in, operate, upgrade.
+
+| Built | Not built yet | Decided against |
+|---|---|---|
+| Discovery over outbound agents | Durable graph history | Destructive verbs: `remove`, `prune`, volume deletion ([ADR-0014](docs/adr/0014-no-user-identity.md)) |
+| Lifecycle operations on containers, services and stacks | Roles and per-account permissions ([ADR-0020](docs/adr/0020-authentication.md)) | Metrics collection, which Prometheus already does ([ARCHITECTURE §12](ARCHITECTURE.md#12-non-goals)) |
+| Watched units and processes | Two-factor sign-in | |
+| Live logs | A plugin system | |
+| Mutual TLS, join tokens, automatic renewal | | |
+| Signed upgrades for agents and the Controller | | |
+| Accounts, sign-in and BYheaven single sign-on | | |
+
+---
+
+## 🔐 Security
+
+ByStack is a control plane for machines you own, and it has root-equivalent reach over them. The defaults are conservative on purpose.
+
+| Question | Answer |
+|---|---|
+| **Who can use the dashboard?** | Signed-in accounts only, and that is on by default. The first visit creates the administrator. |
+| **What can an account do?** | Start, stop, restart, pause, unpause and kill. **Nothing deletes.** There is no `remove`, `prune` or volume deletion, and there will not be without an ADR that says what authorizes them. |
+| **Are there roles?** | Not yet. Accounts say *who* asked, not *who may*, so every account can do everything the verbs allow. |
+| **Where does the Controller listen?** | On loopback by default. Binding to `0.0.0.0` is your decision about the network. |
+| **How do agents prove who they are?** | Mutual TLS against an internal CA, single-use join tokens, and your approval for each host. |
+| **Can a compromised Controller take over the fleet?** | It can withhold an upgrade, but it cannot force one. Every host verifies a release against a key compiled into its own agent. |
+| **Does the Controller keep host credentials?** | No. An SSH credential is used for one install and then dropped. |
+| **Is anything recorded?** | Every attempted operation, durably, with the account that asked. |
+
+> [!IMPORTANT]
+> A session is a password, and the dashboard speaks plain HTTP. Keep it on loopback and reach it over `ssh -L`, or put a TLS proxy in front of it, before you expose it on a network.
+
+> [!WARNING]
+> The optional unit and process grants let the agent stop **any** systemd unit and signal **any** process on that host. The only bound is the host's watch list, which any signed-in account can edit. Install them only on hosts where that is a trade you have chosen on purpose. See [`packaging/polkit/49-bystack-agent.rules`](packaging/polkit/49-bystack-agent.rules) and [ADR-0016](docs/adr/0016-watched-units-and-processes.md).
+
+---
+
+## 🧱 Architecture
+
+The Controller holds the graph, the policy and the API. The agent observes and obeys. Dependencies point strictly inward: the domain kernel imports nothing outward, and every external system is a provider behind a port. [ARCHITECTURE.md](ARCHITECTURE.md) has the reasoning, and [docs/adr/](docs/adr/) has the decisions behind it.
+
+```
+backend/src/bystack/    the Controller (Python)
+  core/                 domain kernel: identity, graph, ports
+  providers/            one per external system, each independent of the others
+  runtime/              collector, command service, sign-in, upgrades
+  infra/                event bus, audit log, watch lists, accounts, SSH deploy
+  api/                  FastAPI routes, the sign-in gate, the dashboard
+agent/                  bystack-agent (Rust): one static binary, about 2 MiB
+proto/                  the wire contract both sides are written against
+frontend/src/           the dashboard (React and TypeScript)
+scripts/                installers, builds, release signing
+packaging/              systemd units, the polkit rule, the container config
+docs/                   decisions, handoff notes, migration, pitfalls
 ```
 
 ---
 
-## Running it
+## 🔧 Operating
 
-### Backend
+### From the terminal
 
 ```bash
-cd agent   && cargo build --release      # the Controller spawns this for itself
-cd backend
-python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/python -m bystack                       # manages this machine
+bystack-ctl status               # is it healthy, and what does it see
+bystack-ctl hosts                # the fleet, and which rows need a decision
+bystack-ctl token                # mint a join token and print the command for the host
+bystack-ctl approve <engine-id>  # let an enrolled host contribute
+bystack-ctl deploy 10.0.0.5      # install the agent there over SSH
+bystack-ctl upgrade --watch      # roll a signed release out, one host at a time
+bystack-ctl user add alice       # accounts: add, passwd, enable, disable, list
+```
+
+On the Controller's own machine, `bystack-ctl` reads the control key from the state directory. From anywhere else, set `BYSTACK_CTL_KEY` to that key. On a packaged install, the same commands are `bystack-controller ctl …`.
+
+### The API
+
+Everything is under `/api/v1`, and every route except the health probe and the sign-in routes needs a session, or the control key as `Authorization: Bearer`.
+
+| Method | Route | What it does |
+|---|---|---|
+| `GET` | `/healthz` | Service and per-provider health. Public, for probes. |
+| `GET` | `/graph` | The full snapshot |
+| `WS` | `/stream` | A snapshot, then incremental deltas |
+| `GET` | `/graph/node/logs?urn=…` | A container's recent output. `…/logs/stream` follows it live. |
+| `POST` | `/commands` | Run one operation |
+| `GET` | `/commands/actions?urn=…` | What is permitted on a node right now |
+| `GET` | `/commands/audit` | Recent operations, including refusals |
+| `GET` | `/agents` | The fleet |
+
+Interactive docs are at `/docs`, behind the same sign-in.
+
+### Read-only
+
+`read_only: true` turns the Controller into a viewer. The refusal is enforced in two places: the Controller's command service, and each agent on its own authority. Discovery keeps working either way.
+
+---
+
+## 📝 Configuration
+
+Configuration says only *where to look*. It never describes topology, which is discovered. The full reference is [`backend/bystack.example.yaml`](backend/bystack.example.yaml).
+
+```yaml
+agents:
+  enabled: true                       # the fleet listener; off until you turn it on
+  listen: "0.0.0.0:8443"              # where agents dial in, separate from the dashboard
+  server_names: [controller.example]  # the name agents type; the certificate must cover it
+  auto_approve: false                 # a valid join token still needs your approval
+
+api:
+  host: 127.0.0.1                     # the dashboard; keep it on loopback unless you mean otherwise
+  port: 8000
+
+auth:
+  required: true                      # `false` restores the old no-login behaviour
+  # setup_token: ...                  # 8+ characters, or BYSTACK_SETUP_TOKEN
+  # sso_secret: ...                   # 32+ characters, or BYSTACK_SSO_SECRET
+
+read_only: false                      # `true` makes this a viewer
+audit:
+  durable: true                       # the operations log survives a restart
+```
+
+`server_names` is the field a real deployment must set. It is what agents type after `wss://`, and a certificate without that name fails verification correctly and confusingly.
+
+---
+
+## 🧪 Development
+
+```bash
+# The Controller, from backend/
+python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/python -m bystack --config bystack.yaml
+
+# The dashboard, from frontend/: http://localhost:5173, with /api proxied to the Controller
+npm ci && npm run dev
+
+# The agent, from agent/. The Controller spawns this binary for its own machine.
+cargo build --release
 ```
-
-Serves on `http://127.0.0.1:8000` — loopback by default, because this service
-holds root-equivalent access to every engine it manages.
-
-Zero-config means *this machine, and nothing else yet*. The Controller spawns
-a local agent over a unix socket and the graph fills from it; other hosts join
-by installing an agent and enabling `agents.enabled`. The Controller itself
-still reaches no Docker socket — its child does, exactly as on every other
-host.
-
-If it cannot spawn one — no engine here, no binary, or `local_agent.enabled:
-false` — the Hosts panel says which, because those are four different
-situations that otherwise look like the same empty canvas.
-
-- `GET  /api/v1/healthz` — service and per-provider health
-- `GET  /api/v1/graph` — full snapshot
-- `GET  /api/v1/graph/node?urn=…` — one node
-- `GET  /api/v1/graph/node/edges?urn=…` — relationship tracing
-- `GET  /api/v1/graph/node/logs?urn=…&tail=…` — a container's recent output
-- `GET  /api/v1/graph/node/logs/stream?urn=…` — the same log, followed live (SSE)
-- `WS   /api/v1/stream` — snapshot, then incremental deltas
-- `WS   /api/v1/agents/connect` — where agents dial in (protobuf frames)
-- `POST /api/v1/commands` — run an operation
-- `GET  /api/v1/commands/actions?urn=…` — what is permitted on a node right now
-- `GET  /api/v1/commands/audit` — recent operations, including refusals
-- `GET  /docs` — OpenAPI
-
-**Docker socket permission** is now the *agent's* problem, not the
-Controller's — the Controller never opens one. The socket is owned by
-`root:docker`, so on each managed host, this one included:
-
-```bash
-sudo usermod -aG docker "$USER"   # then log out and back in
-```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev     # http://localhost:5173, proxies /api to the backend
-```
-
-### Tests
 
 ```bash
 cd backend  && .venv/bin/python -m pytest && .venv/bin/ruff check src tests
 cd frontend && npm run typecheck && npm test
 cd agent    && cargo test
-
-# Layout, in a real browser. `fit` is kept off the floating topbar, legend and
-# panels by six numbers in App.tsx that stand for their measured extent, and
-# jsdom has no layout to catch one going stale. Needs chrome-headless-shell;
-# not in CI.
-cd frontend && npm run measure
-
-# End to end: the real agent, a scripted engine, the real Controller.
-cd backend && .venv/bin/python -m bystack.conformance \
-                 ../agent/target/release/bystack-agent
-
-# And with three agents, three engines and one Controller.
-cd backend && .venv/bin/python -m bystack.conformance.fleet \
-                 ../agent/target/release/bystack-agent
-
-# And zero-config: the Controller spawning an agent for its own machine.
-cd backend && .venv/bin/python -m bystack.conformance.local \
-                 ../agent/target/release/bystack-agent
 ```
 
-No test anywhere in this repo requires a Docker daemon or a network — the
-agent talks to a socket, so the conformance harness gives it one.
+The agent is verified by executable specifications, not by a checklist. Each suite starts a scripted Docker engine on a unix socket and a real Controller, runs the real agent between them, and asserts the behaviour:
+
+| Suite | Checks | Covers |
+|---|---|---|
+| `python -m bystack.conformance` | 32 | One agent, one engine, one Controller |
+| `python -m bystack.conformance.fleet` | 36 | Three agents, three engines, one Controller: partition isolation, partial outages, read-only at both choke points |
+| `python -m bystack.conformance.local` | 17 | Zero-config: the Controller spawns an agent for its own machine |
+
+```bash
+cd backend && .venv/bin/python -m bystack.conformance ../agent/target/release/bystack-agent
+```
+
+No test in the repository needs a Docker daemon or a network. Several of the checks exist because their failures are invisible at runtime: the agent works, the map looks right, and it quietly costs a hundred times more than it should. Those are listed in [docs/PITFALLS.md](docs/PITFALLS.md).
 
 ---
 
-## Operating it
+## 📚 Documentation
 
-Discovery is read-only and always on. Operations work out of the box, because
-the live map is the control surface and a map that refuses every action is a
-diagram ([ADR-0014](docs/adr/0014-no-user-identity.md)):
-
-```yaml
-read_only: true       # the default is false; set this to get a viewer back
-```
-
-Left alone, a container, service or stack can be started, stopped,
-restarted, paused, resumed or killed — from the inspector panel, or directly:
-
-```bash
-curl -X POST localhost:8000/api/v1/commands \
-  -H 'content-type: application/json' \
-  -d '{"kind": "restart", "target": "bystack:service:<engine>/shop/web"}'
-```
-
-Three things about that are worth knowing before you rely on it:
-
-- **A logical target fans out.** Restarting a *service* restarts every
-  container realizing it; a *stack* fans out through its services. The
-  response reports each container separately, and one failure among six does
-  not hide the other five.
-- **The graph does not change when the command returns.** It changes when
-  discovery observes the transition, a moment later. The UI says
-  *"Applied · waiting for discovery to confirm"* during that window rather
-  than pretending it already happened — see [ADR-0012](docs/adr/0012-operations-and-audit.md).
-- **Nothing here deletes anything, and nothing will.** Only reversible
-  lifecycle transitions exist. `remove` and `prune` are not pending work:
-  [ADR-0014](docs/adr/0014-no-user-identity.md) decides this is a
-  single-operator LAN control plane with no login, and a control plane with no
-  authentication has no business owning a verb that destroys data. Restarting
-  the wrong container is recoverable and audited; pruning the wrong volume is
-  neither. The two decisions hold each other up.
-
-**Activity** in the topbar is the timeline of everything that has been run,
-including what was refused and why — a read-only Controller declining to
-restart a dead service is the most useful line the log holds, and one that
-showed only successes would omit exactly the entry someone came looking for.
-Each row is a way back to the node: clicking it selects the target on the
-canvas, and a target that has since been recreated under a new id says so
-rather than offering a click that does nothing.
-
-It survives a restart — the log is a JSON Lines file in `agents.state_dir`,
-bounded at 20,000 operations and compacted in place (ADR-0012 §4a). Writes are
-fsynced per record but happen off the event loop, so a slow disk delays the
-operator and not every agent's connection (§4b). Every entry is attributed to
-`anonymous`, permanently and by design, and the panel says so — a timeline read
-as an audit log would otherwise be trusted for exactly the question it does not
-answer. The same data is at `GET /api/v1/commands/audit`.
-
-Set `audit.durable: false` for a Controller with nowhere to write; it falls
-back to a bounded in-memory ring rather than refusing to start, and says so at
-ERROR.
-
----
-
-## The agent path
-
-The Controller side of ADR-0008 is built. Agents dial in, push observations
-and receive commands over one long-lived stream; managed hosts open no port
-and publish no Docker socket.
-
-```yaml
-agents:
-  enabled: true                 # binds the listener; off until asked
-  listen: "0.0.0.0:8443"        # separate from the UI port, deliberately
-  server_names: [controller.example]   # what the certificate covers
-  auto_approve: false           # a valid token still needs operator approval
-  cert_ttl_days: 90
-  state_dir: "~/.local/state/bystack"  # the CA key. Back this up.
-  resync_interval: 900
-
-audit:
-  durable: true                 # the operations log survives a restart
-  retain: 20000                 # ADR-0006 clause 4: bounded by count, not by age
-  # path: ""                    # empty means inside agents.state_dir
-```
-
-`server_names` is the field a real deployment must set: it is what agents will
-have typed after `wss://`, and a certificate without that name in it fails
-verification correctly and confusingly.
-
-### Enrolling a host
-
-From the topology map, which is where it belongs: adding a host is a change to
-the picture, not a trip to a settings page.
-
-1. **Hosts** in the topbar opens the fleet panel. **Add host** mints a join
-   token and shows the command to run on the machine, ready to copy. The token
-   is single-use, expires in fifteen minutes — the panel counts it down — and
-   is **shown exactly once**: the Controller keeps only a digest of it, so
-   closing the dialog loses it and you mint another.
-2. Paste the command on the host. It assumes `bystack-agent` is already there;
-   there is no installer yet (see [the agent](#the-agent)).
-3. The host appears in the panel as **awaiting approval**, at the top of the
-   list, and contributes nothing to the topology until you approve it there.
-   That is deliberate and it is half of ADR-0011's argument: a stolen token
-   produces a visible pending host rather than a silent managed one. There is
-   no "approve all", and the UI never approves anything on its own.
-
-Each row carries two badges rather than one, because *approved* and
-*connected* are different questions. A host that is approved and asleep is
-ordinary; so is one that is revoked and still streaming until its connection
-drops. A host whose agent has gone away keeps its topology on the canvas and
-is drawn as stale — the last thing it told us, which is not the same as
-nothing.
-
-Revoking asks first, by name.
-
-The same four routes drive everything above, and are the scriptable path.
-`bystack-ctl` is a thin layer over exactly these, for when curl and jq is more
-typing than the job deserves:
-
-```bash
-# 1. Mint a token on the Controller. Single-use, 15 minutes by default, and it
-#    carries the CA's fingerprint so the agent can authenticate the Controller
-#    before sending the secret.
-curl -sX POST localhost:8000/api/v1/agents/tokens -d '{"ttl_minutes": 15}' \
-     -H 'content-type: application/json'
-# -> {"token": "bst1.<sha256>.<secret>",
-#     "install": "curl -fsSL .../install-agent.sh | sudo sh -s -- --controller ...",
-#     "manual":  "bystack-agent --controller ... --token ..."}
-
-# 2. On the managed host. `install` puts the agent there and runs it as a
-#    service; `manual` is the same enrolment on a host that already has the
-#    binary. The agent generates its own key, never sends it, and stores the
-#    certificate it gets back.
-sudo sh install-agent.sh --controller wss://controller.example:8443 --token bst1....
-
-# 3. Approve it. Until you do, the agent is connected and contributing nothing
-#    — which is what makes a stolen token visible instead of silently effective.
-curl -s localhost:8000/api/v1/agents
-curl -sX POST localhost:8000/api/v1/agents/<engine-id>/approve
-
-# Revoking is the same shape, and takes effect on the next connection: it is an
-# allow-list check, so there is no CRL to publish and nothing to wait for.
-curl -sX POST localhost:8000/api/v1/agents/<engine-id>/revoke
-
-# Whether a host can join at all. Minting works with the listener off — it is
-# how you get to the point of turning it on — so this is the one thing a
-# successful mint does not tell you.
-curl -s localhost:8000/api/v1/agents/enrollment
-# -> {"enabled": true, "auto_approve": false, "listen": "0.0.0.0:8443"}
-```
-
-Certificates last 90 days and are **renewed by the Controller at two thirds
-elapsed, over the connection that is already open and already authenticated**.
-No cron job, no second channel, no expiry outage.
-
-### The agent
-
-One static binary, written in Rust ([ADR-0013](docs/adr/0013-agent-in-rust.md)).
-
-```bash
-cd agent && cargo build --release
-./target/release/bystack-agent --controller wss://controller:8443 --token bst1....
-./target/release/bystack-agent --controller wss://controller:8443   # already enrolled
-```
-
-There is no insecure mode: no flag, no environment variable, and `ws://` is
-refused with a message saying why. The SSH transport had one
-(`insecure_skip_host_key_check`) and it was already a documented footgun; this
-connection hands a remote party commands to run as root.
-
-Measured managing 100 containers — the budget it is held to is in
-[ADR-0010](docs/adr/0010-agent-implementation-language.md), and it comes in an
-order of magnitude under it:
-
-| | Budget | Measured (MiB) | Before mTLS |
-|---|---|---|---|
-| Binary, static, stripped | < 12 | **1.82** | 0.82 |
-| RSS after a full sync | < 20 | **3.95** | 2.92 |
-| CPU, idle | < 0.1 % | **0.00 %** | 0.00 % |
-| Connect + enrol + full sync | — | **29 ms** | 25 ms |
-
-The third column is what mutual TLS cost — rustls, `ring` and `rcgen`. Recorded
-rather than quietly overwritten: "under budget" only means something if the
-movement is visible. The unix-socket endpoint added 0.05 MiB on top of it,
-which is the entire cost of the Controller managing its own machine.
-
-Building it needs nothing but a Rust toolchain — no `protoc`, because the
-compiled descriptor set is checked in.
-
-### Conformance
-
-The agent is verified by an executable specification, not by a checklist:
-
-```bash
-cd backend
-.venv/bin/python -m bystack.conformance ../agent/target/release/bystack-agent
-```
-
-This starts a **scripted Docker Engine** on a unix socket and a Controller,
-runs the agent between them, and drives thirty-two behaviours. It is
-language-agnostic: any reimplementation is checked by the same command.
-
-Three of the checks exist because the failures are **invisible at runtime** —
-the agent works perfectly, the topology looks right, and it either costs a
-hundred times more than it should or silently loses a change:
-
-- `status string excluded from the hash` — hashing Docker's rendered status
-  re-sends every container on every resync, per host, forever.
-- `burst coalescing` — 40 events must cost one List, not forty.
-- `membership carries deletion` — a removal changes no payload, so an agent
-  that only sends when a payload moved never reports it, and the container
-  stays on the operator's canvas forever. This check found exactly that bug in
-  our own agent.
-
-### Fleet conformance
-
-```bash
-.venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent
-```
-
-Three real agents, three scripted engines, one Controller — because everything
-ADR-0008 actually claims is a property of the *fleet*, and a single-agent run
-is structurally blind to all of it. Thirty checks covering partition
-isolation, engine-scoped logical identity, cross-host image correlation, a
-partial outage degrading one host and no other, no resurrection across a
-reconnect, command routing, log reads routed the same way, and read-only
-enforced at both choke points.
-
-One host in the fixture carries a pre-25.0 colon-delimited engine id and two
-share an image digest, so the two cases where an identity is spelled more than
-one way are unavoidable rather than optional.
-
-This is the run that found the shared-image partition bug below.
-
-### Parity — the correctness gate, now retired
-
-The two runs above script the engine, so both were blind to the same thing:
-what a **real** daemon puts on the wire. `bystack.conformance.parity` pointed
-the agent *and* the agentless implementation at one live socket, on two
-Controllers with two stores, and compared the graphs entity by entity and edge
-by edge — the agentless path being the oracle, since it had read real daemons
-since before the pivot.
-
-**It failed on its first run**, against a laptop daemon running 9 containers
-in 3 compose stacks: the agent could not read a real Docker socket at all, and
-no scripted run could have said so. See the `serde` entry below. With that
-fixed: **41 entities and 75 edges, identical by content hash** — which closed
-the gate in [`docs/MIGRATION.md`](docs/MIGRATION.md) §3 and licensed step 6.
-
-It was deleted with the oracle it compared against; a parity harness with one
-implementation left has nothing to say. The lesson it found outlived it, in
-the fixtures: `conformance/engine.py` now returns `null` where a real daemon
-returns `null`, so the class of defect it caught is held with no daemon
-required.
-
-> **Authenticated, both directions.** Every connection is mutual TLS against
-> the Controller's internal CA, the Engine ID is bound into the certificate
-> subject, and an agent whose `Hello` disagrees with its own certificate is
-> refused. The listener still defaults to off — not because we cannot tell who
-> is calling, but because it binds a port, usually a public one, and a
-> Controller started to look at a graph should not open one unasked.
-
-Why the delta protocol is shaped the way it is, measured on the real encoder
-for a compose-managed host of 100 containers:
-
-| Frame | Size |
+| Document | What it is for |
 |---|---|
-| Every payload | 119.5 KB |
-| Authoritative delta — 100 ids, 1 changed | 7.6 KB |
-| Steady state — ids only | 6.5 KB |
-| Idle host | 0 B |
+| [INSTALL.md](INSTALL.md) | Every install path, step by step, with the failure modes named |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | The topology, the split of responsibility, and the decisions in one place |
+| [docs/adr/](docs/adr/) | Each decision that is hard to reverse, with the reasons it was made |
+| [docs/PITFALLS.md](docs/PITFALLS.md) | Traps that cost real debugging time, each pinned by a test |
+| [docs/OPEN-WORK.md](docs/OPEN-WORK.md) | The handoff: how to get a green baseline, what is left, and what is already decided |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | The move from the agentless design to agents |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each release, and what you have to do about it |
 
-Every frame carries the slice's **complete id set**, so the Controller runs a
-full authoritative `reconcile()` on each one at delta cost — which deletes the
-entire class of bug where an incremental path drifts from the reconcile path
-meant to repair it. See [ADR-0009](docs/adr/0009-agent-wire-protocol.md).
-
-Changing the contract:
-
-```bash
-$EDITOR proto/bystack/agent/v1/agent.proto
-cd backend && .venv/bin/python scripts/generate_proto.py
-```
-
-The generated bindings are checked in, so installing ByStack never needs a
-protobuf compiler. `test_wire.py` fails if the committed copy drifts from the
-schema, and separately if `mapper.py` starts reading a Docker field the wire
-does not carry.
-
----
-
-## Configuration
-
-Configuration says only *where to look*. It never describes topology — that is
-discovered. See [`bystack.example.yaml`](backend/bystack.example.yaml).
-
-Under the agent model it says even less, because agents arrive rather than
-being reached:
-
-```yaml
-agents:
-  listen: "0.0.0.0:8443"      # where agents dial in; separate from the UI port
-  auto_approve: false         # a valid join token still needs operator approval
-  resync_interval: 900        # 15m — the event stream is local now
-
-read_only: false              # the default; `true` makes this a viewer
-api:
-  host: 127.0.0.1
-  port: 8000
-```
-
-A `hosts:` block is the agentless form and is now a **hard error** naming
-`docs/MIGRATION.md`, rather than a silent migration. Pydantic ignores unknown
-keys by default, which would have meant a Controller that started cleanly,
-reported healthy and discovered nothing — indistinguishable from a cluster
-that is simply empty.
-
----
-
-## Layout
-
-```
-backend/src/bystack/          the Controller
-  core/          domain kernel — identity, graph, ports. Imports nothing outward.
-  providers/     one per external system, mutually independent
-    docker/        Docker's vocabulary — the mapper, and the state->commands policy
-    agent/         the agent path — ingest, provider, command correlation
-  agent/v1/      generated wire bindings (do not edit; see scripts/generate_proto.py)
-  infra/         event bus, audit log
-  runtime/       collector + agent registry, the command service
-  api/           FastAPI, Pydantic, WebSocket — the only layer that serializes
-
-proto/bystack/agent/v1/       the contract — the only file both sides are
-                              written against
-
-agent/                        the Agent (Rust) — one static binary, no runtime
-  src/docker.rs       local socket client
-  src/informer.rs     List / Watch / coalesce
-  src/hashset.rs      change detection (the Status trap lives here)
-  src/session.rs      WebSocket + protobuf framing, reconnect
-  proto/agent.bin     checked-in descriptor set, so no protoc to build
-
-frontend/src/
-  api/                    wire types, mirroring the backend schemas
-  features/topology/
-    model/                graph state machine + live subscription (no React in the state machine)
-    layout/               incremental force layout and node geometry
-    ui/                   canvas renderer, inspector, legend
-  features/operations/
-    model/                action policy, result rendering, confirmation-by-revision
-    ui/                   the action bar
-```
-
-Dependencies point strictly inward. Every crossing goes through a Protocol in
-`core/ports/`.
-
----
-
-## Things that will bite you
-
-Each of these cost real debugging time and is defended by a test:
-
-- **Docker's `Status` field is a rendered string** (`"Up 3 hours"`). Putting it
-  in a node's content hash re-emits every container on every reconcile and
-  turns incremental sync into a full refresh on a timer. **This trap now
-  exists twice** — once in the Controller's node hash, once in the Agent's
-  change detection, where it would put every payload on the network every
-  resync, per host, forever. Both exclusions are pinned by tests, because the
-  symptom is not an error: it is a system that works perfectly and costs 100×
-  more than it should.
-- **A delta must carry the full id set, not just the changes.** The store's
-  `reconcile` deletes whatever is absent, so a changes-only frame would delete
-  every stable container on the host. Ids are cheap, payloads are not — see
-  [ADR-0009](docs/adr/0009-agent-wire-protocol.md).
-- **Edges are owned by one endpoint, not both.** A kind-scoped reconcile that
-  claims every edge it merely touches will delete relationships it does not
-  declare, forever fighting the slice that does declare them.
-- **Record the watch's `since` before the initial List**, never after, or
-  changes landing during the List are lost with no detectable gap.
-- **`asyncio.TaskGroup` wraps errors in an `ExceptionGroup`**, so
-  `except SomeError` in a supervisor silently never matches.
-- **Engine IDs come in two formats** — a colon-delimited fingerprint before
-  Docker 25.0, a UUID after. Both appear in a mixed fleet.
-- **Docker answers a redundant start/stop with `304`, not `204`.** It is
-  telling you precisely that nothing happened. Folding it into success reports
-  a restart that changed nothing as a restart that worked.
-- **`request.timeout or DEFAULT` is wrong for a grace period.** `timeout=0` is
-  `docker stop -t 0` — "do not wait" — and truthiness turns the one operator
-  who explicitly asked for no grace into the one who silently gets ten
-  seconds. Read it with `is None`.
-- **A command must not update the graph, however tempting.** The one-second
-  window where the UI still shows the old state is the price of never
-  displaying something the infrastructure did not report. See
-  [ADR-0012](docs/adr/0012-operations-and-audit.md) §2.
-- **Waiting on a `noop` target for confirmation hangs the UI forever.** Its
-  content revision will never change, because nothing changed. Only witness
-  targets that actually transitioned.
-- **An authoritative delta needs a payload cache on the Controller.** The
-  frame carries every id but only the changed payloads, and `reconcile` needs
-  a *node* for each id. Reconciling with just the frame's payloads deletes
-  every stable container on the host — the exact bug the protocol was designed
-  to make impossible, reintroduced in the code that implements it.
-- **Clear that cache on disconnect.** Keep it, and a reconnecting agent's
-  first frame is applied against a picture from before the gap, resurrecting
-  containers that were removed while it was away. Silent, and only visible as
-  a container that will not go away.
-- **The engine id has two spellings.** `engine_scope()` strips the colons for
-  URNs, so a partition keyed by the raw id gives one host two identities:
-  `node.source` says one thing and every URN says another, and
-  `/graph?sources=` matches neither. Normalize at the registry, once.
-- **`repeated` proto fields cannot distinguish empty from unset.** Passing
-  `None` to mean "all slices" and `[]` to mean "none" encodes identically.
-  Pick the reading that makes an empty list harmless.
-- **A removal changes no payload.** Every surviving container hashes exactly as
-  before, so an agent that decides to stay silent on "no payload moved" never
-  reports a deletion — and since deletion is carried *only* by absence from the
-  id set, it is then never reported at all. Membership has to be compared
-  separately. Our own agent had this bug; `bystack.conformance` found it.
-- **Hash Docker's labels from an ordered map.** A `HashMap` iterates
-  differently per process, so hashing one makes every container look changed on
-  every List. Same failure as hashing `Status`, by a different route.
-- **One URN is legitimately shared by two partitions.** Image identity is the
-  content digest and is deliberately *not* engine-scoped — that coincidence is
-  the free cross-host correlation. It is therefore the one place a partition
-  can reach outside itself, and a reconcile that deletes the node on the first
-  claimant's say-so removes an image other hosts are still running and takes
-  their `uses_image` edges with it. The trigger is not exotic: any host
-  stopping the last container using a shared image re-projects its image slice
-  and blanks that image across the entire fleet. Silent, no error anywhere, and
-  it repairs itself only at the next resync — and it is a *cross-partition
-  write* performed by the mechanism whose whole job is to make those
-  impossible. `bystack.conformance.fleet` found it; `test_store.py` pins it.
-- **`#[serde(default)]` does not cover `null`.** It covers a field that is
-  *absent*; a field that is present and `null` is still a parse error, and one
-  of those anywhere in a List rejects the whole List — a host that never syncs
-  at all, not a field that goes missing. Docker sends `null` rather than `[]`
-  or `{}` in a dozen ordinary places: `Aliases` on an endpoint, `IPAM.Config`
-  on a network, `Labels` on a volume, `RepoTags` on an untagged image. Our
-  fixtures all said `{}`, so fourteen and twenty-seven checks passed against an
-  agent that could not read a real Docker socket at all. `bystack.conformance.
-  parity` found it on its first real-daemon run; the fixtures now say `null`,
-  which reproduces it with no daemon at all.
-- **A content hash must be a function of content, not of container type.**
-  `EMPTY` is a `MappingProxyType` and `json` cannot serialize one, so it fell
-  to the encoder's fallback rather than its `sort_keys` path and was hashed as
-  its *repr*. Two nodes that compare equal then get different revisions, and a
-  mapping's hash depends on insertion order — which would re-upsert every node
-  on every reconcile, the same failure as hashing `Status`, by a third route.
-- **`RestartCount` is not on `GET /containers/json`.** It exists only on the
-  inspect endpoint, at every API version, so carrying it is not the addition
-  of a field — it is one request per container on every List, in place of one
-  per slice. The agent inspects only containers already listed as
-  `restarting`: bounded, usually empty, and exactly the set the number means
-  anything for. `bystack.conformance` asserts *which* ids were inspected, not
-  how many, because an agent that inspects everything answers correctly and
-  costs a hundred times more.
-- **"Usually empty" is a claim about the median host, and the median host is
-  not the one being watched.** The set above is bounded by how bad the deploy
-  was, so it is also capped at 32 and issued as one batch of overlapping round
-  trips rather than a serial loop. Fifty crash-looping containers used to mean
-  fifty sequential inspects *ahead of every frame*, delaying the containers
-  that were fine along with the ones that were not — the informer's whole cost
-  model inverted, in exactly the situation an operator is staring at it.
-  Conformance slows the scripted inspect to 50 ms so the two shapes are
-  distinguishable at all: 0.36 s batched against 2.41 s serial.
-- **Hashing a counter is only wrong when the counter is a clock.** `Status`
-  advances on wall time and must not be hashed; `RestartCount` advances on an
-  actual restart and must be, or a crash loop is reported once and never
-  again — `restarting` is the same state on the second failure and the four
-  hundredth. The cost is a resend per restart of a looping container, which is
-  a host that has a problem worth a frame. `FailingStreak` sits on the other
-  side of the same line and is deliberately not hashed.
-- **Logs are not a command.** `CommandKind` is the closed set of *mutations* a
-  read-only Controller refuses. Routing a log read through it would refuse to
-  show an operator why a container is failing on the grounds that the platform
-  is in its safe mode — exactly backwards. Its own frame, answered regardless
-  of `read_only` on both sides.
-- **A live tail needs its backpressure answered in three places, not one.**
-  A container in a hot loop outruns a browser, and whichever component absorbs
-  that is the one that breaks. So: the agent batches per HTTP chunk and blocks
-  on a full queue, which stops it reading the daemon; the Controller keeps a
-  bounded queue per subscription and drops the *oldest* lines; the browser
-  holds a fixed buffer. Dropping oldest is the right loss for a live tail —
-  somebody watching output scroll wants the newest lines — and every drop is
-  counted and shown, because a gap the UI does not mark is a log an operator
-  reads as continuous.
-- **A subscription nobody cancels is a `docker logs --follow` running forever
-  on someone else's machine.** So the Controller's side is a context manager,
-  cancelling on any exit including the browser simply going away, and
-  conformance asserts the agent actually drops its connection to the daemon —
-  not merely that a cancel frame was sent.
-- **Ask an agent's `Hello` what it can do; never its version.** A capability
-  absent from the set is the same answer for "too old to know the frame" and
-  "compiled out of this build", and the caller's decision is identical.
-  Sending the frame anyway is worse than refusing: an older agent ignores it
-  silently and the request times out with no diagnosis at all.
+Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing anything. The decisions in it are load-bearing, and several look arbitrary until you know what goes wrong without them.

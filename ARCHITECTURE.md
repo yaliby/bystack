@@ -19,7 +19,7 @@ makes a decision.
                      REST snapshot │ WS delta stream
                         ┌───────▼──────────────────────┐
                         │        Controller            │
-                        │  API · RBAC · graph · policy │
+                        │  API · auth · graph · policy │
                         │  history · scheduling        │
                         └───────┬──────────────────────┘
                     mTLS, one long-lived stream per agent
@@ -74,7 +74,7 @@ The split is not negotiable, and it is not a gradient. Everything that
 |----------------------------------------|------------------------------------|
 | Canonical graph, identity, correlation | Local Docker socket, nothing else  |
 | API, Dashboard, WebSocket to browsers  | List / Watch / coalesce            |
-| AuthN, AuthZ, RBAC, users              | Change detection (content hashes)  |
+| Accounts, sessions, sign-in (ADR-0020) | Change detection (content hashes)  |
 | Topology construction                  | Push changed payloads              |
 | Decisions, policy, scheduling          | Execute commands, report results   |
 | History, audit, durable state          | Heartbeat                          |
@@ -102,7 +102,7 @@ with a mandatory retention policy:
 |-----------------------|--------------------------------------|------------------|
 | Configuration         | User intent, not discoverable        | n/a (config)     |
 | Credentials metadata  | References to secrets, never secrets | n/a              |
-| Permissions / RBAC    | User intent                          | n/a              |
+| Accounts / permissions| User intent (ADR-0020 accounts)      | n/a              |
 | Audit + domain events | The platform's own domain data       | bounded, TTL     |
 
 Agent enrollment records and issued-certificate metadata join category two.
@@ -414,26 +414,25 @@ reason mapping does: only the Controller holds the whole graph.
 **Only reversible lifecycle transitions exist** — start, stop, restart, pause,
 unpause, kill. Nothing destroys state, and that is now **permanent rather than
 pending**. `remove` is one more HTTP call, but it is only defensible once the
-platform can answer *who deleted the database volume* — and
-[ADR-0014](docs/adr/0014-no-user-identity.md) decides that question will not be
-answered. This is a single-operator LAN control plane; at one operator on their
-own network there is nobody to distinguish them from, so a login screen would
-answer "the one person with the password did", which is what having no login
-already says.
+platform can answer *who deleted the database volume* **and who was allowed
+to**. [ADR-0014](docs/adr/0014-no-user-identity.md) decided the first would
+never be answered and ruled the verbs out; [ADR-0020](docs/adr/0020-authentication.md)
+added accounts, so the first now is — and left the verbs out, because there are
+still no roles, and "who" without "who may" would put unrecoverable data loss
+one click from every account.
 
-The two halves hold each other up. With no authentication *and* no destructive
-verb, the worst case is "someone who could reach the port restarted a
-container" — recoverable, audited, and visible in the topology within a second.
-Add `prune` and the worst case becomes unrecoverable data loss with no
-attribution. Only one of those is acceptable without a login, which is why
-adding a destructive verb means superseding ADR-0014 first, not editing an
-enum.
+The two halves still hold each other up, differently. With no destructive
+verb, the worst case is "an account restarted a container" — recoverable,
+named, audited, and visible in the topology within a second. Add `prune` and
+the worst case becomes unrecoverable data loss by anyone holding a login. That
+is why adding a destructive verb means an ADR that says what authorizes it, not
+editing an enum.
 
 The audit log is durable (`infra/audit/durable.py`, ADR-0012 §4a) and answers
-*what was attempted, against what, when, and whether it worked* across
-restarts. Every entry is attributed to `anonymous`, deliberately and forever.
-That was always the half that matters during an incident; *who* is the question
-asked during a dispute between colleagues, and there are none.
+*what was attempted, against what, when, by which account, and whether it
+worked* across restarts. `actor` is the signed-in account's name; it reads
+`anonymous` for entries written before accounts existed and for a Controller
+with `auth.required: false`.
 
 Read-only mode is enforced at **two** choke points now, deliberately:
 
@@ -642,7 +641,10 @@ Controller/Agent pivot onward are separate documents in
 | [0011](docs/adr/0011-agent-trust-and-enrollment.md) | mTLS, join tokens, Engine ID as agent identity |
 | [0012](docs/adr/0012-operations-and-audit.md) | Operations: lifecycle only, logical targets, no optimistic updates |
 | [0013](docs/adr/0013-agent-in-rust.md) | The Agent is written in Rust; supersedes ADR-0010 |
-| [0014](docs/adr/0014-no-user-identity.md) | No user identity; the network is the boundary, and destructive verbs stay out |
+| [0014](docs/adr/0014-no-user-identity.md) | No user identity; the network is the boundary, and destructive verbs stay out (identity half superseded by 0020) |
 | [0015](docs/adr/0015-agent-upgrade.md) | Controller-driven agent upgrade, and why it is not automated |
 | [0016](docs/adr/0016-watched-units-and-processes.md) | Units and processes are *selected*, not discovered; identity is the rule, not the pid |
 | [0017](docs/adr/0017-agent-upgrade-signed-push.md) | Signed push upgrade: the Controller distributes, the host verifies; supersedes ADR-0015 |
+| [0018](docs/adr/0018-controller-self-update.md) | The Controller updates itself from the same signed releases, then cascades to the fleet |
+| [0019](docs/adr/0019-agent-deployment-over-ssh.md) | Agents are installed from the dashboard over SSH, with a credential that exists for one command |
+| [0020](docs/adr/0020-authentication.md) | Accounts and sign-in, with BYheaven single sign-on; the destructive-verb decision stands |

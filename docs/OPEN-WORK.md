@@ -25,13 +25,13 @@ cd agent   && cargo build --release          # do this first; the suites below d
 cd ../backend
 .venv/bin/python -m ruff check src tests
 .venv/bin/python -m mypy src
-.venv/bin/python -m pytest -q                                     # 398 passed
+.venv/bin/python -m pytest -q                                     # 534 passed
 .venv/bin/python -m bystack.conformance       ../agent/target/release/bystack-agent   # 32/32
-.venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent   # 35/35
+.venv/bin/python -m bystack.conformance.fleet ../agent/target/release/bystack-agent   # 36/36
 .venv/bin/python -m bystack.conformance.local ../agent/target/release/bystack-agent   # 17/17
 
-cd ../agent    && cargo clippy --release --all-targets -- -D warnings && cargo test --release  # 49 passed
-cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 243 passed
+cd ../agent    && cargo clippy --release --all-targets -- -D warnings && cargo test --release  # 60 passed
+cd ../frontend && npx tsc --noEmit && npm test -- --run                                        # 311 passed
 ```
 
 Agent binary: **1.96 MiB** against a 12 MiB budget, RSS **~5.00 MiB** against
@@ -50,10 +50,12 @@ Three things that look like failures and are not:
   `agent/target/release/bystack-agent`, so an agent change that is only
   clippy-checked is tested against the *previous* build — which looks exactly
   like a Controller-side bug. `cargo build --release` first, every time.
-- **`git` has no configured identity.** Existing commits use
-  `yaliby <yaliby4@gmail.com>` via environment variables. Match it:
-  `GIT_AUTHOR_NAME=… GIT_AUTHOR_EMAIL=… GIT_COMMITTER_NAME=… GIT_COMMITTER_EMAIL=… git commit`.
-  Do not write to their git config. There is no remote; nothing is pushed.
+- **Push to a branch, not to `main`.** `origin` is
+  [`github.com/yaliby/bystack`](https://github.com/yaliby/bystack), which is
+  public, and `main` is the default branch. Work on a `feat/…` or `fix/…`
+  branch, push that, and merge through a pull request. The identity is set in
+  the local config to the author of the existing commits, so `git commit` needs
+  no environment variables.
 
 ---
 
@@ -132,8 +134,9 @@ The in-memory ring survives as the fallback for a Controller with nowhere to
 write, because "cannot persist" and "will not start" are different answers and
 only one of them is acceptable for a control plane.
 
-`actor` reads `anonymous` and always will. That is ADR-0014 rather than an
-unfinished edge, and it is why nothing in `CommandKind` destroys anything.
+`actor` is the signed-in account (ADR-0020), and reads `anonymous` for entries
+written before accounts existed or with `auth.required: false`. Knowing who
+asked did not reopen the verb set: nothing in `CommandKind` destroys anything.
 
 ---
 
@@ -324,58 +327,55 @@ there too, on the machine the Controller is already sharing.
 
 ---
 
-## 4. Authentication — **decided against**. See ADR-0014
+## 4. Authentication — **built** (ADR-0020); destructive verbs — **still decided against** (ADR-0014)
 
-This was the largest open item that is not packaging, and it was a design
-question before it was a coding one. The design question has been answered:
-**there is no user identity model, and there will not be one at this scale.**
-[ADR-0014](adr/0014-no-user-identity.md) is the record; this is the summary.
+This was decided *against* until the deployment changed: the Controller now
+lives beside BYheaven and OmniBridge, which already have accounts and sign
+each other in, and a root-equivalent control plane with no login was the odd
+one out. [ADR-0020](adr/0020-authentication.md) is the record and supersedes
+the identity half of [ADR-0014](adr/0014-no-user-identity.md); this is the
+summary.
 
-The question underneath the three candidate shapes (local accounts, OIDC, a
-trusted proxy header) was never "which is best" — it was *who is this for*.
-The answer is one operator, one Controller, on a LAN they own, managing their
-own machines. There is no second user to distinguish from the first, so a
-login screen answers "the one person with the password did it", which is what
-the absence of a login screen already says. Every candidate was priced against
-that and none earned its cost.
+**What exists:** accounts in `<state_dir>/users.json` (scrypt), first-run setup
+(optionally behind `auth.setup_token`), an `HttpOnly` `SameSite=Strict` cookie
+session whose account is re-read on every request, per-address rate limiting and
+per-account lockout, BYheaven single-sign-on tickets (the same `v1.` format
+OmniBridge accepts), the control key `bystack-ctl` presents, and
+`bystack-ctl user add|passwd|enable|disable|list`. One ASGI middleware
+(`api/gate.py`) gates everything under `/api` **by default** — add a route and it
+is protected; the public list is `PUBLIC_PATHS` in `api/app.py` and the health
+probe must stay on it (the self-updater and the container healthcheck call it
+with no way to sign in).
 
-**Two consequences, and they are the decision rather than side-effects:**
+**Not built, on purpose:** roles, two-factor, personal API tokens, a user-
+management page, a change-password form, login events in the audit log. Each
+is described in ADR-0020 with the reason. Accounts are changed with
+`bystack-ctl user`; sign-ins go to the Controller log.
 
-1. **`actor` is `"anonymous"` permanently.** Not a placeholder. It records
-   that this platform does not know who asked and has decided not to find out,
-   which is true and therefore a better audit record than an invented name.
-   The client still cannot set it — an attacker-chosen name beside a real
-   operation looks like evidence, and that test stays.
-2. **`CommandKind` stays reversible-lifecycle-only permanently.** ADR-0012
-   made destructive verbs conditional on answering *who*; that condition is
-   now never met, so the conclusion is settled rather than pending. **Do not
-   add `remove`, `prune` or volume deletion.** Doing so requires superseding
-   ADR-0014 first, and the whole of §4's old warning still applies: it is the
-   one sequencing mistake this codebase has avoided and cannot be quietly
-   walked back.
+**What did not change, and must not be quietly walked back:**
 
-The second is what makes the first safe, and the pairing is the load-bearing
-part. No auth **and** no destructive verb means the worst case is "someone who
-could reach the port restarted a container" — recoverable, audited, visible in
-the topology within a second. No auth **with** `prune` means unrecoverable
-data loss with no attribution. Only one of those is acceptable, so the two
-decisions travel together or not at all.
+1. **`CommandKind` stays reversible-lifecycle-only.** ADR-0012 made destructive
+   verbs conditional on answering *who*; accounts answer *who* but not *who
+   may*. With no roles, `prune` would be one click from every login, including
+   one created for a colleague to look at the map. **Do not add `remove`,
+   `prune` or volume deletion** without an ADR that says what authorizes
+   them. Roles are the prerequisite, not the verbs.
+2. **The client cannot set `actor`.** The route fills it from the session the
+   gate authenticated; an attacker-chosen name beside a real operation looks
+   like evidence, and that test stays.
+3. **The health probe is public.** Gating it makes every update roll itself back.
 
-**The boundary that does exist**, and it is not nothing: `api.host` is
-`127.0.0.1` by default, the agent listener is mTLS with an internal CA and
-per-host approval (ADR-0011), and the local agent socket is 0600 in a 0700
-directory. `read_only` is **not** part of that boundary any more — ADR-0014
-flipped it to `false`, on the grounds that the verb set is what bounds the
-damage and a control plane that refuses every action on first run is a
-support burden rather than a secure default. The one
-thing an operator must understand is that setting `api.host` to `0.0.0.0`
-puts the whole control surface on the LAN with no second gate — which is the
-deployment ADR-0014 assumes and the reason it is not the default.
+**The boundary that exists:** a signed-in session, `api.host` on `127.0.0.1` by
+default, the agent listener's mTLS and per-host approval (ADR-0011), and the
+local agent socket (0600 in a 0700 directory). A session is a password over
+plain HTTP, so leaving loopback still means `ssh -L` or a TLS proxy. With the
+optional unit/process grants installed (ADR-0016), any account can add a unit
+to a host's watch list and stop it; that is intended, and README says so.
+`auth.required: false` is the ADR-0014 deployment, kept as a setting.
 
-**What would reopen this:** a second operator whose actions must be told
-apart, the Controller reachable from an untrusted network, or a destructive
-operation becoming genuinely necessary. Those change the deployment, which is
-what ADR-0014 is scoped to — a feature request does not.
+**What would reopen the verb decision:** roles that can say *this account may
+delete*. Everything else here is a feature request, not a change of
+deployment.
 
 ---
 

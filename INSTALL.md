@@ -117,9 +117,9 @@ Open <http://127.0.0.1:8000>.
 
 ### If you installed on a server you reach over SSH
 
-The dashboard is bound to loopback on purpose — nothing asks a browser for a
-password, so the Controller does not put itself on your network without being
-told to. Two ways to reach it:
+The dashboard is bound to loopback on purpose — the connection is plain HTTP,
+and a sign-in is a password, so the Controller does not put itself on your
+network without being told to. Two ways to reach it:
 
 **Forward the port** (nothing changes on the server, works over any SSH). Run
 this on *your* machine, not on the server:
@@ -153,7 +153,33 @@ docker compose up -d
 ```
 
 Then open `http://<server-ip>:8000`. Do this only on a private network, or put
-your own login page in front of it.
+a TLS proxy in front of it — the sign-in works without one, but the password
+crosses the network in the clear.
+
+**The first visit creates your account.** Either way you reach it, a new
+Controller asks for an administrator's name and password. (If others can reach
+the port before you do, set `BYSTACK_SETUP_TOKEN` first and the form asks for it.)
+More accounts and password changes are made on the Controller's machine. On a
+packaged install `bystack-ctl` is the Controller's own `ctl` subcommand —
+`sudo /opt/bystack/bin/bystack-controller ctl --config /etc/bystack/bystack.yaml user add alice`
+— and everything below works the same with that prefix:
+
+```bash
+bystack-ctl user add alice            # asks for a password; or pipe one in
+bystack-ctl user passwd alice         # ends alice's existing sign-ins
+bystack-ctl user disable alice        # and so does this; `enable` is the reverse
+bystack-ctl user list
+```
+
+**Signing in from BYheaven.** Put `BYSTACK_SSO_SECRET` (32+ characters,
+`openssl rand -hex 32`) in this Controller's environment — for a packaged
+install, a `BYSTACK_SSO_SECRET=…` line in `/etc/bystack/controller.env`
+(`chmod 600`, then `systemctl restart bystack-controller`); for the container,
+the same name in `.env` — put the same value in
+BYheaven's `.env` as `BYHEAVEN_SSO_BYSTACK`, and add ByStack there as a service
+with *Sign in with my BYheaven account* ticked. A click then signs in the
+account of the **same name**. It creates nothing: run `bystack-ctl user add` for
+each BYheaven user first, or they are refused.
 
 Either way, you should see the Controller's own containers on the map within a
 second or two. It manages itself automatically — you never add it as a server.
@@ -225,9 +251,9 @@ browser:
 - **That machine needs no internet.** The agent and the installer are uploaded
   over the same connection. Only a host whose architecture this Controller has
   no agent for fetches one from GitHub, and the dialog says so when it happens.
-- **Reach the dashboard over `ssh -L`.** Nothing here asks a browser for a
-  password, so a dashboard published on your network is one anybody on it can
-  post a root credential to. The dialog warns you when it is not on loopback.
+- **Reach the dashboard over `ssh -L`.** The dashboard asks for a sign-in, but
+  over plain HTTP the root credential typed into this form crosses the network
+  in the clear. The dialog warns you when it is not on loopback.
 
 The account has to be `root`, or one that can `sudo` without a password. A
 machine that already runs an agent is reported as *already managed* and is left
